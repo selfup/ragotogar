@@ -20,12 +20,12 @@ var sidecarExts = map[string]bool{
 var extToType = map[string]string{
 	"jpg": "JPEG", "jpeg": "JPEG",
 	"hif": "HIF", "heif": "HIF", "heic": "HIF",
-	"mov": "MOV",
-	"mp4": "MP4",
+	"mov":  "MOV",
+	"mp4":  "MP4",
 	"braw": "BRAW",
-	"nev": "NEV",
-	"ndf": "NDF",
-	"raf": "RAW", "arw": "RAW", "nef": "RAW", "cr2": "RAW",
+	"nev":  "NEV",
+	"ndf":  "NDF",
+	"raf":  "RAW", "arw": "RAW", "nef": "RAW", "cr2": "RAW",
 	"cr3": "RAW", "dng": "RAW", "orf": "RAW", "rw2": "RAW", "pef": "RAW",
 }
 
@@ -75,6 +75,13 @@ func organize(targetDir string, workers int) []error {
 			continue
 		}
 		name := e.Name()
+		// Skip macOS AppleDouble resource fork files (._*). These are metadata
+		// companions created on non-native filesystems (exFAT, FAT32, NTFS).
+		// Moving the real file causes macOS to remove the ._ file, so trying
+		// to move it separately results in "no such file or directory" errors.
+		if strings.HasPrefix(name, "._") {
+			continue
+		}
 		ext := extLower(name)
 		if ext == "" || isSidecar(ext) {
 			continue
@@ -110,6 +117,9 @@ func organize(targetDir string, workers int) []error {
 				continue
 			}
 			name := f.Name()
+			if strings.HasPrefix(name, "._") { // skip AppleDouble files
+				continue
+			}
 			ext := extLower(name)
 			if isSidecar(ext) {
 				continue
@@ -145,6 +155,9 @@ func organize(targetDir string, workers int) []error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
+		if strings.HasPrefix(info.Name(), "._") { // skip AppleDouble files
+			return nil
+		}
 		ext := extLower(info.Name())
 		if ext != "" && !isSidecar(ext) {
 			base := strings.TrimSuffix(info.Name(), filepath.Ext(info.Name()))
@@ -162,6 +175,9 @@ func organize(targetDir string, workers int) []error {
 			continue
 		}
 		name := e.Name()
+		if strings.HasPrefix(name, "._") { // skip AppleDouble files
+			continue
+		}
 		ext := extLower(name)
 		if !isSidecar(ext) {
 			continue
@@ -243,10 +259,8 @@ func prepareAndRunJobs(jobs []moveJob, workers int, count *int64) []error {
 	var printMu sync.Mutex
 	var errs []error
 
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for job := range ch {
 				if err := moveWithSidecars(job, &printMu); err != nil {
 					mu.Lock()
@@ -256,7 +270,7 @@ func prepareAndRunJobs(jobs []moveJob, workers int, count *int64) []error {
 					atomic.AddInt64(count, 1)
 				}
 			}
-		}()
+		})
 	}
 
 	for _, j := range jobs {

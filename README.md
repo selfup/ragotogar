@@ -38,6 +38,7 @@ go run main.go /path/to/directory
 - Sidecars travel with their parent file in the same goroutine
 - Birth time is required — the organizer errors on a file rather than silently falling back to mod time, which would group files by edit date instead of creation date
 - **macOS only** — uses `syscall.Stat_t.Birthtimespec` (the same field Finder displays as "Date Created")
+- **AppleDouble `._` files are skipped** — On non-native filesystems (exFAT, FAT32, NTFS — common on external SSDs like the Samsung T9), macOS creates hidden `._*` companion files to store extended attributes and resource forks. These files share the same extension as their parent (e.g. `._DSC00596.JPG`), so the organizer would otherwise treat them as real media files. However, when the real file is moved, macOS automatically cleans up the corresponding `._` file — causing a "no such file or directory" error when the organizer tries to move it separately. All `._` files are skipped in every pass.
 
 ## Tests
 

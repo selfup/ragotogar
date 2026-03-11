@@ -93,7 +93,7 @@ func generateFixtures(t *testing.T, dir string) *fixtureManifest {
 	}
 
 	// Orphan DOP sidecars (no matching media file)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		name := fmt.Sprintf("orphan_%04d.dop", i)
 		touchFile(t, filepath.Join(dir, name))
 		m.orphanSidecars[name] = true
@@ -101,7 +101,7 @@ func generateFixtures(t *testing.T, dir string) *fixtureManifest {
 	}
 
 	// Orphan XML sidecars (should default to MP4 folder)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		name := fmt.Sprintf("sony_orphan_%04d.xml", i)
 		touchFile(t, filepath.Join(dir, name))
 		m.orphanXMLs[name] = true
@@ -109,7 +109,7 @@ func generateFixtures(t *testing.T, dir string) *fixtureManifest {
 	}
 
 	// Mixed-case sidecar patterns
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		seq++
 		name := fmt.Sprintf("MixCase_%04d.arw", seq)
 		touchFile(t, filepath.Join(dir, name))
@@ -123,14 +123,14 @@ func generateFixtures(t *testing.T, dir string) *fixtureManifest {
 	}
 
 	// Files with no extension (should be skipped)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		name := fmt.Sprintf("noext_%04d", i)
 		touchFile(t, filepath.Join(dir, name))
 		m.totalFiles++
 	}
 
 	// Files with unknown extensions (should be skipped)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		name := fmt.Sprintf("unknown_%04d.xyz", i)
 		touchFile(t, filepath.Join(dir, name))
 		m.totalFiles++
