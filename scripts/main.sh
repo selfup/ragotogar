@@ -15,7 +15,7 @@ if [[ ! -d "$TARGET_DIR" ]]; then
   exit 1
 fi
 
-SIDECAR_EXTS=(xmp dxo dop pp3 xml)
+SIDECAR_EXTS=(dxo dop pp3 xml)
 
 ordinal_suffix() {
   local day=$1

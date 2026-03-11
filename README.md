@@ -1,24 +1,22 @@
 # claude_scripts
 
-A collection of utility shell scripts.
+A collection of utility shell scripts and a Go-based media organizer.
 
-## Scripts
+## Go Media Organizer (`main.go`)
 
-### `scripts/main.sh` — Media Organizer
-
-Organizes media files in a directory into a structured folder hierarchy by **file type** and **creation date**.
+Parallel rewrite of `scripts/main.sh` in Go. Uses a worker pool (`runtime.NumCPU()` goroutines) to move files concurrently across all 3 passes.
 
 **Usage:**
 
 ```bash
-./scripts/main.sh /path/to/directory
+go run main.go /path/to/directory
 ```
 
 **What it does (3 passes):**
 
 1. **Organize by type** — Moves files into folders based on extension (JPEG, RAW, HIF, MOV, MP4, BRAW, NEV, NDF)
-2. **Organize by date** — Within each type folder, groups files into date-based subfolders (e.g. `March11th2026`)
-3. **Reunite sidecars** — Finds orphaned sidecar files (xmp, dxo, dop, pp3, xml) and moves them next to their parent media file
+2. **Organize by date** — Within each type folder, groups files into date-based subfolders using the file's birth time (e.g. `March11th2026`)
+3. **Reunite sidecars** — Finds orphaned sidecar files (dxo, dop, pp3, xml) and moves them next to their parent media file. Orphan XML sidecars with no parent default to the MP4 folder (Sony workflow).
 
 **Supported formats:**
 
@@ -33,13 +31,54 @@ Organizes media files in a directory into a structured folder hierarchy by **fil
 | NEV | nev |
 | NDF | ndf |
 
+**Key details:**
+
+- Jobs are sorted by destination and filename before dispatch for deterministic ordering
+- All destination directories are pre-created before workers start (no race conditions)
+- Sidecars travel with their parent file in the same goroutine
+- Birth time is required — the organizer errors on a file rather than silently falling back to mod time, which would group files by edit date instead of creation date
+- **macOS only** — uses `syscall.Stat_t.Birthtimespec` (the same field Finder displays as "Date Created")
+
+## Tests
+
+```bash
+go test -v ./...
+```
+
+**How the tests work:**
+
+1. **Fixture generation** — `TestOrganize` generates 1000+ empty files in a temp directory, simulating output from 10 different cameras (Sony, Canon, Fuji, Nikon, Blackmagic, DJI, GoPro, Phase One, Panasonic) with a mix of media extensions, sidecar files, uppercase extensions, orphan sidecars, files with no extension, and unknown extensions
+2. **Immutable copy** — Fixtures are copied to a separate working directory before the organizer runs. The original fixture directory is verified unchanged both before and after the organize step
+3. **Validation** — After organizing, the test checks:
+   - Every media file is in the correct `TypeFolder/DateFolder/` path
+   - Every sidecar with a parent is in the same directory as its parent
+   - Orphan XMP sidecars still exist (left in place)
+   - Orphan XML sidecars ended up in `MP4/<date>/`
+   - No media files remain in the root directory
+   - No files were lost (total count is preserved)
+   - No files ended up in the wrong type folder
+
+**Caveats:**
+
+- **All test files share the same birth time** — macOS birth time is set at file creation and cannot be changed via `os.Chtimes` or any standard Go API. Since all fixtures are created during the same test run, they all get the same birth date. This means the date-grouping pass puts everything into a single date folder. The test reads the actual birth time to determine the expected folder name rather than assuming a specific date.
+- **No multi-date coverage in integration test** — Because of the birth time limitation above, the test cannot verify that files from different days end up in different date folders. The `TestFormatDate` and `TestOrdinalSuffix` unit tests cover the date formatting logic independently.
+- **macOS only** — The `birthTime` function uses `syscall.Stat_t.Birthtimespec` which is macOS-specific. Tests will not compile on Linux.
+
+## Shell Scripts
+
+### `scripts/main.sh` — Media Organizer (Bash)
+
+The original single-threaded bash version of the media organizer. Same 3-pass logic as the Go version.
+
+```bash
+./scripts/main.sh /path/to/directory
+```
+
 **Requirements:** macOS (uses `stat -f %B` and `date -r` for file birth time)
 
 ### `scripts/sync_to_nas.sh` — NAS Sync
 
 Syncs camera directories to a mounted NAS volume using rsync. Each subdirectory in the source (one per camera) is synced to a matching folder on the NAS.
-
-**Usage:**
 
 ```bash
 ./scripts/sync_to_nas.sh /Volumes/CameraCards /Volumes/NAS/Media
