@@ -34,3 +34,22 @@ Organizes media files in a directory into a structured folder hierarchy by **fil
 | NDF | ndf |
 
 **Requirements:** macOS (uses `stat -f %B` and `date -r` for file birth time)
+
+### `scripts/sync_to_nas.sh` — NAS Sync
+
+Syncs camera directories to a mounted NAS volume using rsync. Each subdirectory in the source (one per camera) is synced to a matching folder on the NAS.
+
+**Usage:**
+
+```bash
+./scripts/sync_to_nas.sh /Volumes/CameraCards /Volumes/NAS/Media
+```
+
+**Behavior:**
+
+- New files are copied over
+- Existing files are only overwritten if the source is newer (`--update`)
+- Destination directories are created automatically
+- Preserves timestamps, permissions, and directory structure (`-a`)
+
+**Requirements:** macOS, mounted NAS volume
