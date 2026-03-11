@@ -1,4 +1,4 @@
-# claude_scripts
+# Organize Photos and Sync
 
 A collection of utility shell scripts and a Go-based media organizer.
 
