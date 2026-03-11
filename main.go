@@ -14,7 +14,7 @@ import (
 )
 
 var sidecarExts = map[string]bool{
-	"dxo": true, "dop": true, "pp3": true, "xml": true,
+	"dxo": true, "dop": true, "pp3": true, "xml": true, "aac": true, "lrf": true, "mp3": true,
 }
 
 var extToType = map[string]string{
@@ -27,6 +27,7 @@ var extToType = map[string]string{
 	"ndf":  "NDF",
 	"raf":  "RAW", "arw": "RAW", "nef": "RAW", "cr2": "RAW",
 	"cr3": "RAW", "dng": "RAW", "orf": "RAW", "rw2": "RAW", "pef": "RAW",
+	"wav": "AUDIO",
 }
 
 type moveJob struct {
@@ -206,7 +207,7 @@ func organize(targetDir string, workers int) []error {
 				src:     fullPath,
 				destDir: filepath.Dir(parentPath),
 			})
-		} else if ext == "xml" {
+		} else if ext == "xml" || ext == "aac" {
 			btime, err := birthTime(fullPath)
 			if err != nil {
 				allErrs = append(allErrs, err)
@@ -216,6 +217,17 @@ func organize(targetDir string, workers int) []error {
 			pass3Jobs = append(pass3Jobs, moveJob{
 				src:     fullPath,
 				destDir: filepath.Join(targetDir, "MP4", dateFolder),
+			})
+		} else if ext == "mp3" {
+			btime, err := birthTime(fullPath)
+			if err != nil {
+				allErrs = append(allErrs, err)
+				continue
+			}
+			dateFolder := formatDate(btime)
+			pass3Jobs = append(pass3Jobs, moveJob{
+				src:     fullPath,
+				destDir: filepath.Join(targetDir, "AUDIO", dateFolder),
 			})
 		} else {
 			fmt.Printf("  %s — no parent found, leaving in place\n", name)

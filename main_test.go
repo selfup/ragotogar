@@ -26,10 +26,12 @@ var testCameras = []camera{
 	{name: "NikonZ9", mediaExts: []string{"nef", "mov"}, sidecarExts: []string{"dxo"}, fileCount: 70},
 	{name: "BMPCC6K", mediaExts: []string{"braw"}, sidecarExts: []string{"dop"}, fileCount: 40},
 	{name: "DJIMini", mediaExts: []string{"dng", "mp4", "jpg"}, sidecarExts: []string{}, fileCount: 60},
+	{name: "DJIPocket3", mediaExts: []string{"mp4"}, sidecarExts: []string{"aac"}, fileCount: 40},
 	{name: "GoPro12", mediaExts: []string{"mp4", "jpg"}, sidecarExts: []string{}, fileCount: 50},
 	{name: "PhaseOne", mediaExts: []string{"dng", "hif"}, sidecarExts: []string{"pp3"}, fileCount: 30},
 	{name: "SonyFX3", mediaExts: []string{"mp4"}, sidecarExts: []string{"xml"}, fileCount: 40},
 	{name: "PanaS5", mediaExts: []string{"rw2", "mov", "jpg"}, sidecarExts: []string{}, fileCount: 50},
+	{name: "AudioRec", mediaExts: []string{"wav"}, sidecarExts: []string{"mp3"}, fileCount: 30},
 }
 
 type fixtureManifest struct {
@@ -39,8 +41,10 @@ type fixtureManifest struct {
 	sidecarFiles map[string]string
 	// orphanSidecars tracks sidecars with no parent media file
 	orphanSidecars map[string]bool
-	// orphanXMLs tracks XML sidecars with no parent (should go to MP4)
+	// orphanXMLs tracks XML/AAC sidecars with no parent (should go to MP4)
 	orphanXMLs map[string]bool
+	// orphanMP3s tracks MP3 sidecars with no parent WAV (should go to AUDIO)
+	orphanMP3s map[string]bool
 	// totalFiles is the total count of all created files
 	totalFiles int
 }
@@ -56,6 +60,7 @@ func generateFixtures(t *testing.T, dir string) *fixtureManifest {
 		sidecarFiles:   make(map[string]string),
 		orphanSidecars: make(map[string]bool),
 		orphanXMLs:     make(map[string]bool),
+		orphanMP3s:     make(map[string]bool),
 	}
 
 	seq := 0
@@ -105,6 +110,22 @@ func generateFixtures(t *testing.T, dir string) *fixtureManifest {
 		name := fmt.Sprintf("sony_orphan_%04d.xml", i)
 		touchFile(t, filepath.Join(dir, name))
 		m.orphanXMLs[name] = true
+		m.totalFiles++
+	}
+
+	// Orphan AAC sidecars (should default to MP4 folder, like XML)
+	for i := range 5 {
+		name := fmt.Sprintf("dji_orphan_%04d.aac", i)
+		touchFile(t, filepath.Join(dir, name))
+		m.orphanXMLs[name] = true
+		m.totalFiles++
+	}
+
+	// Orphan MP3 sidecars (no matching WAV, should go to AUDIO)
+	for i := range 5 {
+		name := fmt.Sprintf("solo_track_%04d.mp3", i)
+		touchFile(t, filepath.Join(dir, name))
+		m.orphanMP3s[name] = true
 		m.totalFiles++
 	}
 
@@ -285,11 +306,19 @@ func TestOrganize(t *testing.T) {
 		}
 	}
 
-	// Verify: orphan XML sidecars went to MP4/<date>/
+	// Verify: orphan XML/AAC sidecars went to MP4/<date>/
 	for name := range manifest.orphanXMLs {
 		expected := filepath.Join("MP4", expectedDateFolder, name)
 		if !organized[expected] {
-			t.Errorf("orphan XML %s not found at expected path: %s", name, expected)
+			t.Errorf("orphan XML/AAC %s not found at expected path: %s", name, expected)
+		}
+	}
+
+	// Verify: orphan MP3 sidecars went to AUDIO/<date>/
+	for name := range manifest.orphanMP3s {
+		expected := filepath.Join("AUDIO", expectedDateFolder, name)
+		if !organized[expected] {
+			t.Errorf("orphan MP3 %s not found at expected path: %s", name, expected)
 		}
 	}
 

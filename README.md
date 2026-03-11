@@ -16,7 +16,7 @@ go run main.go /path/to/directory
 
 1. **Organize by type** — Moves files into folders based on extension (JPEG, RAW, HIF, MOV, MP4, BRAW, NEV, NDF)
 2. **Organize by date** — Within each type folder, groups files into date-based subfolders using the file's birth time (e.g. `March11th2026`)
-3. **Reunite sidecars** — Finds orphaned sidecar files (dxo, dop, pp3, xml) and moves them next to their parent media file. Orphan XML sidecars with no parent default to the MP4 folder (Sony workflow).
+3. **Reunite sidecars** — Finds orphaned sidecar files (dxo, dop, pp3, xml, aac, lrf, mp3) and moves them next to their parent media file. Orphan XML/AAC sidecars default to MP4 (Sony/DJI workflow). Orphan MP3s (no matching WAV) default to AUDIO.
 
 **Supported formats:**
 
@@ -30,6 +30,7 @@ go run main.go /path/to/directory
 | BRAW | braw |
 | NEV | nev |
 | NDF | ndf |
+| AUDIO | wav |
 
 **Key details:**
 
