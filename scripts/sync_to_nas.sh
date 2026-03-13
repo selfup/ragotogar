@@ -35,7 +35,7 @@ for camera_dir in "$SOURCE_DIR"/*/; do
   camera_name=$(basename "$camera_dir")
   echo "--- $camera_name ---"
 
-  rsync -avh --update --progress "$camera_dir" "$NAS_DEST/$camera_name/"
+  rsync -avh --update --progress --exclude='._*' --exclude='.DS_Store' "$camera_dir" "$NAS_DEST/$camera_name/"
 
   echo ""
 done
