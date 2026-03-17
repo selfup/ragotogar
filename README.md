@@ -10,6 +10,9 @@ Parallel rewrite of `scripts/main.sh` in Go. Uses a worker pool (`runtime.NumCPU
 
 ```bash
 go run main.go /path/to/directory
+
+# Use modification time instead of birth time for date folders
+go run main.go -mtime /path/to/directory
 ```
 
 **What it does (3 passes):**
@@ -37,7 +40,7 @@ go run main.go /path/to/directory
 - Jobs are sorted by destination and filename before dispatch for deterministic ordering
 - All destination directories are pre-created before workers start (no race conditions)
 - Sidecars travel with their parent file in the same goroutine
-- Birth time is required — the organizer errors on a file rather than silently falling back to mod time, which would group files by edit date instead of creation date
+- By default, birth time is used for date folders. If files on a drive all share the same birth time (common when bulk-copied to a new drive), use `-mtime` to organize by modification time instead
 - **macOS only** — uses `syscall.Stat_t.Birthtimespec` (the same field Finder displays as "Date Created")
 - **AppleDouble `._` files are skipped** — On non-native filesystems (exFAT, FAT32, NTFS — common on external SSDs like the Samsung T9), macOS creates hidden `._*` companion files to store extended attributes and resource forks. These files share the same extension as their parent (e.g. `._DSC00596.JPG`), so the organizer would otherwise treat them as real media files. However, when the real file is moved, macOS automatically cleans up the corresponding `._` file — causing a "no such file or directory" error when the organizer tries to move it separately. All `._` files are skipped in every pass.
 
@@ -64,7 +67,7 @@ go test -v ./...
 
 - **All test files share the same birth time** — macOS birth time is set at file creation and cannot be changed via `os.Chtimes` or any standard Go API. Since all fixtures are created during the same test run, they all get the same birth date. This means the date-grouping pass puts everything into a single date folder. The test reads the actual birth time to determine the expected folder name rather than assuming a specific date.
 - **No multi-date coverage in integration test** — Because of the birth time limitation above, the test cannot verify that files from different days end up in different date folders. The `TestFormatDate` and `TestOrdinalSuffix` unit tests cover the date formatting logic independently.
-- **macOS only** — The `birthTime` function uses `syscall.Stat_t.Birthtimespec` which is macOS-specific. Tests will not compile on Linux.
+- **macOS only** — The `fileTime` function uses `syscall.Stat_t.Birthtimespec` / `Mtimespec` which are macOS-specific. Tests will not compile on Linux.
 
 ## Shell Scripts
 

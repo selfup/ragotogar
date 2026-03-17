@@ -238,7 +238,7 @@ func TestOrganize(t *testing.T) {
 		if e.IsDir() {
 			continue
 		}
-		bt, err := birthTime(filepath.Join(workDir, e.Name()))
+		bt, err := fileTime(filepath.Join(workDir, e.Name()))
 		if err != nil {
 			t.Fatalf("could not get birth time for test file: %v", err)
 		}
