@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"syscall"
 	"time"
 )
+
+var useMtime bool
 
 var sidecarExts = map[string]bool{
 	"dxo": true, "dop": true, "pp3": true, "xml": true, "aac": true, "lrf": true, "mp3": true,
@@ -36,12 +39,15 @@ type moveJob struct {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <directory>\n", os.Args[0])
+	flag.BoolVar(&useMtime, "mtime", false, "Use modification time instead of birth time for date folders")
+	flag.Parse()
+
+	if flag.NArg() != 1 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-mtime] <directory>\n", os.Args[0])
 		os.Exit(1)
 	}
 
-	targetDir := os.Args[1]
+	targetDir := flag.Arg(0)
 	info, err := os.Stat(targetDir)
 	if err != nil || !info.IsDir() {
 		fmt.Fprintf(os.Stderr, "Error: '%s' is not a directory\n", targetDir)
@@ -102,7 +108,11 @@ func organize(targetDir string, workers int) []error {
 	fmt.Printf("  Moved %d files (%d skipped)\n\n", moved, skipped)
 
 	// Pass 2: Organize by date
-	fmt.Println("=== Pass 2: Organizing files by creation date ===")
+		if useMtime {
+		fmt.Println("=== Pass 2: Organizing files by modification date ===")
+	} else {
+		fmt.Println("=== Pass 2: Organizing files by creation date ===")
+	}
 	var movedP2 int64
 	var pass2Jobs []moveJob
 
@@ -126,7 +136,7 @@ func organize(targetDir string, workers int) []error {
 				continue
 			}
 			fullPath := filepath.Join(typePath, name)
-			btime, err := birthTime(fullPath)
+			btime, err := fileTime(fullPath)
 			if err != nil {
 				allErrs = append(allErrs, err)
 				continue
@@ -208,7 +218,7 @@ func organize(targetDir string, workers int) []error {
 				destDir: filepath.Dir(parentPath),
 			})
 		} else if ext == "xml" || ext == "aac" {
-			btime, err := birthTime(fullPath)
+			btime, err := fileTime(fullPath)
 			if err != nil {
 				allErrs = append(allErrs, err)
 				continue
@@ -219,7 +229,7 @@ func organize(targetDir string, workers int) []error {
 				destDir: filepath.Join(targetDir, "MP4", dateFolder),
 			})
 		} else if ext == "mp3" {
-			btime, err := birthTime(fullPath)
+			btime, err := fileTime(fullPath)
 			if err != nil {
 				allErrs = append(allErrs, err)
 				continue
@@ -350,10 +360,13 @@ func isSidecar(ext string) bool {
 	return sidecarExts[ext]
 }
 
-func birthTime(path string) (time.Time, error) {
+func fileTime(path string) (time.Time, error) {
 	var st syscall.Stat_t
 	if err := syscall.Stat(path, &st); err != nil {
 		return time.Time{}, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if useMtime {
+		return time.Unix(st.Mtimespec.Sec, st.Mtimespec.Nsec), nil
 	}
 	bt := time.Unix(st.Birthtimespec.Sec, st.Birthtimespec.Nsec)
 	if bt.IsZero() {

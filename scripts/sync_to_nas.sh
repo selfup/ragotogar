@@ -29,6 +29,10 @@ echo "Source: $SOURCE_DIR"
 echo "Destination: $NAS_DEST"
 echo ""
 
+rsync -avh --update --progress --exclude='._*' --exclude='.DS_Store' \
+  --exclude='*/' \
+  "$SOURCE_DIR/" "$NAS_DEST/"
+
 for camera_dir in "$SOURCE_DIR"/*/; do
   [[ -d "$camera_dir" ]] || continue
 
