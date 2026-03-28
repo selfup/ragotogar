@@ -125,6 +125,18 @@ Syncs camera directories to a mounted NAS volume using rclone with parallel tran
 
 **Requirements:** macOS, [rclone](https://rclone.org/), mounted NAS volume
 
+### `scripts/exif_fix.sh` — EXIF Date Fix
+
+Sets file created and modified dates from EXIF `DateTimeOriginal`. Recursively processes all supported image formats. Useful when files have been bulk-copied and lost their original filesystem dates.
+
+```bash
+./scripts/exif_fix.sh /Volumes/CameraCards/organized
+```
+
+**Supported extensions:** jpg, jpeg, hif, heif, heic, raf, arw, nef, cr2, cr3, dng, orf, rw2, pef
+
+**Requirements:** [exiftool](https://exiftool.org/) (`brew install exiftool`)
+
 ### `scripts/sync_to_nas.sh` — NAS Sync (rsync)
 
 Syncs camera directories to a mounted NAS volume using rsync. Each subdirectory in the source (one per camera) is synced to a matching folder on the NAS.
