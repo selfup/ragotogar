@@ -71,6 +71,25 @@ go test -v ./...
 
 ## Shell Scripts
 
+### Shared Config (`scripts/.files.env`)
+
+All scripts source `scripts/.files.env` for directory name definitions:
+
+```bash
+PHOTO_DIRS=("JPEG" "HIF" "RAW")
+VIDEO_DIRS=("MOV" "MP4" "BRAW" "NEV" "NDF")
+AUDIO_DIRS=("AUDIO")
+```
+
+### `scripts/organize.sh` — Go Organizer Wrapper
+
+Convenience wrapper that runs the Go media organizer. Passes all arguments through.
+
+```bash
+./scripts/organize.sh /path/to/directory
+./scripts/organize.sh -mtime /path/to/directory
+```
+
 ### `scripts/main.sh` — Media Organizer (Bash)
 
 The original single-threaded bash version of the media organizer. Same 3-pass logic as the Go version.
@@ -81,7 +100,32 @@ The original single-threaded bash version of the media organizer. Same 3-pass lo
 
 **Requirements:** macOS (uses `stat -f %B` and `date -r` for file birth time)
 
-### `scripts/sync_to_nas.sh` — NAS Sync
+### `scripts/clone.sh` — NAS Sync (rclone)
+
+Syncs camera directories to a mounted NAS volume using rclone with parallel transfers.
+
+```bash
+./scripts/clone.sh /Volumes/CameraCards /Volumes/NAS/Media
+./scripts/clone.sh -t 4 --no-videos /Volumes/CameraCards /Volumes/NAS/Media
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-t NUM` | Number of parallel transfers (default: 2) |
+| `--no-videos` | Exclude video directories (MOV, MP4, BRAW, NEV, NDF) |
+
+**Behavior:**
+
+- New files are copied over
+- Existing files are only overwritten if the source is newer (`--update`)
+- Destination directories are created automatically
+- Excludes `._*` and `.DS_Store` files
+
+**Requirements:** macOS, [rclone](https://rclone.org/), mounted NAS volume
+
+### `scripts/sync_to_nas.sh` — NAS Sync (rsync)
 
 Syncs camera directories to a mounted NAS volume using rsync. Each subdirectory in the source (one per camera) is synced to a matching folder on the NAS.
 
