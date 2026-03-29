@@ -46,15 +46,29 @@ Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutine
 
 ## Tests
 
-```bash
-# Organize tests
-cd cmd/organize && go test -v ./...
+Run the full test suite (all Go and bash tests):
 
-# Clone tests
-cd cmd/clone && go test -v ./...
+```bash
+./test.sh
 ```
 
-**How the tests work:**
+Or run individually:
+
+```bash
+# Go tests
+cd cmd/organize && go test -v ./...
+
+# Individual bash test scripts
+./scripts/clone_test.sh
+./scripts/exif_fix_test.sh
+./scripts/flatten_test.sh
+./scripts/organize_test.sh
+./scripts/sync_to_nas_test.sh
+```
+
+`test.sh` auto-discovers all `cmd/*/go.mod` Go modules and all `scripts/*_test.sh` bash tests.
+
+**Go organizer test details:**
 
 1. **Fixture generation** — `TestOrganize` generates 1000+ empty files in a temp directory, simulating output from 10 different cameras (Sony, Canon, Fuji, Nikon, Blackmagic, DJI, GoPro, Phase One, Panasonic) with a mix of media extensions, sidecar files, uppercase extensions, orphan sidecars, files with no extension, and unknown extensions
 2. **Immutable copy** — Fixtures are copied to a separate working directory before the organizer runs. The original fixture directory is verified unchanged both before and after the organize step
@@ -145,34 +159,6 @@ Syncs camera directories to a mounted NAS volume using rclone with parallel tran
 
 **Requirements:** macOS, [rclone](https://rclone.org/), mounted NAS volume
 
-### `scripts/go_clone.sh` — NAS Sync (Go)
-
-Lightweight parallel file copier — a simpler, faster alternative to rclone for local-to-NAS copies. Skips files where the destination already has the same size and same/newer mtime. No checksums, no config, no external dependencies.
-
-```bash
-# Sync everything
-./scripts/go_clone.sh /Volumes/Organized /Volumes/NAS/Media
-
-# Parallel transfers, no videos
-./scripts/go_clone.sh -t 4 --no-videos /Volumes/Organized /Volumes/NAS/Media
-```
-
-**Options:**
-
-| Flag | Description |
-|------|-------------|
-| `-t NUM` | Number of parallel transfers (default: 2) |
-| `--no-videos` | Exclude video directories (MOV, MP4, BRAW, NEV, NDF) |
-
-**Behavior:**
-
-- Walks the source tree recursively, compares each file against the destination
-- Copies new files and overwrites files where the source is newer
-- Preserves modification time on copied files (so subsequent runs skip correctly)
-- Excludes `._*`, `.DS_Store`, and hidden directories
-- Shows a file manifest before copying, with per-worker progress output
-- Uses 4MB copy buffers per worker for efficient large file transfers
-
 ### `scripts/flatten.sh` — Directory Flattener
 
 Pulls all files from nested subdirectories into a single target directory, then removes empty subdirectories. Useful as a pre-organize step when importing from cameras with nested folder structures.
@@ -183,14 +169,6 @@ Pulls all files from nested subdirectories into a single target directory, then 
 
 - Handles name collisions by appending a counter suffix (`file_1.jpg`, `file_2.jpg`)
 - Skips macOS `._` resource fork files
-
-### `scripts/test_clone.sh` — Clone Script Tests
-
-Runs clone.sh against temp directories with synthetic date folders and prints the results for each filter combination.
-
-```bash
-./scripts/test_clone.sh
-```
 
 ### `scripts/exif_fix.sh` — EXIF Date Fix
 
