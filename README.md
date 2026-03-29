@@ -102,11 +102,26 @@ The original single-threaded bash version of the media organizer. Same 3-pass lo
 
 ### `scripts/clone.sh` — NAS Sync (rclone)
 
-Syncs camera directories to a mounted NAS volume using rclone with parallel transfers.
+Syncs camera directories to a mounted NAS volume using rclone with parallel transfers. Supports month and year filtering to selectively sync date folders (e.g. `March3rd2024`).
 
 ```bash
-./scripts/clone.sh /Volumes/CameraCards /Volumes/NAS/Media
-./scripts/clone.sh -t 4 --no-videos /Volumes/CameraCards /Volumes/NAS/Media
+# Sync everything
+./scripts/clone.sh /Volumes/Organized /Volumes/NAS/Media
+
+# Parallel transfers, no videos
+./scripts/clone.sh -t 4 --no-videos /Volumes/Organized /Volumes/NAS/Media
+
+# March onward, all years
+./scripts/clone.sh -m Mar /Volumes/Organized /Volumes/NAS/Media
+
+# Only February and April of 2025
+./scripts/clone.sh -m "Feb,Apr" -y 2025 /Volumes/Organized /Volumes/NAS/Media
+
+# All of 2024
+./scripts/clone.sh -y 2024 /Volumes/Organized /Volumes/NAS/Media
+
+# June onward, 2025 only, no videos, 4 transfers
+./scripts/clone.sh -m Jun -y 2025 -t 4 --no-videos /Volumes/Organized /Volumes/NAS/Media
 ```
 
 **Options:**
@@ -115,6 +130,17 @@ Syncs camera directories to a mounted NAS volume using rclone with parallel tran
 |------|-------------|
 | `-t NUM` | Number of parallel transfers (default: 2) |
 | `--no-videos` | Exclude video directories (MOV, MP4, BRAW, NEV, NDF) |
+| `-m MONTH` | Month filter — single month (e.g. `Mar`) syncs from that month through December; comma-delimited (e.g. `"Feb,Apr,Jun"`) syncs only those months. Accepts full names or abbreviations. |
+| `-y YEAR` | Year filter — only sync date folders matching that year. Without `-m`, syncs all months of that year. |
+
+**Month/year filter behavior:**
+
+- `-m Mar` — March through December, all years
+- `-m "Feb,Jun"` — only February and June, all years
+- `-y 2024` — all months, 2024 only
+- `-m Mar -y 2025` — March through December, 2025 only
+- No flags — syncs everything (including top-level files)
+- When a date filter is active, top-level files (outside date folders) are skipped
 
 **Behavior:**
 
@@ -124,6 +150,25 @@ Syncs camera directories to a mounted NAS volume using rclone with parallel tran
 - Excludes `._*` and `.DS_Store` files
 
 **Requirements:** macOS, [rclone](https://rclone.org/), mounted NAS volume
+
+### `scripts/flatten.sh` — Directory Flattener
+
+Pulls all files from nested subdirectories into a single target directory, then removes empty subdirectories. Useful as a pre-organize step when importing from cameras with nested folder structures.
+
+```bash
+./scripts/flatten.sh /Volumes/CameraCard/DCIM
+```
+
+- Handles name collisions by appending a counter suffix (`file_1.jpg`, `file_2.jpg`)
+- Skips macOS `._` resource fork files
+
+### `scripts/test_clone.sh` — Clone Script Tests
+
+Runs clone.sh against temp directories with synthetic date folders and prints the results for each filter combination.
+
+```bash
+./scripts/test_clone.sh
+```
 
 ### `scripts/exif_fix.sh` — EXIF Date Fix
 
