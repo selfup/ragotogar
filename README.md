@@ -2,17 +2,17 @@
 
 A collection of utility shell scripts and a Go-based media organizer.
 
-## Go Media Organizer (`main.go`)
+## Go Media Organizer (`cmd/organize`)
 
-Parallel rewrite of `scripts/main.sh` in Go. Uses a worker pool (`runtime.NumCPU()` goroutines) to move files concurrently across all 3 passes.
+Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutines) to move files concurrently across all 3 passes.
 
 **Usage:**
 
 ```bash
-go run main.go /path/to/directory
+./scripts/organize.sh /path/to/directory
 
 # Use modification time instead of birth time for date folders
-go run main.go -mtime /path/to/directory
+./scripts/organize.sh -mtime /path/to/directory
 ```
 
 **What it does (3 passes):**
@@ -47,7 +47,11 @@ go run main.go -mtime /path/to/directory
 ## Tests
 
 ```bash
-go test -v ./...
+# Organize tests
+cd cmd/organize && go test -v ./...
+
+# Clone tests
+cd cmd/clone && go test -v ./...
 ```
 
 **How the tests work:**
@@ -89,16 +93,6 @@ Convenience wrapper that runs the Go media organizer. Passes all arguments throu
 ./scripts/organize.sh /path/to/directory
 ./scripts/organize.sh -mtime /path/to/directory
 ```
-
-### `scripts/main.sh` — Media Organizer (Bash)
-
-The original single-threaded bash version of the media organizer. Same 3-pass logic as the Go version.
-
-```bash
-./scripts/main.sh /path/to/directory
-```
-
-**Requirements:** macOS (uses `stat -f %B` and `date -r` for file birth time)
 
 ### `scripts/clone.sh` — NAS Sync (rclone)
 
@@ -150,6 +144,34 @@ Syncs camera directories to a mounted NAS volume using rclone with parallel tran
 - Excludes `._*` and `.DS_Store` files
 
 **Requirements:** macOS, [rclone](https://rclone.org/), mounted NAS volume
+
+### `scripts/go_clone.sh` — NAS Sync (Go)
+
+Lightweight parallel file copier — a simpler, faster alternative to rclone for local-to-NAS copies. Skips files where the destination already has the same size and same/newer mtime. No checksums, no config, no external dependencies.
+
+```bash
+# Sync everything
+./scripts/go_clone.sh /Volumes/Organized /Volumes/NAS/Media
+
+# Parallel transfers, no videos
+./scripts/go_clone.sh -t 4 --no-videos /Volumes/Organized /Volumes/NAS/Media
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-t NUM` | Number of parallel transfers (default: 2) |
+| `--no-videos` | Exclude video directories (MOV, MP4, BRAW, NEV, NDF) |
+
+**Behavior:**
+
+- Walks the source tree recursively, compares each file against the destination
+- Copies new files and overwrites files where the source is newer
+- Preserves modification time on copied files (so subsequent runs skip correctly)
+- Excludes `._*`, `.DS_Store`, and hidden directories
+- Shows a file manifest before copying, with per-worker progress output
+- Uses 4MB copy buffers per worker for efficient large file transfers
 
 ### `scripts/flatten.sh` — Directory Flattener
 
