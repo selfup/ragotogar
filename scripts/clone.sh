@@ -118,7 +118,10 @@ fi
 SOURCE_DIR="$1"
 NAS_DEST="$2"
 
-EXCLUDE_ARGS=(--exclude='._*' --exclude='.DS_Store')
+EXCLUDE_ARGS=()
+for pattern in "${MACOS_EXCLUDES[@]}"; do
+  EXCLUDE_ARGS+=(--exclude="$pattern")
+done
 
 if [[ "$EXCLUDE_VIDEOS" == true ]]; then
   for vdir in "${VIDEO_DIRS[@]}"; do
@@ -203,8 +206,7 @@ for camera_dir in "$SOURCE_DIR"/*/; do
 
   if [[ "$HAS_DATE_FILTER" == true ]]; then
     rclone copy "$camera_dir" "$NAS_DEST/$camera_name/" \
-      --exclude='._*' \
-      --exclude='.DS_Store' \
+      "${EXCLUDE_ARGS[@]}" \
       "${DATE_FILTER_ARGS[@]}" \
       --update \
       --transfers="$TRANSFERS" \
@@ -212,8 +214,7 @@ for camera_dir in "$SOURCE_DIR"/*/; do
       -v
   else
     rclone copy "$camera_dir" "$NAS_DEST/$camera_name/" \
-      --exclude='._*' \
-      --exclude='.DS_Store' \
+      "${EXCLUDE_ARGS[@]}" \
       --update \
       --transfers="$TRANSFERS" \
       --progress \

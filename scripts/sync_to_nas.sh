@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/.files.env"
+
 # Usage: ./sync_to_nas.sh /path/to/cameras /Volumes/NAS/Media
 
 if [[ $# -ne 2 ]]; then
@@ -24,12 +27,17 @@ if [[ ! -d "$NAS_DEST" ]]; then
   exit 1
 fi
 
+EXCLUDE_ARGS=()
+for pattern in "${MACOS_EXCLUDES[@]}"; do
+  EXCLUDE_ARGS+=(--exclude="$pattern")
+done
+
 echo "=== Syncing cameras to NAS ==="
 echo "Source: $SOURCE_DIR"
 echo "Destination: $NAS_DEST"
 echo ""
 
-rsync -avh --update --progress --exclude='._*' --exclude='.DS_Store' \
+rsync -avh --update --progress "${EXCLUDE_ARGS[@]}" \
   --exclude='*/' \
   "$SOURCE_DIR/" "$NAS_DEST/"
 
@@ -39,7 +47,7 @@ for camera_dir in "$SOURCE_DIR"/*/; do
   camera_name=$(basename "$camera_dir")
   echo "--- $camera_name ---"
 
-  rsync -avh --update --progress --exclude='._*' --exclude='.DS_Store' "$camera_dir" "$NAS_DEST/$camera_name/"
+  rsync -avh --update --progress "${EXCLUDE_ARGS[@]}" "$camera_dir" "$NAS_DEST/$camera_name/"
 
   echo ""
 done

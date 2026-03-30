@@ -97,6 +97,9 @@ All scripts source `scripts/.files.env` for directory name definitions:
 PHOTO_DIRS=("JPEG" "HIF" "RAW")
 VIDEO_DIRS=("MOV" "MP4" "BRAW" "NEV" "NDF")
 AUDIO_DIRS=("AUDIO")
+
+PHOTO_EXTS=("jpg" "jpeg" "hif" "heif" "heic" "raf" "arw" "nef" "cr2" "cr3" "dng" "orf" "rw2" "pef")
+MACOS_EXCLUDES=("._*" ".DS_Store")
 ```
 
 ### `scripts/organize.sh` — Go Organizer Wrapper
