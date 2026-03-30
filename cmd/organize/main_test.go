@@ -11,6 +11,14 @@ import (
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	if err := loadConfig("../../scripts/.files.env"); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
+
 // camera simulates a real camera's file output
 type camera struct {
 	name        string

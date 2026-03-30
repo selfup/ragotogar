@@ -16,22 +16,8 @@ import (
 
 var useMtime bool
 
-var sidecarExts = map[string]bool{
-	"dxo": true, "dop": true, "pp3": true, "xml": true, "aac": true, "lrf": true, "mp3": true,
-}
-
-var extToType = map[string]string{
-	"jpg": "JPEG", "jpeg": "JPEG",
-	"hif": "HIF", "heif": "HIF", "heic": "HIF",
-	"mov":  "MOV",
-	"mp4":  "MP4",
-	"braw": "BRAW",
-	"nev":  "NEV",
-	"ndf":  "NDF",
-	"raf":  "RAW", "arw": "RAW", "nef": "RAW", "cr2": "RAW",
-	"cr3": "RAW", "dng": "RAW", "orf": "RAW", "rw2": "RAW", "pef": "RAW",
-	"wav": "AUDIO",
-}
+var sidecarExts = map[string]bool{}
+var extToType = map[string]string{}
 
 type moveJob struct {
 	src     string
@@ -39,11 +25,24 @@ type moveJob struct {
 }
 
 func main() {
+	var configPath string
+	flag.StringVar(&configPath, "config", "", "Path to .files.env config file (required)")
 	flag.BoolVar(&useMtime, "mtime", false, "Use modification time instead of birth time for date folders")
 	flag.Parse()
 
+	if configPath == "" {
+		fmt.Fprintf(os.Stderr, "Error: -config flag is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s -config <path-to-.files.env> [-mtime] <directory>\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	if err := loadConfig(configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-mtime] <directory>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s -config <path-to-.files.env> [-mtime] <directory>\n", os.Args[0])
 		os.Exit(1)
 	}
 
@@ -393,4 +392,73 @@ func ordinalSuffix(day int) string {
 	default:
 		return fmt.Sprintf("%dth", day)
 	}
+}
+
+// loadConfig parses a .files.env file and populates extToType and sidecarExts.
+// It reads bash-style array definitions: lines like JPEG_EXTS=("jpg" "jpeg")
+// map each extension to the folder name (the prefix before _EXTS).
+// SIDECAR_EXTS=("dxo" "dop" ...) populates the sidecar set.
+func loadConfig(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	extToType = make(map[string]string)
+	sidecarExts = make(map[string]bool)
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Skip lines with bash variable expansion (derived arrays)
+		if strings.Contains(line, "${") {
+			continue
+		}
+
+		eqIdx := strings.Index(line, "=")
+		if eqIdx < 0 {
+			continue
+		}
+		name := line[:eqIdx]
+		value := strings.TrimSpace(line[eqIdx+1:])
+
+		if !strings.HasPrefix(value, "(") || !strings.HasSuffix(value, ")") {
+			continue
+		}
+		inner := value[1 : len(value)-1]
+		vals := parseArrayValues(inner)
+
+		if name == "SIDECAR_EXTS" {
+			for _, v := range vals {
+				sidecarExts[v] = true
+			}
+		} else if strings.HasSuffix(name, "_EXTS") {
+			folder := strings.TrimSuffix(name, "_EXTS")
+			for _, v := range vals {
+				extToType[v] = folder
+			}
+		}
+	}
+
+	if len(extToType) == 0 {
+		return fmt.Errorf("no extension mappings found in %s", path)
+	}
+	if len(sidecarExts) == 0 {
+		return fmt.Errorf("no sidecar extensions found in %s", path)
+	}
+
+	return nil
+}
+
+func parseArrayValues(s string) []string {
+	var vals []string
+	for _, part := range strings.Fields(s) {
+		part = strings.Trim(part, "\"")
+		if part != "" {
+			vals = append(vals, part)
+		}
+	}
+	return vals
 }
