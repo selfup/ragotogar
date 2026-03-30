@@ -33,14 +33,17 @@ if [[ ! -d "$TARGET_DIR" ]]; then
   exit 1
 fi
 
+EXT_ARGS=()
+for ext in "${PHOTO_EXTS[@]}"; do
+  EXT_ARGS+=(-ext "$ext")
+done
+
 echo "=== Fixing file dates from EXIF data ==="
 echo "Directory: $TARGET_DIR"
 echo ""
 
 exiftool -r \
-  -ext jpg -ext jpeg \
-  -ext hif -ext heif -ext heic \
-  -ext raf -ext arw -ext nef -ext cr2 -ext cr3 -ext dng -ext orf -ext rw2 -ext pef \
+  "${EXT_ARGS[@]}" \
   '-FileModifyDate<DateTimeOriginal' \
   '-FileCreateDate<DateTimeOriginal' \
   -overwrite_original \
