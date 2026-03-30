@@ -91,16 +91,31 @@ cd cmd/organize && go test -v ./...
 
 ### Shared Config (`scripts/.files.env`)
 
-All scripts source `scripts/.files.env` for directory name definitions:
+All scripts and the Go organizer share `scripts/.files.env` as the single source of truth for directory names, extension mappings, and exclude patterns:
 
 ```bash
 PHOTO_DIRS=("JPEG" "HIF" "RAW")
 VIDEO_DIRS=("MOV" "MP4" "BRAW" "NEV" "NDF")
 AUDIO_DIRS=("AUDIO")
 
-PHOTO_EXTS=("jpg" "jpeg" "hif" "heif" "heic" "raf" "arw" "nef" "cr2" "cr3" "dng" "orf" "rw2" "pef")
+# Extension-to-type-folder mappings (used by Go organizer)
+JPEG_EXTS=("jpg" "jpeg")
+HIF_EXTS=("hif" "heif" "heic")
+RAW_EXTS=("raf" "arw" "nef" "cr2" "cr3" "dng" "orf" "rw2" "pef")
+MOV_EXTS=("mov")
+MP4_EXTS=("mp4")
+BRAW_EXTS=("braw")
+NEV_EXTS=("nev")
+NDF_EXTS=("ndf")
+AUDIO_EXTS=("wav")
+SIDECAR_EXTS=("dxo" "dop" "pp3" "xml" "aac" "lrf" "mp3")
+
+# Derived: all photo/image extensions (used by exif_fix.sh)
+PHOTO_EXTS=("${JPEG_EXTS[@]}" "${HIF_EXTS[@]}" "${RAW_EXTS[@]}")
 MACOS_EXCLUDES=("._*" ".DS_Store")
 ```
+
+The Go organizer reads this file via the `-config` flag (passed automatically by `organize.sh`). Each `FOO_EXTS` array maps its extensions to a `FOO` type folder. `SIDECAR_EXTS` defines the sidecar file set.
 
 ### `scripts/organize.sh` — Go Organizer Wrapper
 
