@@ -44,6 +44,93 @@ Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutine
 - **macOS only** — uses `syscall.Stat_t.Birthtimespec` (the same field Finder displays as "Date Created")
 - **AppleDouble `._` files are skipped** — On non-native filesystems (exFAT, FAT32, NTFS — common on external SSDs like the Samsung T9), macOS creates hidden `._*` companion files to store extended attributes and resource forks. These files share the same extension as their parent (e.g. `._DSC00596.JPG`), so the organizer would otherwise treat them as real media files. However, when the real file is moved, macOS automatically cleans up the corresponding `._` file — causing a "no such file or directory" error when the organizer tries to move it separately. All `._` files are skipped in every pass.
 
+## Photo Describer (`cmd/describe`)
+
+Extracts EXIF metadata and generates LLM-powered visual descriptions of photos using LM Studio's vision API. Outputs structured JSON with both machine-parseable fields and a full-text description suitable for RAG indexing.
+
+**Usage:**
+
+```bash
+./scripts/photo_describe.sh /path/to/photos
+
+# Custom output directory
+./scripts/photo_describe.sh -output ./descriptions /path/to/photos
+
+# Preview which files would be processed
+./scripts/photo_describe.sh -dry-run /path/to/photos
+
+# Use a specific model (e.g. a second loaded instance)
+./scripts/photo_describe.sh -model qwen3.5-35b-a3b:2 /path/to/photos
+
+# More retry attempts for flaky models
+./scripts/photo_describe.sh -retries 5 /path/to/photos
+```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-output DIR` | Output directory for .json files (default: `<input_dir>/descriptions`) |
+| `-model NAME` | LM Studio model name (default: `qwen3.5-35b-a3b` or `LM_MODEL` env) |
+| `-dry-run` | List files without calling the LLM |
+| `-retries N` | Max retry attempts per image on API failure (default: 3) |
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
+| `LM_MODEL` | `qwen3.5-35b-a3b` | Vision model name |
+| `RESIZE_PX` | `1024` | Longest edge resize for preview |
+| `JPEG_QUALITY` | `85` | JPEG quality for resized preview |
+
+**Output format:**
+
+Each photo produces a JSON file named `<date>_<camera>_<filename>.json`:
+
+```json
+{
+  "name": "20250928_X100VI_DSCF1516",
+  "file": "DSCF1516.JPG",
+  "path": "/path/to/DSCF1516.JPG",
+  "duration_ms": 24251,
+  "duration": "24.252s",
+  "metadata": {
+    "file_name": "DSCF1516.JPG",
+    "date_time_original": "2025:09:28 16:38:17",
+    "make": "FUJIFILM",
+    "model": "X100VI",
+    "focal_length": "23.0 mm",
+    "f_number": "2",
+    "exposure_time": "1/38",
+    "iso": "3200",
+    "..."
+  },
+  "fields": {
+    "subject": "A bed covered in a paisley duvet...",
+    "setting": "A bedroom with beige walls...",
+    "light": "Dim, warm, from window on left...",
+    "colors": "Rust orange, muted blue, cream...",
+    "composition": "Low angle, shallow depth of field..."
+  },
+  "description": "**Subject:** A bed covered in..."
+}
+```
+
+- `fields` — structured data for direct filtering/querying
+- `description` — full text for LightRAG or similar RAG indexing
+- `metadata` — EXIF data parsed via `exiftool -json`
+- Output filenames include date + camera model to avoid collisions across cameras
+
+**Key details:**
+
+- Resizes images to 1024px previews before sending to the LLM (configurable)
+- Exponential backoff with jitter on API failures
+- Unique session ID per request to prevent LM Studio KV cache reuse
+- Strips `<think>` blocks from reasoning models
+- Skips already-processed files (re-run safe)
+- **Requirements:** [exiftool](https://exiftool.org/), [ImageMagick](https://imagemagick.org/), LM Studio running with a vision model loaded
+
 ## Tests
 
 Run the full test suite (all Go and bash tests):
