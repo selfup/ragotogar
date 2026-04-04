@@ -1,6 +1,18 @@
 # Organize Photos and Sync
 
-A collection of utility shell scripts and a Go-based media organizer.
+A collection of utility shell scripts, go scripts, and python scripts to: organize, normalize, describe, and search media.
+
+This project is a photo/media organization toolkit with four main components:                                                                                                 
+               
+1. Go Media Organizer (cmd/organize) — Parallel file organizer: sorts media into type folders, date subfolders, and reunites orphaned sidecars. macOS-only.
+
+2. Photo Describer (cmd/describe) — Sends photos to a local LM Studio vision model, outputs structured JSON with EXIF metadata and visual descriptions for RAG indexing.
+
+3. NAS Sync (scripts/clone.sh) — rclone-based sync to and from a mounted NAS with month/year filtering, parallel transfers, and --no-videos support.
+
+4. GraphRAG Search (tools/) — Indexes photo description JSONs into a LightRAG knowledge graph for semantic and graph-based search across the photo library.
+
+Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (.files.env) as the single source of truth for extension mappings.                  
 
 ## Go Media Organizer (`cmd/organize`)
 
@@ -124,16 +136,24 @@ Each photo produces a JSON file named `<date>_<camera>_<filename>.json`:
 
 **Key details:**
 
-- Resizes images to 1024px previews before sending to the LLM (configurable)
+- RAW files (RAF, ARW, NEF, etc.) use the embedded JPEG preview via `exiftool -b -PreviewImage`, avoiding the need for darktable or rawtherapee
+- Non-RAW files are resized to 1024px previews via ImageMagick (configurable)
+- Skips `._` AppleDouble files and `.DS_Store`
 - Exponential backoff with jitter on API failures
 - Unique session ID per request to prevent LM Studio KV cache reuse
-- Strips `<think>` blocks from reasoning models
+- Strips `<think>` blocks from reasoning models; detects when model exhausts tokens on reasoning with no content
 - Skips already-processed files (re-run safe)
 - **Requirements:** [exiftool](https://exiftool.org/), [ImageMagick](https://imagemagick.org/), LM Studio running with a vision model loaded
 
-## Photo Search — GraphRAG (`tools/search.py`)
+## Photo Search — GraphRAG (`tools/`)
 
 Indexes photo description JSONs into a knowledge graph using [LightRAG](https://github.com/HKUDS/LightRAG), enabling semantic and graph-based search across your photo library. Uses LM Studio for both LLM (entity/relationship extraction) and embeddings.
+
+Split into three modules with separate concerns:
+
+- **`rag_common.py`** — shared config (models, index dir), LLM/embedding functions, RAG initialization
+- **`index_and_vectorize.py`** — entity extraction + vector embedding via `ainsert()`
+- **`search.py`** — query-only, searches the built index
 
 **How it works:**
 
@@ -147,14 +167,16 @@ Indexes photo description JSONs into a knowledge graph using [LightRAG](https://
 ```bash
 cd tools
 ./setup.sh                    # creates .venv and installs dependencies
-source .venv/bin/activate
 ```
 
 **Prerequisites — two models loaded in LM Studio:**
 
 ```bash
-# LLM for entity extraction (load with sufficient context for reasoning models)
-lms load lmstudio-community/Qwen3.5-35B-A3B-GGUF --context-length 32768
+# LLM for entity extraction (non-reasoning model recommended for speed)
+lms load mistralai/devstral-small-2-2512
+
+# Smaller model for search queries (fast answers)
+lms load nvidia/nemotron-3-nano-4b
 
 # Embedding model for vector search
 lms load text-embedding-nomic-embed-text-v1.5
@@ -164,26 +186,29 @@ lms load text-embedding-nomic-embed-text-v1.5
 
 ```bash
 # Index photo descriptions
-python search.py index /path/to/description_jsons
+./tools/index_and_vectorize.sh /path/to/description_jsons
 
 # Re-index (clear existing graph and rebuild)
-python search.py index --reindex /path/to/description_jsons
+./tools/index_and_vectorize.sh --reindex /path/to/description_jsons
 
 # Query (hybrid mode — combines local graph + global summaries)
-python search.py query "bedroom photos with warm light"
+./tools/search.sh "bedroom photos with warm light"
 
 # Query with specific mode
-python search.py query --mode naive "shallow depth of field"     # pure vector search
-python search.py query --mode local "what objects are on the desk" # graph neighborhood
-python search.py query --mode global "summarize all indoor scenes" # full graph reasoning
-python search.py query --mode hybrid "what cameras were used"      # local + global combined
+./tools/search.sh --mode naive "shallow depth of field"     # pure vector search (fastest)
+./tools/search.sh --mode local "what objects are on the desk" # graph neighborhood
+./tools/search.sh --mode global "summarize all indoor scenes" # full graph reasoning
+./tools/search.sh --mode hybrid "what cameras were used"      # local + global combined
+
+# Use a different model for search
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
 ```
 
 **Query modes:**
 
 | Mode | Description |
 |------|-------------|
-| `naive` | Pure vector similarity search on text chunks, no knowledge graph |
+| `naive` | Pure vector similarity search on text chunks, no knowledge graph (fastest) |
 | `local` | Retrieves relevant entities, then uses their graph neighborhood as context |
 | `global` | Uses community summaries from the full knowledge graph for broad thematic answers |
 | `hybrid` | Combines local + global for the most comprehensive results (default) |
@@ -193,13 +218,15 @@ python search.py query --mode hybrid "what cameras were used"      # local + glo
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `LM_MODEL` | `qwen/qwen3.5-35b-a3b` | LLM for entity extraction |
+| `INDEX_MODEL` | `mistralai/devstral-small-2-2512` | LLM for entity extraction during indexing |
+| `SEARCH_MODEL` | `nvidia/nemotron-3-nano-4b` | LLM for query keyword extraction and answering |
 | `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model for vector search |
 
 **Key details:**
 
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
-- LLM calls use `max_tokens: -1` to let LM Studio use the full context window — reasoning models (like Qwen 3.5) need room for internal thinking before producing output
+- Indexing uses a non-reasoning model (devstral) for faster entity extraction; search uses a small model (nemotron) for fast query answering
+- LLM calls use `max_tokens: -1` to let LM Studio use the full context window
 - `llm_model_max_async=1` ensures sequential LLM calls since LM Studio can't handle concurrent requests to the same model
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
 - Index is stored in `tools/.rag_index/` (gitignored)
