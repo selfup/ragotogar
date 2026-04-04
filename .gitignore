@@ -1,3 +1,5 @@
 .test_log.txt
 .env
 description_test
+tools/.venv
+tools/.rag_index
