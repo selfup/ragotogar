@@ -67,8 +67,10 @@ type imageURL struct {
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -166,7 +168,7 @@ func run(cfg config) error {
 
 		b64, err := makePreviewBase64(magickCmd, file, cfg.resizePx, cfg.jpegQuality)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "\n    !! ImageMagick failed: %v, skipping\n", err)
+			fmt.Fprintf(os.Stderr, "\n    !! Preview failed: %v, skipping\n", err)
 			errors++
 			continue
 		}
@@ -240,7 +242,7 @@ func describeImage(cfg config, b64, exif string) (string, error) {
 				},
 			},
 		},
-		MaxToks: 32768,
+		MaxToks: 16384,
 		Temp:    0.3,
 	}
 
@@ -285,10 +287,16 @@ func describeImage(cfg config, b64, exif string) (string, error) {
 		return "", fmt.Errorf("no choices in response")
 	}
 
-	content := chatResp.Choices[0].Message.Content
+	choice := chatResp.Choices[0]
+	content := choice.Message.Content
 	// Strip <think> blocks from reasoning models
 	content = thinkBlockRe.ReplaceAllString(content, "")
 	content = strings.TrimSpace(content)
+
+	if content == "" && choice.Message.ReasoningContent != "" {
+		return "", fmt.Errorf("model exhausted tokens on reasoning (%d chars), no content produced (finish_reason=%s)",
+			len(choice.Message.ReasoningContent), choice.FinishReason)
+	}
 
 	return content, nil
 }
@@ -310,6 +318,10 @@ func collectFiles(dir string, maxDepth int) ([]string, error) {
 			if depth > maxDepth {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, "._") || name == ".DS_Store" {
 			return nil
 		}
 		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
@@ -476,8 +488,55 @@ func findMagick() string {
 	return "convert"
 }
 
+// rawExts lists extensions where we should try extracting the embedded JPEG
+// preview via exiftool before falling back to ImageMagick.
+var rawExts = map[string]bool{
+	"raf": true, "arw": true, "nef": true,
+	"cr2": true, "cr3": true, "dng": true,
+	"orf": true, "rw2": true, "pef": true,
+}
+
 func makePreviewBase64(magickCmd, file string, resizePx, quality int) (string, error) {
-	// Use a temp file for the resized preview
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(file), "."))
+
+	// For RAW files, try extracting the embedded JPEG preview first.
+	// Most cameras embed a full-size JPEG — this avoids needing darktable/rawtherapee.
+	if rawExts[ext] {
+		if b64, err := extractEmbeddedPreview(magickCmd, file, resizePx, quality); err == nil {
+			return b64, nil
+		}
+	}
+
+	return magickConvert(magickCmd, file, resizePx, quality)
+}
+
+// extractEmbeddedPreview pulls the embedded JPEG from a RAW file via exiftool,
+// then resizes it with ImageMagick.
+func extractEmbeddedPreview(magickCmd, file string, resizePx, quality int) (string, error) {
+	// Extract embedded preview to a temp file
+	tmp, err := os.CreateTemp("", "describe-embedded-*.jpg")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+
+	cmd := exec.Command("exiftool", "-b", "-PreviewImage", file)
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return "", fmt.Errorf("no embedded preview found")
+	}
+
+	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
+		return "", err
+	}
+
+	// Resize the extracted JPEG
+	return magickConvert(magickCmd, tmpPath, resizePx, quality)
+}
+
+func magickConvert(magickCmd, file string, resizePx, quality int) (string, error) {
 	tmp, err := os.CreateTemp("", "describe-preview-*.jpg")
 	if err != nil {
 		return "", err
