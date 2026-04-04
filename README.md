@@ -131,6 +131,80 @@ Each photo produces a JSON file named `<date>_<camera>_<filename>.json`:
 - Skips already-processed files (re-run safe)
 - **Requirements:** [exiftool](https://exiftool.org/), [ImageMagick](https://imagemagick.org/), LM Studio running with a vision model loaded
 
+## Photo Search — GraphRAG (`tools/search.py`)
+
+Indexes photo description JSONs into a knowledge graph using [LightRAG](https://github.com/HKUDS/LightRAG), enabling semantic and graph-based search across your photo library. Uses LM Studio for both LLM (entity/relationship extraction) and embeddings.
+
+**How it works:**
+
+1. Each photo's description text is chunked and sent to the LLM for entity extraction (objects, rooms, cameras, settings, colors, etc.)
+2. Extracted entities and relationships are stored in a knowledge graph (NetworkX + GraphML)
+3. Description text is also embedded via a local embedding model for vector search
+4. Queries combine vector similarity with graph traversal for comprehensive results
+
+**Setup:**
+
+```bash
+cd tools
+./setup.sh                    # creates .venv and installs dependencies
+source .venv/bin/activate
+```
+
+**Prerequisites — two models loaded in LM Studio:**
+
+```bash
+# LLM for entity extraction (load with sufficient context for reasoning models)
+lms load lmstudio-community/Qwen3.5-35B-A3B-GGUF --context-length 32768
+
+# Embedding model for vector search
+lms load text-embedding-nomic-embed-text-v1.5
+```
+
+**Usage:**
+
+```bash
+# Index photo descriptions
+python search.py index /path/to/description_jsons
+
+# Re-index (clear existing graph and rebuild)
+python search.py index --reindex /path/to/description_jsons
+
+# Query (hybrid mode — combines local graph + global summaries)
+python search.py query "bedroom photos with warm light"
+
+# Query with specific mode
+python search.py query --mode naive "shallow depth of field"     # pure vector search
+python search.py query --mode local "what objects are on the desk" # graph neighborhood
+python search.py query --mode global "summarize all indoor scenes" # full graph reasoning
+python search.py query --mode hybrid "what cameras were used"      # local + global combined
+```
+
+**Query modes:**
+
+| Mode | Description |
+|------|-------------|
+| `naive` | Pure vector similarity search on text chunks, no knowledge graph |
+| `local` | Retrieves relevant entities, then uses their graph neighborhood as context |
+| `global` | Uses community summaries from the full knowledge graph for broad thematic answers |
+| `hybrid` | Combines local + global for the most comprehensive results (default) |
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
+| `LM_MODEL` | `qwen/qwen3.5-35b-a3b` | LLM for entity extraction |
+| `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model for vector search |
+
+**Key details:**
+
+- Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
+- LLM calls use `max_tokens: -1` to let LM Studio use the full context window — reasoning models (like Qwen 3.5) need room for internal thinking before producing output
+- `llm_model_max_async=1` ensures sequential LLM calls since LM Studio can't handle concurrent requests to the same model
+- Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
+- Index is stored in `tools/.rag_index/` (gitignored)
+- **Requirements:** Python 3.10+, LM Studio with an LLM and embedding model loaded
+
 ## Tests
 
 Run the full test suite (all Go and bash tests):
