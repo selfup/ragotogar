@@ -107,7 +107,7 @@ func organize(targetDir string, workers int) []error {
 	fmt.Printf("  Moved %d files (%d skipped)\n\n", moved, skipped)
 
 	// Pass 2: Organize by date
-		if useMtime {
+	if useMtime {
 		fmt.Println("=== Pass 2: Organizing files by modification date ===")
 	} else {
 		fmt.Println("=== Pass 2: Organizing files by creation date ===")
@@ -407,7 +407,7 @@ func loadConfig(path string) error {
 	extToType = make(map[string]string)
 	sidecarExts = make(map[string]bool)
 
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -417,12 +417,12 @@ func loadConfig(path string) error {
 			continue
 		}
 
-		eqIdx := strings.Index(line, "=")
-		if eqIdx < 0 {
+		before, after, ok := strings.Cut(line, "=")
+		if !ok {
 			continue
 		}
-		name := line[:eqIdx]
-		value := strings.TrimSpace(line[eqIdx+1:])
+		name := before
+		value := strings.TrimSpace(after)
 
 		if !strings.HasPrefix(value, "(") || !strings.HasSuffix(value, ")") {
 			continue
@@ -434,8 +434,8 @@ func loadConfig(path string) error {
 			for _, v := range vals {
 				sidecarExts[v] = true
 			}
-		} else if strings.HasSuffix(name, "_EXTS") {
-			folder := strings.TrimSuffix(name, "_EXTS")
+		} else if before, ok := strings.CutSuffix(name, "_EXTS"); ok {
+			folder := before
 			for _, v := range vals {
 				extToType[v] = folder
 			}
@@ -454,7 +454,7 @@ func loadConfig(path string) error {
 
 func parseArrayValues(s string) []string {
 	var vals []string
-	for _, part := range strings.Fields(s) {
+	for part := range strings.FieldsSeq(s) {
 		part = strings.Trim(part, "\"")
 		if part != "" {
 			vals = append(vals, part)
