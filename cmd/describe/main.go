@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,6 +39,7 @@ type config struct {
 	jpegQuality int
 	maxRetries  int
 	retryDelay  time.Duration
+	workers     int
 }
 
 // LM Studio chat completion request/response types.
@@ -91,6 +93,7 @@ func main() {
 	flag.StringVar(&cfg.model, "model", cfg.model, "LM Studio model name")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "List files that would be processed without calling the LLM")
 	flag.IntVar(&cfg.maxRetries, "retries", cfg.maxRetries, "Max retry attempts per image on API failure")
+	flag.IntVar(&cfg.workers, "workers", 2, "Number of concurrent image processing workers")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -134,6 +137,7 @@ func run(cfg config) error {
 	fmt.Printf("Found %d image(s) in '%s'\n", len(files), cfg.inputDir)
 	fmt.Printf("Output: %s\n", cfg.outputDir)
 	fmt.Printf("Model:  %s @ %s\n", cfg.model, cfg.lmBase)
+	fmt.Printf("Workers: %d\n", cfg.workers)
 	fmt.Printf("Retries: %d (delay %s)\n\n", cfg.maxRetries, cfg.retryDelay)
 
 	if cfg.dryRun {
@@ -150,46 +154,83 @@ func run(cfg config) error {
 
 	magickCmd := findMagick()
 
-	var processed, errors, skipped int
-	for i, file := range files {
-		exif := extractEXIF(file)
-		safeName := safeOutputName(cfg.inputDir, file, exif)
-		txtOut := filepath.Join(cfg.outputDir, safeName+".json")
-
-		if _, err := os.Stat(txtOut); err == nil {
-			fmt.Printf("  [skip] %s (already exists)\n", safeName)
-			skipped++
-			continue
-		}
-
-		fmt.Printf("  [%d/%d] %s", i+1, len(files), safeName)
-
-		start := time.Now()
-
-		b64, err := makePreviewBase64(magickCmd, file, cfg.resizePx, cfg.jpegQuality)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "\n    !! Preview failed: %v, skipping\n", err)
-			errors++
-			continue
-		}
-
-		description, err := describeWithRetry(cfg, b64, exifToPromptString(exif))
-		elapsed := time.Since(start)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "\n    !! Vision API failed after %d attempts: %v\n", cfg.maxRetries, err)
-			errors++
-		}
-
-		fmt.Printf(" (%s)\n", elapsed.Round(time.Millisecond))
-
-		if err := writeOutput(txtOut, safeName, file, exif, description, elapsed); err != nil {
-			fmt.Fprintf(os.Stderr, "    !! Write failed: %v\n", err)
-			errors++
-			continue
-		}
-
-		processed++
+	type job struct {
+		index int
+		file  string
 	}
+
+	var mu sync.Mutex
+	var processed, errors, skipped int
+
+	jobs := make(chan job, len(files))
+	for i, file := range files {
+		jobs <- job{index: i, file: file}
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for range cfg.workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				exif := extractEXIF(j.file)
+				safeName := safeOutputName(cfg.inputDir, j.file, exif)
+				txtOut := filepath.Join(cfg.outputDir, safeName+".json")
+
+				if _, err := os.Stat(txtOut); err == nil {
+					mu.Lock()
+					fmt.Printf("  [skip] %s (already exists)\n", safeName)
+					skipped++
+					mu.Unlock()
+					continue
+				}
+
+				mu.Lock()
+				fmt.Printf("  [%d/%d] %s ...\n", j.index+1, len(files), safeName)
+				mu.Unlock()
+
+				start := time.Now()
+
+				b64, err := makePreviewBase64(magickCmd, j.file, cfg.resizePx, cfg.jpegQuality)
+				if err != nil {
+					mu.Lock()
+					fmt.Fprintf(os.Stderr, "    !! [%d/%d] Preview failed: %v, skipping\n", j.index+1, len(files), err)
+					errors++
+					mu.Unlock()
+					continue
+				}
+
+				description, err := describeWithRetry(cfg, b64, exifToPromptString(exif))
+				elapsed := time.Since(start)
+				if err != nil {
+					mu.Lock()
+					fmt.Fprintf(os.Stderr, "    !! [%d/%d] Vision API failed after %d attempts: %v\n", j.index+1, len(files), cfg.maxRetries, err)
+					errors++
+					mu.Unlock()
+					continue
+				}
+
+				mu.Lock()
+				fmt.Printf("  [%d/%d] %s (%s)\n", j.index+1, len(files), safeName, elapsed.Round(time.Millisecond))
+				mu.Unlock()
+
+				if err := writeOutput(txtOut, safeName, j.file, exif, description, elapsed); err != nil {
+					mu.Lock()
+					fmt.Fprintf(os.Stderr, "    !! [%d/%d] Write failed: %v\n", j.index+1, len(files), err)
+					errors++
+					mu.Unlock()
+					continue
+				}
+
+				mu.Lock()
+				processed++
+				mu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
 
 	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed, errors, skipped)
 	fmt.Printf("Output: %s\n", cfg.outputDir)

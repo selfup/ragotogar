@@ -86,6 +86,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | `-model NAME` | LM Studio model name (default: `qwen3.5-35b-a3b` or `LM_MODEL` env) |
 | `-dry-run` | List files without calling the LLM |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
+| `-workers N` | Number of concurrent image processing workers (default: 2) |
 
 **Environment variables:**
 
