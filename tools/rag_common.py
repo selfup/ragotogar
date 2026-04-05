@@ -46,7 +46,7 @@ def make_llm_func(model):
             "temperature": 0.0,
         }
 
-        async with httpx.AsyncClient(timeout=300) as client:
+        async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(
                 f"{LM_STUDIO_BASE}/v1/chat/completions",
                 json=payload,
