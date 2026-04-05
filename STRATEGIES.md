@@ -77,7 +77,7 @@ Ministral-alone is a functional pipeline — it was validated end-to-end on a 26
    ```bash
    ./tools/index_and_vectorize.sh descriptions/
    ```
-   LightRAG finds JSONs at any depth via `descriptions/**/*.json`, extracts entities from each, and merges by entity name. Overlapping entities (`Walmart`, `Yale Ave`) collapse to single graph nodes; unique entities from each model (`drive4walmart.com` from Ministral, `soccer goalposts` from devstral) become new nodes on the same photo. No custom merge code needed.
+   LightRAG finds JSONs at any depth via `descriptions/**/*.json`, extracts entities from each, and merges by entity name. Overlapping entities (`Walmart`, `New York Ave`) collapse to single graph nodes; unique entities from each model (`drive4walmart.com` from Ministral, `soccer goalposts` from devstral) become new nodes on the same photo. No custom merge code needed.
 
 To roll back devstral augmentation: delete `descriptions/devstral/` and re-index.
 
@@ -88,7 +88,7 @@ To roll back devstral augmentation: delete `descriptions/devstral/` and re-index
 | Walmart slogan "Save money. Live better." (real OCR) | Soccer goalposts on sports field |
 | drive4walmart.com URL (real OCR) | Fire hydrant at street corner |
 | "We're Hiring Drivers" sticker text | Pedestrian holding a sign near damaged barrier |
-| Yale Ave. Exit 1 Mile sign | "County Road" on signboard (Ministral said "County Courthouse") |
+| New York Ave. Exit 1 Mile sign | "County Road" on signboard (Ministral said "County Courthouse") |
 | Trailer number "183539" | White metal chair leaning against tire stack |
 
 Ministral has stronger OCR; devstral has stronger fine-scene-detail observation.
