@@ -71,8 +71,8 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 # Preview which files would be processed
 ./scripts/photo_describe.sh -dry-run /path/to/photos
 
-# Use a specific model (e.g. a second loaded instance)
-./scripts/photo_describe.sh -model mistralai/devstral-small-2-2512:2 /path/to/photos
+# Run the devstral augmentation pass for richer fine-scene detail (see STRATEGIES.md)
+./scripts/photo_describe.sh -output ./descriptions/devstral -model mistralai/devstral-small-2-2512 /path/to/photos
 
 # More retry attempts for flaky models
 ./scripts/photo_describe.sh -retries 5 /path/to/photos
@@ -83,7 +83,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | Flag | Description |
 |------|-------------|
 | `-output DIR` | Output directory for .json files (default: `<input_dir>/descriptions`) |
-| `-model NAME` | LM Studio model name (default: `mistralai/devstral-small-2-2512` or `LM_MODEL` env) |
+| `-model NAME` | LM Studio model name (default: `mistralai/ministral-3-3b` or `LM_MODEL` env) |
 | `-dry-run` | List files without calling the LLM |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
 
@@ -92,7 +92,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `LM_MODEL` | `mistralai/devstral-small-2-2512` | Vision model name |
+| `LM_MODEL` | `mistralai/ministral-3-3b` | Vision model name (fast default; see `STRATEGIES.md` for Ministral vs devstral trade-offs) |
 | `RESIZE_PX` | `1024` | Longest edge resize for preview |
 | `JPEG_QUALITY` | `85` | JPEG quality for resized preview |
 
@@ -171,16 +171,21 @@ cd tools
 
 **Prerequisites — models loaded in LM Studio:**
 
+Default setup uses Ministral 3B for all three LLM slots (description, index, search) plus the embedding model. See [`STRATEGIES.md`](STRATEGIES.md) for the sizing rationale.
+
 ```bash
-# LLM for photo description, entity extraction, and search (non-reasoning, vision-capable)
-lms load mistralai/devstral-small-2-2512 --context-length 36000
+# Single LLM for description, indexing, and search (fast, 3B)
+lms load mistralai/ministral-3-3b --context-length 65536 --parallel 8
 
-# Smaller model for search queries (fast answers)
-lms load nvidia/nemotron-3-nano-4b
-
-# Embedding model for vector search
+# Embedding model for vector search (768-dim)
 lms load text-embedding-nomic-embed-text-v1.5
+
+# Optional: 24B model for multi-document synthesis queries (global/hybrid modes over many chunks)
+# Only load if you plan to override SEARCH_MODEL for synthesis-heavy queries.
+lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 ```
+
+> **Context length trap:** when loading with `--parallel N`, LM Studio hard-partitions context across slots (each slot gets `context / N` tokens) unless **Unified KV** is enabled in the GUI. LightRAG's entity-extraction prompts run ~4100–5100 tokens, so `--context-length 32000 --parallel 8` gives only 4000/slot and will fail sporadically with 400 errors. Oversize `--context-length` or enable Unified KV. See [`STRATEGIES.md`](STRATEGIES.md) for details.
 
 **Usage:**
 
@@ -218,15 +223,16 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `INDEX_MODEL` | `mistralai/devstral-small-2-2512` | LLM for entity extraction during indexing |
-| `SEARCH_MODEL` | `nvidia/nemotron-3-nano-4b` | LLM for query keyword extraction and answering |
+| `INDEX_MODEL` | `mistralai/ministral-3-3b` | LLM for entity extraction during indexing. 3B is fast and validated equivalent to devstral on entity density (~9 entities/photo). See `STRATEGIES.md`. |
+| `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for query keyword extraction and answer synthesis. 3B is adequate for `naive`/`local` and most single-photo answers. **For `global`/`hybrid` multi-document synthesis, override per-query: `SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --mode global "..."`** — small models fixate on one chunk in synthesis mode; 24B cites across many. See `STRATEGIES.md`. |
 | `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model for vector search |
 
 **Key details:**
 
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
-- Devstral serves as a single model for both photo description (vision) and entity extraction (text) — non-reasoning, so no wasted tokens on `<think>` blocks; search uses a small model (nemotron) for fast query answering
+- Three-slot model architecture: Ministral 3B for description (vision) and index entity extraction; devstral 24B GGUF for query synthesis. See [`STRATEGIES.md`](STRATEGIES.md) for sizing evidence and the context-length trap.
 - LLM calls use `max_tokens: -1` to let LM Studio use the full context window
+- `index_and_vectorize.py` globs `**/*.json` recursively, so pointing it at a parent `descriptions/` directory picks up both `descriptions/ministral/*.json` and `descriptions/devstral/*.json` automatically (hybrid augmentation — LightRAG entity-merge deduplicates across both)
 - All documents are batched into a single `ainsert()` call so LightRAG processes chunks in parallel across 8 concurrent LLM workers
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
 - Index is stored in `tools/.rag_index/` (gitignored)
@@ -313,6 +319,17 @@ Convenience wrapper that runs the Go media organizer. Passes all arguments throu
 ./scripts/organize.sh /path/to/directory
 ./scripts/organize.sh -mtime /path/to/directory
 ```
+
+### `scripts/batch_photo_describe.sh` — Describe Across Matching Subdirectories
+
+Wraps `photo_describe.sh` so a basename prefix expands to every sibling directory matching that prefix and runs them sequentially with shared flags. Useful when a month contains many date subfolders (e.g. `March21st2026`, `March22nd2026`, …).
+
+```bash
+# Describe every directory under /Volumes/T9/X100VI/JPEG matching "March*"
+./scripts/batch_photo_describe.sh -output describe_test /Volumes/T9/X100VI/JPEG/March
+```
+
+All `photo_describe.sh` flags (`-output`, `-model`, `-dry-run`, `-retries`) pass through. The last positional argument must be `<parent>/<prefix>`.
 
 ### `scripts/clone.sh` — NAS Sync (rclone)
 

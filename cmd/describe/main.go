@@ -80,7 +80,7 @@ type chatResponse struct {
 func main() {
 	cfg := config{
 		lmBase:      envOr("LM_STUDIO_BASE", "http://localhost:1234"),
-		model:       envOr("LM_MODEL", "mistralai/devstral-small-2-2512"),
+		model:       envOr("LM_MODEL", "mistralai/ministral-3-3b"),
 		resizePx:    envOrInt("RESIZE_PX", 1024),
 		jpegQuality: envOrInt("JPEG_QUALITY", 85),
 		maxRetries:  3,
@@ -617,9 +617,26 @@ func parseDescriptionFields(description string) descriptionFields {
 			if !strings.HasPrefix(lower, key) {
 				continue
 			}
-			// Check that the key is followed by a colon (possibly with trailing bold markers)
+			// After the key, skip over any combination of markdown markers and
+			// parenthetical asides before requiring a colon. This handles headers like:
+			//   "Colors:", "**Colors:**", "- **Colors**:",
+			//   "**Colors** (from metadata):", "- **Colors** (in B&W):"
 			after := cleaned[len(key):]
-			after = strings.TrimLeft(after, "*_ ")
+			for {
+				trimmed := strings.TrimLeft(after, "*_ ")
+				inside, ok := strings.CutPrefix(trimmed, "(")
+				if !ok {
+					after = trimmed
+					break
+				}
+				_, rest, found := strings.Cut(inside, ")")
+				if !found {
+					// unmatched paren; bail and let the colon check fail
+					after = trimmed
+					break
+				}
+				after = rest
+			}
 			if len(after) == 0 || after[0] != ':' {
 				continue
 			}

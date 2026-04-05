@@ -76,7 +76,11 @@ async def do_index(json_dir, reindex=False):
 
     os.makedirs(INDEX_DIR, exist_ok=True)
 
-    files = sorted(glob(os.path.join(json_dir, "*.json")))
+    # Recursive glob so we pick up both flat layouts (descriptions/*.json) and
+    # the hybrid Ministral+devstral layout (descriptions/ministral/*.json,
+    # descriptions/devstral/*.json) when pointed at the parent directory.
+    # See STRATEGIES.md for the hybrid indexing strategy.
+    files = sorted(glob(os.path.join(json_dir, "**", "*.json"), recursive=True))
     if not files:
         print(f"No JSON files found in '{json_dir}'")
         return
