@@ -83,6 +83,7 @@ async def create_rag(model=INDEX_MODEL):
         llm_model_func=make_llm_func(model),
         llm_model_max_async=8,  # LM Studio supports continuous batching (default max: 4, but configurable)
         max_parallel_insert=8,  # process 8 documents through the pipeline concurrently (default: 2)
+        default_llm_timeout=600,  # worker timeout = 2x this; 8 concurrent requests need more headroom
         entity_extract_max_gleaning=0,  # skip gleaning pass — initial extraction is sufficient
         max_extract_input_tokens=20480,
         embedding_func=EmbeddingFunc(
