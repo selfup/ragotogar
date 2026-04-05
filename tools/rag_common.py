@@ -42,7 +42,7 @@ def make_llm_func(model):
         payload = {
             "model": model,
             "messages": messages,
-            "max_tokens": -1,
+            "max_tokens": 32000,
             "temperature": 0.0,
         }
 
