@@ -227,7 +227,7 @@ SEARCH_MODEL="qwen3.5-35b-a3b" ./tools/search.sh "warm light"
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
 - Indexing uses a non-reasoning model (devstral) for faster entity extraction; search uses a small model (nemotron) for fast query answering
 - LLM calls use `max_tokens: -1` to let LM Studio use the full context window
-- `llm_model_max_async=1` ensures sequential LLM calls since LM Studio can't handle concurrent requests to the same model
+- All documents are batched into a single `ainsert()` call so LightRAG processes chunks in parallel across 8 concurrent LLM workers
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
 - Index is stored in `tools/.rag_index/` (gitignored)
 - **Requirements:** Python 3.10+, LM Studio with an LLM and embedding model loaded
