@@ -1,4 +1,8 @@
-# Organize Photos and Sync
+# Ragotogar
+
+_Research preview :warning: this project is under heavy discovery work and development_
+
+**RAG Photo Organizer** — a local-LLM photo library with GraphRAG search. *(Yes, it's a palindrome.)*
 
 A collection of utility shell scripts, go scripts, and python scripts to: organize, normalize, describe, and search media.
 
