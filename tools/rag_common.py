@@ -20,7 +20,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_DIR = os.path.join(SCRIPT_DIR, ".rag_index")
 
 LM_STUDIO_BASE = os.environ.get("LM_STUDIO_BASE", "http://localhost:1234")
-INDEX_MODEL = os.environ.get("INDEX_MODEL", "mistralai/devstral-small-2-2512")
+INDEX_MODEL = os.environ.get("INDEX_MODEL", "qwen3.5-35b-a3b")
 SEARCH_MODEL = os.environ.get("SEARCH_MODEL", "nvidia/nemotron-3-nano-4b")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
 

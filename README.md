@@ -172,8 +172,8 @@ cd tools
 **Prerequisites — two models loaded in LM Studio:**
 
 ```bash
-# LLM for entity extraction (non-reasoning model recommended for speed)
-lms load mistralai/devstral-small-2-2512
+# LLM for entity extraction
+lms load qwen3.5-35b-a3b
 
 # Smaller model for search queries (fast answers)
 lms load nvidia/nemotron-3-nano-4b
@@ -201,7 +201,7 @@ lms load text-embedding-nomic-embed-text-v1.5
 ./tools/search.sh --mode hybrid "what cameras were used"      # local + global combined
 
 # Use a different model for search
-SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
+SEARCH_MODEL="qwen3.5-35b-a3b" ./tools/search.sh "warm light"
 ```
 
 **Query modes:**
@@ -218,7 +218,7 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `INDEX_MODEL` | `mistralai/devstral-small-2-2512` | LLM for entity extraction during indexing |
+| `INDEX_MODEL` | `qwen3.5-35b-a3b` | LLM for entity extraction during indexing |
 | `SEARCH_MODEL` | `nvidia/nemotron-3-nano-4b` | LLM for query keyword extraction and answering |
 | `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model for vector search |
 
