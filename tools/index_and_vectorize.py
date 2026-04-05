@@ -90,6 +90,8 @@ async def do_index(json_dir, reindex=False):
     rag = await create_rag()
 
     try:
+        docs = []
+        names = []
         for i, path in enumerate(files):
             name = os.path.basename(path)
             print(f"  [{i + 1}/{len(files)}] {name}")
@@ -97,8 +99,11 @@ async def do_index(json_dir, reindex=False):
             with open(path, "r") as f:
                 data = json.load(f)
 
-            doc = build_document(data)
-            await rag.ainsert(doc, file_paths=name)
+            docs.append(build_document(data))
+            names.append(name)
+
+        print(f"\nInserting {len(docs)} documents as batch...")
+        await rag.ainsert(docs, file_paths=names)
 
         print(f"\nDone. Indexed {len(files)} documents.")
     finally:
