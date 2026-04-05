@@ -44,6 +44,7 @@ def make_llm_func(model):
             "messages": messages,
             "max_tokens": -1,
             "temperature": 0.0,
+            "stop": ["<|COMPLETE|>"],
         }
 
         async with httpx.AsyncClient(timeout=300) as client:
