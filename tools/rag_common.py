@@ -69,10 +69,12 @@ def make_llm_func(model):
     return llm_func
 
 
+_embed_client = AsyncOpenAI(base_url=f"{LM_STUDIO_BASE}/v1", api_key="lm-studio")
+
+
 async def embed_func(texts: list[str], **kwargs) -> np.ndarray:
     """Embed texts via LM Studio without sending the dimensions parameter."""
-    client = AsyncOpenAI(base_url=f"{LM_STUDIO_BASE}/v1", api_key="lm-studio")
-    resp = await client.embeddings.create(model=EMBED_MODEL, input=texts)
+    resp = await _embed_client.embeddings.create(model=EMBED_MODEL, input=texts)
     return np.array([d.embedding for d in resp.data])
 
 
