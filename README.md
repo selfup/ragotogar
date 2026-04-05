@@ -72,7 +72,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 ./scripts/photo_describe.sh -dry-run /path/to/photos
 
 # Use a specific model (e.g. a second loaded instance)
-./scripts/photo_describe.sh -model qwen3.5-35b-a3b:2 /path/to/photos
+./scripts/photo_describe.sh -model mistralai/devstral-small-2-2512:2 /path/to/photos
 
 # More retry attempts for flaky models
 ./scripts/photo_describe.sh -retries 5 /path/to/photos
@@ -83,7 +83,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | Flag | Description |
 |------|-------------|
 | `-output DIR` | Output directory for .json files (default: `<input_dir>/descriptions`) |
-| `-model NAME` | LM Studio model name (default: `qwen3.5-35b-a3b` or `LM_MODEL` env) |
+| `-model NAME` | LM Studio model name (default: `mistralai/devstral-small-2-2512` or `LM_MODEL` env) |
 | `-dry-run` | List files without calling the LLM |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
 
@@ -92,7 +92,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `LM_MODEL` | `qwen3.5-35b-a3b` | Vision model name |
+| `LM_MODEL` | `mistralai/devstral-small-2-2512` | Vision model name |
 | `RESIZE_PX` | `1024` | Longest edge resize for preview |
 | `JPEG_QUALITY` | `85` | JPEG quality for resized preview |
 
@@ -169,11 +169,11 @@ cd tools
 ./setup.sh                    # creates .venv and installs dependencies
 ```
 
-**Prerequisites — two models loaded in LM Studio:**
+**Prerequisites — models loaded in LM Studio:**
 
 ```bash
-# LLM for entity extraction (non-reasoning model recommended for speed)
-lms load mistralai/devstral-small-2-2512
+# LLM for photo description, entity extraction, and search (non-reasoning, vision-capable)
+lms load mistralai/devstral-small-2-2512 --context-length 36000
 
 # Smaller model for search queries (fast answers)
 lms load nvidia/nemotron-3-nano-4b
@@ -201,7 +201,7 @@ lms load text-embedding-nomic-embed-text-v1.5
 ./tools/search.sh --mode hybrid "what cameras were used"      # local + global combined
 
 # Use a different model for search
-SEARCH_MODEL="qwen3.5-35b-a3b" ./tools/search.sh "warm light"
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
 ```
 
 **Query modes:**
@@ -225,7 +225,7 @@ SEARCH_MODEL="qwen3.5-35b-a3b" ./tools/search.sh "warm light"
 **Key details:**
 
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
-- Indexing uses a non-reasoning model (devstral) for faster entity extraction; search uses a small model (nemotron) for fast query answering
+- Devstral serves as a single model for both photo description (vision) and entity extraction (text) — non-reasoning, so no wasted tokens on `<think>` blocks; search uses a small model (nemotron) for fast query answering
 - LLM calls use `max_tokens: -1` to let LM Studio use the full context window
 - All documents are batched into a single `ainsert()` call so LightRAG processes chunks in parallel across 8 concurrent LLM workers
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing

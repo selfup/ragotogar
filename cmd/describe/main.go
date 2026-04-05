@@ -80,7 +80,7 @@ type chatResponse struct {
 func main() {
 	cfg := config{
 		lmBase:      envOr("LM_STUDIO_BASE", "http://localhost:1234"),
-		model:       envOr("LM_MODEL", "qwen3.5-35b-a3b"),
+		model:       envOr("LM_MODEL", "mistralai/devstral-small-2-2512"),
 		resizePx:    envOrInt("RESIZE_PX", 1024),
 		jpegQuality: envOrInt("JPEG_QUALITY", 85),
 		maxRetries:  3,
