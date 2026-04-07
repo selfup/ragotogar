@@ -4,21 +4,15 @@ Operational choices that aren't obvious from the code alone — the *why* behind
 
 ## Three-slot model architecture
 
-The RAG pipeline has three distinct LLM workloads. They *can* be sized independently, but we default all three to Ministral 3B for operational simplicity — one model handles vision description, index entity extraction, and query synthesis. Override `SEARCH_MODEL` per-query when a specific query needs stronger multi-document synthesis.
+The RAG pipeline has three distinct LLM workloads, sized independently based on validated testing across five vision models (Ministral 3B, Qwen3-VL 8B, Gemma 4 31B, devstral 24B, Qwen 2.5-VL 7B) on identical photos.
 
 | Slot | Env var | Default | Why |
 |---|---|---|---|
-| **Vision description** (`cmd/describe`) | `LM_MODEL` | `mistralai/ministral-3-3b` | 2.5–2.9× faster than devstral; competitive OCR (7/8 on large clear text vs devstral's 3/8); matches devstral on entity density |
-| **Index entity extraction** (LightRAG ingest) | `INDEX_MODEL` | `mistralai/ministral-3-3b` | Validated on 26-photo test set: 231 nodes / 231 edges, ~9 entities/photo, 2:52 wall-clock, semantic concept normalization works (e.g. "elevated platform with guardrail" → `Bridge` entity) |
+| **Vision description** (`cmd/describe`) | `LM_MODEL` | `qwen/qwen3-vl-8b` | Best accuracy of all tested models — correctly identified a 1960 Chevrolet Bel Air that every other model either got wrong (Gemma: "pickup truck") or was too vague ("vintage car"). 6.6s/photo, only 1.6× slower than Ministral 3B. Strong fine-detail observation (side mirrors, soda fountain, white hat on background figure). |
+| **Index entity extraction** (LightRAG ingest) | `INDEX_MODEL` | `mistralai/ministral-3-3b` | Validated on 26-photo test set: 231 nodes / 231 edges, ~9 entities/photo, 2:52 wall-clock, semantic concept normalization works (e.g. "elevated platform with guardrail" → `Bridge` entity). Text-only task — vision quality irrelevant. GGUF with `--parallel 8` gives real continuous batching. |
 | **Query synthesis** (LightRAG query) | `SEARCH_MODEL` | `mistralai/ministral-3-3b` | Adequate for `naive`/`local` and for most single-photo synthesis queries. For multi-document synthesis (`global`/`hybrid` over many chunks), override to a bigger model per query — see below. |
 
-The first two are batch workloads where throughput matters and continuous batching across LightRAG's 8 async workers is the main scaling lever. The third is interactive — one query at a time, latency is tolerable.
-
-Keeping everything on a single 3B model means:
-- Only one LLM loaded in LM Studio for the full pipeline (plus the embedding model)
-- No JIT load traps when switching between describe, index, and search
-- Consistent GPU/VRAM footprint regardless of which workload is running
-- Simpler operational story, fewer config surfaces
+Vision description is a batch workload where accuracy matters most — wrong entities poison the graph. Index extraction and query synthesis are text-only tasks where Ministral 3B's throughput and GGUF parallel batching are the main scaling levers.
 
 The trade-off — and the reason to know the SEARCH override exists — is multi-document synthesis quality.
 
@@ -52,52 +46,56 @@ You need devstral loaded in LM Studio for this to work. If you run the override 
 lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 ```
 
-## Hybrid photo description: Ministral default + devstral augmentation
+## Vision model selection: Qwen3-VL 8B
 
-Ministral-alone is a functional pipeline — it was validated end-to-end on a 26-photo test set with working description, indexing, and retrieval. Devstral augmentation is **optional enrichment** that catches visual details Ministral misses. It is not a fallback or correctness dependency.
+Qwen3-VL 8B replaced Ministral 3B as the default vision description model after a five-model comparison on identical B&W diner photos (vintage car interior scene). Previously, Ministral 3B was used for all three pipeline slots with optional devstral augmentation.
+
+### Why Qwen3-VL 8B won
+
+| Model | Size | Avg time | Vehicle ID | Hallucinations |
+|---|---|---|---|---|
+| **Qwen3-VL 8B** | 8B | 6.6s | "1959-1960 Chevrolet Bel Air" (correct) | None observed |
+| **Ministral 3B** | 3B | 4.1s | "vintage-style car" (vague but safe) | Minor: generic descriptions |
+| **Gemma 4 31B** | 31B | 12.2s | "pickup truck" (wrong) | Vehicle type |
+| **Devstral 24B** | 24B | 15.8s | "1950s American sedan" (close) | "two people in backseat" (was one dummy in front seat) |
+| **Qwen 2.5-VL 7B** | 7B | 17.5s | fabricated "Chevrolet" script text | Invented brand text on car |
+
+Qwen3-VL 8B produces the richest correct entity set (specific make/model/year, soda fountain, side mirror reflections, "person wearing a white hat") at only 1.6× the latency of a 3B model. For RAG, "1960 Chevrolet Bel Air" is a far more useful graph node than "vintage car."
+
+### Architecture note
+
+Qwen3-VL 8B scores 69.6 MMMU — close to models 10× its size. It also scores 96.1 DocVQA and 94.4 ScreenSpot, indicating strong fine-detail perception. Ministral 3B scores 52.4 MMMU but uses the same 410M ViT vision encoder as the 24B Mistral — its "eyes" are identical to a much larger model, which explains why it's accurate despite low parameter count. The difference is that Qwen3-VL's language head is better at interpreting what the vision encoder sees without fabricating details.
 
 ### Pipeline
 
-1. **Fast path — Ministral 3B (always):**
-   ```bash
-   ./scripts/batch_photo_describe.sh -output descriptions/ministral /Volumes/T9/X100VI/JPEG/March
-   ```
-   ~4.6s per photo. This alone is sufficient to build a working LightRAG graph.
+```bash
+# Default: Qwen3-VL 8B
+./scripts/batch_photo_describe.sh -output descriptions /Volumes/T9/X100VI/JPEG/March
 
-2. **Enrichment path — devstral-small-2-2512 GGUF (periodic, optional):**
-   ```bash
-   ./scripts/batch_photo_describe.sh \
-     -output descriptions/devstral \
-     -model mistralai/devstral-small-2-2512 \
-     /Volumes/T9/X100VI/JPEG/March
-   ```
-   ~13s per photo. Run weekly or after big imports with high detail density. Background job, re-run safe, interruptible.
+# Or explicit
+./scripts/batch_photo_describe.sh -model qwen/qwen3-vl-8b -output descriptions /Volumes/T9/X100VI/JPEG/March
+```
 
-3. **Index both (LightRAG reads recursively):**
-   ```bash
-   ./tools/index_and_vectorize.sh descriptions/
-   ```
-   LightRAG finds JSONs at any depth via `descriptions/**/*.json`, extracts entities from each, and merges by entity name. Overlapping entities (`Walmart`, `New York Ave`) collapse to single graph nodes; unique entities from each model (`drive4walmart.com` from Ministral, `soccer goalposts` from devstral) become new nodes on the same photo. No custom merge code needed.
+~6.6s per photo. No augmentation pass needed — Qwen3-VL 8B catches fine scene details that previously required a separate devstral run.
 
-To roll back devstral augmentation: delete `descriptions/devstral/` and re-index.
+### Ministral 3B for OCR-heavy scenes (optional)
 
-### What each model catches that the other misses
+Ministral 3B has stronger OCR on large clear text (Walmart slogan, URLs, sign text). For batches known to contain signage or text-heavy scenes, a Ministral pass can supplement:
 
-| Caught by Ministral | Caught by devstral |
-|---|---|
-| Walmart slogan "Save money. Live better." (real OCR) | Soccer goalposts on sports field |
-| drive4walmart.com URL (real OCR) | Fire hydrant at street corner |
-| "We're Hiring Drivers" sticker text | Pedestrian holding a sign near damaged barrier |
-| New York Ave. Exit 1 Mile sign | "County Road" on signboard (Ministral said "County Courthouse") |
-| Trailer number "183539" | White metal chair leaning against tire stack |
+```bash
+./scripts/batch_photo_describe.sh \
+  -output descriptions/ministral-ocr \
+  -model mistralai/ministral-3-3b \
+  /Volumes/T9/X100VI/JPEG/March
+```
 
-Ministral has stronger OCR; devstral has stronger fine-scene-detail observation.
+Index both directories — LightRAG merges overlapping entities automatically.
 
-### Shared failure modes (neither model fixes)
+### Known failure modes
 
-- **Blurry / ambiguous images** — both models confabulate. Both hallucinated "a group of bicycles" on one blurred shot that contained neither bicycles nor a group.
-- **Small text / text at angles** — Ministral substitutes wrong-but-real entities (saw "Hyundai Translead", wrote "Hyundai Transys" — a real but different Hyundai subsidiary). Devstral invents non-words ("Hyundai Transfusion" for the same text). Ministral's errors are slightly less harmful to the graph because "Transys" links to the real Hyundai corporate family; "Transfusion" is a pure phantom entity. Neither is reliable on small text.
-- **Sport / activity identification without explicit cues** — Ministral mislabeled a soccer field as "volleyball or similar sports"; devstral caught "goalposts visible" and got it right. Devstral wins this category; it's one of the motivating reasons to run the augmentation pass.
+- **Blurry / ambiguous images** — all models confabulate. Both Ministral and devstral hallucinated "a group of bicycles" on one blurred shot that contained neither.
+- **Small text / text at angles** — Ministral substitutes wrong-but-real entities ("Hyundai Transys" for "Hyundai Translead"). Qwen3-VL 8B has not been tested on these edge cases yet.
+- **Larger models ≠ better** — Gemma 4 31B (12.2s) misidentified a sedan as a pickup truck. Qwen 2.5-VL 7B (17.5s) fabricated brand text. Parameter count does not predict vision accuracy for structured description tasks.
 
 ## Context length trap when loading with `--parallel N`
 
