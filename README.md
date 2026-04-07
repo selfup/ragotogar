@@ -75,8 +75,8 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 # Preview which files would be processed
 ./scripts/photo_describe.sh -dry-run /path/to/photos
 
-# Run the devstral augmentation pass for richer fine-scene detail (see STRATEGIES.md)
-./scripts/photo_describe.sh -output ./descriptions/devstral -model mistralai/devstral-small-2-2512 /path/to/photos
+# Run a Ministral OCR pass for text-heavy scenes (see STRATEGIES.md)
+./scripts/photo_describe.sh -output ./descriptions/ministral-ocr -model mistralai/ministral-3-3b /path/to/photos
 
 # More retry attempts for flaky models
 ./scripts/photo_describe.sh -retries 5 /path/to/photos
@@ -87,7 +87,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | Flag | Description |
 |------|-------------|
 | `-output DIR` | Output directory for .json files (default: `<input_dir>/descriptions`) |
-| `-model NAME` | LM Studio model name (default: `mistralai/ministral-3-3b` or `LM_MODEL` env) |
+| `-model NAME` | LM Studio model name (default: `qwen/qwen3-vl-8b` or `LM_MODEL` env) |
 | `-dry-run` | List files without calling the LLM |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
 
@@ -96,7 +96,7 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `LM_MODEL` | `mistralai/ministral-3-3b` | Vision model name (fast default; see `STRATEGIES.md` for Ministral vs devstral trade-offs) |
+| `LM_MODEL` | `qwen/qwen3-vl-8b` | Vision model name (see `STRATEGIES.md` for model comparison) |
 | `RESIZE_PX` | `1024` | Longest edge resize for preview |
 | `JPEG_QUALITY` | `85` | JPEG quality for resized preview |
 
@@ -175,10 +175,13 @@ cd tools
 
 **Prerequisites — models loaded in LM Studio:**
 
-Default setup uses Ministral 3B for all three LLM slots (description, index, search) plus the embedding model. See [`STRATEGIES.md`](STRATEGIES.md) for the sizing rationale.
+Default setup uses Qwen3-VL 8B for vision description and Ministral 3B for indexing and search, plus the embedding model. See [`STRATEGIES.md`](STRATEGIES.md) for the model comparison and sizing rationale.
 
 ```bash
-# Single LLM for description, indexing, and search (fast, 3B)
+# Vision description model (best accuracy, 6.6s/photo)
+lms load qwen/qwen3-vl-8b
+
+# Indexing and search LLM (fast, GGUF with parallel batching)
 lms load mistralai/ministral-3-3b --context-length 65536 --parallel 8
 
 # Embedding model for vector search (768-dim)
@@ -227,16 +230,16 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `INDEX_MODEL` | `mistralai/ministral-3-3b` | LLM for entity extraction during indexing. 3B is fast and validated equivalent to devstral on entity density (~9 entities/photo). See `STRATEGIES.md`. |
+| `INDEX_MODEL` | `mistralai/ministral-3-3b` | LLM for entity extraction during indexing. Text-only task — 3B is fast with GGUF parallel batching and validated equivalent to devstral on entity density (~9 entities/photo). See `STRATEGIES.md`. |
 | `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for query keyword extraction and answer synthesis. 3B is adequate for `naive`/`local` and most single-photo answers. **For `global`/`hybrid` multi-document synthesis, override per-query: `SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --mode global "..."`** — small models fixate on one chunk in synthesis mode; 24B cites across many. See `STRATEGIES.md`. |
 | `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model for vector search |
 
 **Key details:**
 
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
-- Three-slot model architecture: Ministral 3B for description (vision) and index entity extraction; devstral 24B GGUF for query synthesis. See [`STRATEGIES.md`](STRATEGIES.md) for sizing evidence and the context-length trap.
+- Three-slot model architecture: Qwen3-VL 8B for description (vision); Ministral 3B GGUF for index entity extraction and query synthesis; devstral 24B GGUF for multi-document synthesis override. See [`STRATEGIES.md`](STRATEGIES.md) for the five-model comparison and sizing evidence.
 - LLM calls use `max_tokens: -1` to let LM Studio use the full context window
-- `index_and_vectorize.py` globs `**/*.json` recursively, so pointing it at a parent `descriptions/` directory picks up both `descriptions/ministral/*.json` and `descriptions/devstral/*.json` automatically (hybrid augmentation — LightRAG entity-merge deduplicates across both)
+- `index_and_vectorize.py` globs `**/*.json` recursively, so pointing it at a parent `descriptions/` directory picks up subdirectories automatically (e.g. `descriptions/ministral-ocr/*.json` alongside the main descriptions — LightRAG entity-merge deduplicates across both)
 - All documents are batched into a single `ainsert()` call so LightRAG processes chunks in parallel across 8 concurrent LLM workers
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
 - Index is stored in `tools/.rag_index/` (gitignored)
