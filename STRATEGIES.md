@@ -33,6 +33,22 @@ The retrieval pipeline surfaced identical context in both cases — only the mod
 | `local` — entity neighborhood, tight answer | ✓ Usually fine | Only if answer feels incomplete |
 | `global` — community summaries, broad thematic answer | ✗ Cites too few photos | **Yes, override** |
 | `hybrid` — local + global merged | ✗ Cites too few photos | **Yes, override** |
+| `--precise` — strict retrieval + synthesis | ✓ Usable on small result sets | **Yes, for broad queries** |
+
+### `--precise` mode model selection
+
+`--precise` does strict retrieval (cosine ≥ 0.5, naive, all matches) then synthesizes over only exact matches. The result set can be large — e.g. "indoor" returns 65 photos from a 477-doc corpus. Model choice matters here:
+
+Tested on the same query (`"analyze the framing of every indoor photo"`, 65 retrieved chunks):
+
+- **Ministral 3B**: analyzed 33 photos individually, cited 15 in references. Identified core patterns correctly (low angle, shallow depth of field, leading lines) with accurate per-photo descriptions. Faster, and sufficient for smaller result sets or when a summary is enough.
+- **devstral 24B**: analyzed 62/65 photos individually, correctly flagged 3 as non-indoor. Near-exhaustive coverage with per-photo detail. Hit the output token limit mid-response on the first attempt — the analysis was too long to fit.
+
+Rule of thumb: if `--precise` retrieves **<20 chunks**, Ministral 3B is fine. If it retrieves **20+ chunks** and you want exhaustive per-photo analysis, override to devstral:
+
+```bash
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "analyze the framing of every indoor photo"
+```
 
 Per-query override:
 
