@@ -56,16 +56,21 @@ def print_sources(data):
         print(f"  [{i}] {fp}")
 
 
-async def do_query(query_text, mode="hybrid", sources=False, retrieve=False):
+async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, precise=False):
     if not os.path.exists(INDEX_DIR):
         print("No index found. Run index_and_vectorize.py first.", file=sys.stderr)
         sys.exit(1)
 
-    rag = await create_rag(model=SEARCH_MODEL)
+    cosine_threshold = 0.5 if (precise or retrieve) else None
+    rag = await create_rag(model=SEARCH_MODEL, cosine_threshold=cosine_threshold)
 
     try:
         if retrieve:
-            result = await rag.aquery_data(query_text, param=QueryParam(mode=mode, enable_rerank=False))
+            result = await rag.aquery_data(query_text, param=QueryParam(mode="naive", enable_rerank=False, chunk_top_k=500))
+            print_sources(result.get("data", {}))
+        elif precise:
+            result = await rag.aquery_llm(query_text, param=QueryParam(mode="naive", enable_rerank=False, chunk_top_k=500))
+            print(result.get("llm_response", {}).get("content", ""))
             print_sources(result.get("data", {}))
         elif sources:
             result = await rag.aquery_llm(query_text, param=QueryParam(mode=mode, enable_rerank=False))
@@ -98,8 +103,13 @@ def main():
         action="store_true",
         help="Retrieval only — list matched source files, no LLM synthesis",
     )
+    group.add_argument(
+        "--precise",
+        action="store_true",
+        help="Strict retrieval (cosine>=0.5, naive) then synthesize over exact matches only",
+    )
     args = parser.parse_args()
-    asyncio.run(do_query(args.text, mode=args.mode, sources=args.sources, retrieve=args.retrieve))
+    asyncio.run(do_query(args.text, mode=args.mode, sources=args.sources, retrieve=args.retrieve, precise=args.precise))
 
 
 if __name__ == "__main__":
