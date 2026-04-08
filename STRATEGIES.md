@@ -2,17 +2,28 @@
 
 Operational choices that aren't obvious from the code alone — the *why* behind particular model selections, pipeline shapes, and trade-offs we've validated through testing. Update when a strategy changes or a new one is adopted.
 
+## Quick reference
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Vision model | Qwen3-VL 8B | Best accuracy at 6.6s/photo — correctly IDs specific objects other models get wrong |
+| Index/search LLM | Ministral 3B GGUF | Fast text-only task, real parallel batching with `--parallel 8` |
+| Multi-doc synthesis | devstral 24B (override) | 3B cites 1 photo, 24B cites 9+ from the same retrieval context |
+| Embeddings | nomic-embed-text-v1.5 | 768-dim, cosine scores top out ~0.5–0.6 — set threshold accordingly |
+| Retrieval threshold | cosine ≥ 0.5 | Sweet spot for nomic: "airplanes" returns 1 correct result vs 69 noise at default 0.2 |
+| Engine for LightRAG | GGUF (not MLX) | MLX serializes requests; GGUF gives real continuous batching for 8 workers |
+
 ## Three-slot model architecture
 
-The RAG pipeline has three distinct LLM workloads, sized independently based on validated testing across five vision models (Ministral 3B, Qwen3-VL 8B, Gemma 4 31B, devstral 24B, Qwen 2.5-VL 7B) on identical photos.
+The RAG pipeline has three distinct LLM workloads, sized independently:
 
-| Slot | Env var | Default | Why |
-|---|---|---|---|
-| **Vision description** (`cmd/describe`) | `LM_MODEL` | `qwen/qwen3-vl-8b` | Best accuracy of all tested models — correctly identified a 1960 Chevrolet Bel Air that every other model either got wrong (Gemma: "pickup truck") or was too vague ("vintage car"). 6.6s/photo, only 1.6× slower than Ministral 3B. Strong fine-detail observation (side mirrors, soda fountain, white hat on background figure). |
-| **Index entity extraction** (LightRAG ingest) | `INDEX_MODEL` | `mistralai/ministral-3-3b` | Validated on 26-photo test set: 231 nodes / 231 edges, ~9 entities/photo, 2:52 wall-clock, semantic concept normalization works (e.g. "elevated platform with guardrail" → `Bridge` entity). Text-only task — vision quality irrelevant. GGUF with `--parallel 8` gives real continuous batching. |
-| **Query synthesis** (LightRAG query) | `SEARCH_MODEL` | `mistralai/ministral-3-3b` | Adequate for `naive`/`local` and for most single-photo synthesis queries. For multi-document synthesis (`global`/`hybrid` over many chunks), override to a bigger model per query — see below. |
+| Slot | Env var | Default |
+|---|---|---|
+| **Vision description** (`cmd/describe`) | `LM_MODEL` | `qwen/qwen3-vl-8b` |
+| **Index entity extraction** (LightRAG ingest) | `INDEX_MODEL` | `mistralai/ministral-3-3b` |
+| **Query synthesis** (LightRAG query) | `SEARCH_MODEL` | `mistralai/ministral-3-3b` |
 
-Vision description is a batch workload where accuracy matters most — wrong entities poison the graph. Index extraction and query synthesis are text-only tasks where Ministral 3B's throughput and GGUF parallel batching are the main scaling levers.
+Vision description is a batch workload where accuracy matters most — wrong entities poison the graph. See [Vision model selection](#vision-model-selection-qwen3-vl-8b) for the five-model comparison. Index extraction and query synthesis are text-only tasks where Ministral 3B's throughput and GGUF parallel batching are the main scaling levers (validated on 26-photo test set: 231 nodes / 231 edges, ~9 entities/photo, 2:52 wall-clock).
 
 The trade-off — and the reason to know the SEARCH override exists — is multi-document synthesis quality.
 
@@ -29,31 +40,17 @@ The retrieval pipeline surfaced identical context in both cases — only the mod
 
 | Mode | Ministral 3B (default) | Override to 24B? |
 |---|---|---|
-| `naive` — direct vector retrieval, one dominant answer | ✓ Fine | No |
-| `local` — entity neighborhood, tight answer | ✓ Usually fine | Only if answer feels incomplete |
-| `global` — community summaries, broad thematic answer | ✗ Cites too few photos | **Yes, override** |
-| `hybrid` — local + global merged | ✗ Cites too few photos | **Yes, override** |
-| `--precise` — strict retrieval + synthesis | ✓ Usable on small result sets | **Yes, for broad queries** |
-
-### `--precise` mode model selection
-
-`--precise` does strict retrieval (cosine ≥ 0.5, naive, all matches) then synthesizes over only exact matches. The result set can be large — e.g. "indoor" returns 65 photos from a 477-doc corpus. Model choice matters here:
-
-Tested on the same query (`"analyze the framing of every indoor photo"`, 65 retrieved chunks):
-
-- **Ministral 3B**: analyzed 33 photos individually, cited 15 in references. Identified core patterns correctly (low angle, shallow depth of field, leading lines) with accurate per-photo descriptions. Faster, and sufficient for smaller result sets or when a summary is enough.
-- **devstral 24B**: analyzed 62/65 photos individually, correctly flagged 3 as non-indoor. Near-exhaustive coverage with per-photo detail. Hit the output token limit mid-response on the first attempt — the analysis was too long to fit.
-
-Rule of thumb: if `--precise` retrieves **<20 chunks**, Ministral 3B is fine. If it retrieves **20+ chunks** and you want exhaustive per-photo analysis, override to devstral:
-
-```bash
-SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "analyze the framing of every indoor photo"
-```
+| `naive` — direct vector retrieval | ✓ Fine | No |
+| `local` — entity neighborhood | ✓ Usually fine | Only if answer feels incomplete |
+| `global` — broad thematic answer | ✗ Cites too few photos | **Yes** |
+| `hybrid` — local + global merged | ✗ Cites too few photos | **Yes** |
+| `--precise` — strict retrieval + synthesis | ✓ Fine for <20 chunks | **Yes, for 20+ chunks** |
 
 Per-query override:
 
 ```bash
 SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --mode global "roadtrip in winter"
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "analyze the framing of every indoor photo"
 ```
 
 You need devstral loaded in LM Studio for this to work. If you run the override command without the model loaded and LM Studio has JIT auto-load enabled, it'll load devstral on top of whatever else is running — which on an M3 Ultra is fine VRAM-wise but worth knowing about. Preloading avoids the surprise:
@@ -117,9 +114,13 @@ Index both directories — LightRAG merges overlapping entities automatically.
   1. **Prompt-level self-check** — the description prompt now opens with an instruction to notice repeating elements and summarize them as a group with a count, rather than enumerating each one. This is the primary fix and was validated on the airport gate photo — the model produced a clean grouped description with no looping.
   2. **Post-hoc repetition detection** — `detectRepetitionLoop()` in `cmd/describe/main.go` splits the response on sentence boundaries and flags any sentence (≥20 chars) that appears more than 5 times. Triggers a retry via the existing exponential backoff logic. This is the safety net for cases where the model ignores the prompt instruction.
 
-## Context length trap when loading with `--parallel N`
+## LM Studio operational pitfalls
 
-**Most important operational pitfall.** When you load a model with `--parallel N` via `lms load`, LM Studio hard-partitions the context across slots: each slot gets `context / N` tokens. With the intuitive command:
+Read this section before loading models. These are the things that will bite you.
+
+### Context length trap with `--parallel N`
+
+When you load a model with `--parallel N` via `lms load`, LM Studio hard-partitions the context across slots: each slot gets `context / N` tokens. With the intuitive command:
 
 ```bash
 lms load mistralai/ministral-3-3b --context-length 32000 --parallel 8
@@ -127,10 +128,10 @@ lms load mistralai/ministral-3-3b --context-length 32000 --parallel 8
 
 Each slot gets **4000 tokens** — which is **not enough** for LightRAG's entity-extraction prompts (observed ~4100–5100 total tokens per extraction call). The failure mode is sporadic: some chunks succeed, others return 400 Bad Request, correlated with per-chunk prompt size.
 
-### Two working configurations
+**Two working configurations:**
 
 ```bash
-# A: oversize the context so per-slot budget is comfortable (CLI-accessible, what the validated setup uses)
+# A: oversize the context so per-slot budget is comfortable (what the validated setup uses)
 lms load mistralai/ministral-3-3b --context-length 65536 --parallel 8
 # 65536 / 8 = 8192 tokens per slot, comfortable headroom over LightRAG's ~5000-token extraction prompts
 
@@ -139,62 +140,63 @@ lms load mistralai/ministral-3-3b --context-length 65536 --parallel 8
 # Slots share the pool and can use >fair-share when others are idle
 ```
 
-Apply the same math when loading devstral for indexing or search. 3B models are cheap enough to oversize — 64k context on a 3B costs negligible extra memory. Larger models need more care:
+Apply the same math when loading devstral. 3B models are cheap enough to oversize — 64k context on a 3B costs negligible extra memory. Larger models need more care:
 
 ```bash
 lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 # 32000 / 4 = 8000 per slot; 24B model so 32k is the ceiling before VRAM pressure
 ```
 
-## LightRAG concurrency: GGUF + continuous batching
+### GGUF + continuous batching (not MLX)
 
 LM Studio's MLX engine does not support concurrent requests to a single loaded instance as of April 2026 ([lmstudio-ai/mlx-engine#203](https://github.com/lmstudio-ai/mlx-engine/issues/203)). Requests to one MLX instance are strictly serialized. LightRAG's 8-worker pool against MLX still provides pipeline saturation, CPU/GPU overlap, and parallel embedding calls — but **not** parallel LLM inference.
 
-GGUF on llama.cpp flips the last row via continuous batching. With `Max Concurrent Predictions ≥ 8`, the 8 LightRAG workers each get a real parallel inference slot.
+GGUF on llama.cpp gives real continuous batching. With `Max Concurrent Predictions ≥ 8`, the 8 LightRAG workers each get a real parallel inference slot.
 
 **Engine fingerprint via `lms ps`:**
 - `PARALLEL=1` → MLX or GGUF without batching enabled
 - `PARALLEL>1` → GGUF with continuous batching
 
-For any LightRAG workload, `PARALLEL<8` is leaving throughput on the table. For LM Studio, GGUF is the right engine for everything except single-request latency-only workloads.
+For any LightRAG workload, `PARALLEL<8` is leaving throughput on the table. GGUF is the right engine for everything except single-request latency-only workloads.
 
-## M3 Ultra physical-GPU caveat
+### M3 Ultra multi-model loading
 
-Loading two instances of the *same* model doubles VRAM but doesn't give 2× throughput — both instances share one GPU and contend for memory bandwidth. Observed on this hardware: two concurrent devstral instances each run at ~70% of solo speed. Aggregate throughput is ~1.4×, not 2×. The win is **progress concurrency** (indexing and describing advance simultaneously), not total throughput.
+Loading two instances of the *same* model doubles VRAM but doesn't give 2× throughput — both instances share one GPU and contend for memory bandwidth. Observed: two concurrent devstral instances each run at ~70% of solo speed. Aggregate throughput is ~1.4×, not 2×. The win is **progress concurrency** (indexing and describing advance simultaneously), not total throughput.
 
-Loading **different** models simultaneously (Ministral for describe+index, devstral for search synthesis, nemotron for fast lookups, nomic for embeddings) is the right use of multi-model loading. Each serves a distinct job and per-instance latency matters more than aggregate throughput. All four can coexist on an M3 Ultra without memory pressure.
+Loading **different** models simultaneously (Ministral for describe+index, devstral for search synthesis, nomic for embeddings) is the right use of multi-model loading. Each serves a distinct job and per-instance latency matters more than aggregate throughput. All can coexist on an M3 Ultra without memory pressure.
 
-## Cosine similarity threshold for retrieval
+## Retrieval tuning
+
+### Cosine similarity threshold
 
 The default `COSINE_THRESHOLD` in LightRAG is 0.2 — far too permissive for nomic-embed-text-v1.5. At 0.2, a query for "airplanes" returns 69 results, of which only 1 actually contains an airplane. The rest are semantically adjacent (sky, travel, vehicles, roads) but irrelevant.
 
-### Validated thresholds with nomic-embed-text-v1.5
-
 | Threshold | "airplanes" results | "indoor" results | Notes |
 |---|---|---|---|
-| 0.2 (default) | 69 | 100+ | Mostly noise — sky/travel/vehicle scenes flood airplane results |
-| 0.4 | ~few | ~many | Tighter but still loose |
+| 0.2 (default) | 69 | 100+ | Mostly noise |
 | 0.5 | **1 (correct)** | **63** | Sweet spot — high precision, no false positives on concrete nouns |
-| 0.6 | 0 | 0 | Too strict — nomic embeddings don't score this high |
-| 0.7+ | 0 | 0 | Nothing passes |
+| 0.6+ | 0 | 0 | Too strict — nomic embeddings don't score this high |
 
-Nomic embeddings top out around 0.5–0.6 cosine similarity even for strong matches. This is a property of the embedding model, not a bug — different embedding models have different score distributions.
+Nomic embeddings top out around 0.5–0.6 cosine similarity even for strong matches. This is a property of the embedding model, not a bug.
 
-### Recommended usage
-
-For retrieval-only queries (`--retrieve`), set `COSINE_THRESHOLD=0.5` for high-precision results:
-
-```bash
-COSINE_THRESHOLD=0.5 CHUNK_TOP_K=500 ./tools/search.sh --retrieve --mode naive "airplanes"
-```
-
-For synthesis queries (default, `--sources`), the default 0.2 is fine — the LLM filters noise during synthesis, and wider retrieval gives it more material to work with.
+`--retrieve` and `--precise` hardcode cosine ≥ 0.5 automatically. The default 0.2 is fine for synthesis queries — the LLM filters noise during synthesis, and wider retrieval gives it more material to work with.
 
 ### Why `naive` mode is better for retrieval
 
-For concrete-noun queries like "airplanes", `naive` mode (pure vector search across all 477 chunks) outperforms `hybrid` mode. Hybrid pre-filters through graph entity matching, which can exclude chunks whose text mentions airplanes but whose entities weren't linked to an "airplane" graph node. Tested: `naive` returned 69 candidates at default threshold vs `hybrid`'s 41 — the graph acted as an accidental filter that dropped real matches.
+For concrete-noun queries like "airplanes", `naive` mode (pure vector search across all chunks) outperforms `hybrid` mode. Hybrid pre-filters through graph entity matching, which can exclude chunks whose text mentions airplanes but whose entities weren't linked to an "airplane" graph node. Tested: `naive` returned 69 candidates at default threshold vs `hybrid`'s 41 — the graph acted as an accidental filter that dropped real matches.
 
-For retrieval-only use cases, `naive` casts the widest net. Graph modes add value for synthesis where structured context matters.
+`--retrieve` and `--precise` hardcode naive mode automatically. Graph modes add value for synthesis where structured context matters.
+
+### `--precise` mode
+
+`--precise` does strict retrieval (cosine ≥ 0.5, naive, all matches) then synthesizes over only exact matches. The result set can be large — e.g. "indoor" returns 65 photos from a 477-doc corpus. Model choice matters:
+
+Tested on `"analyze the framing of every indoor photo"` (65 retrieved chunks):
+
+- **Ministral 3B**: analyzed 33 photos, cited 15 in references. Identified core patterns correctly (low angle, shallow depth of field, leading lines). Faster, sufficient for smaller result sets.
+- **devstral 24B**: analyzed 62/65 photos, correctly flagged 3 as non-indoor. Near-exhaustive coverage.
+
+Rule of thumb: **<20 chunks** → Ministral 3B is fine. **20+ chunks** → override to devstral for exhaustive analysis.
 
 ## Sanity-check queries after any re-index
 
