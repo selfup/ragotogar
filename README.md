@@ -20,22 +20,14 @@ A collection of utility shell scripts, go scripts, and python scripts to: organi
 
 Each step feeds the next:
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
-│  1. Organize │ ──▶ │  2. Describe  │ ──▶ │   3. Index   │ ──▶ │  4. Search   │
-│  sort files  │     │  vision LLM   │     │  build graph  │     │  query graph │
-│  by type/date│     │  + EXIF → JSON│     │  + embeddings │     │  + synthesize│
-└─────────────┘     └──────────────┘     └─────────────┘     └──────────────┘
-scripts/organize.sh   scripts/photo_      tools/index_and_     tools/search.sh
-                      describe.sh         vectorize.sh
-```
+| Step | What | Script |
+|------|------|--------|
+| 1. **Organize** | Sort media into type folders (JPEG, RAW, MOV...) and date subfolders | `scripts/organize.sh` |
+| 2. **Describe** | Send each photo to a vision LLM, get structured JSON with EXIF + visual description | `scripts/photo_describe.sh` |
+| 3. **Index** | Extract entities/relationships into a knowledge graph and embed descriptions as vectors | `tools/index_and_vectorize.sh` |
+| 4. **Search** | Query the graph with natural language, get synthesized answers or file lists | `tools/search.sh` |
 
-1. **Organize** — Sort media into type folders (JPEG, RAW, MOV…) and date subfolders
-2. **Describe** — Send each photo to a vision LLM, get structured JSON with EXIF + visual description
-3. **Index** — Extract entities/relationships into a knowledge graph and embed descriptions as vectors
-4. **Search** — Query the graph with natural language, get synthesized answers or file lists
-
-Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. But the typical flow is organize → describe → index → search.
+Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. But the typical flow is 1 → 2 → 3 → 4.
 
 ## Components
 
