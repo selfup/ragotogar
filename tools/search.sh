@@ -6,8 +6,10 @@
 #   ./tools/search.sh --mode naive "shallow depth of field"
 #   ./tools/search.sh --mode local "what cameras were used"
 #   ./tools/search.sh --mode global "summarize all indoor scenes"
+#   ./tools/search.sh --sources --mode global "summarize all indoor scenes"
+#   ./tools/search.sh --retrieve --mode hybrid "indoor scenes with warm light"
 #
-#   # Use a different model for search (default: nemotron-3-nano-4b)
+#   # Use a different model for search (default: ministral-3-3b)
 #   SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
 set -euo pipefail
 
