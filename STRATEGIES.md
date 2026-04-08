@@ -96,6 +96,10 @@ Index both directories — LightRAG merges overlapping entities automatically.
 - **Blurry / ambiguous images** — all models confabulate. Both Ministral and devstral hallucinated "a group of bicycles" on one blurred shot that contained neither.
 - **Small text / text at angles** — Ministral substitutes wrong-but-real entities ("Hyundai Transys" for "Hyundai Translead"). Qwen3-VL 8B has not been tested on these edge cases yet.
 - **Larger models ≠ better** — Gemma 4 31B (12.2s) misidentified a sedan as a pickup truck. Qwen 2.5-VL 7B (17.5s) fabricated brand text. Parameter count does not predict vision accuracy for structured description tasks.
+- **Repetition loops on visually repetitive scenes** — Scenes with many similar elements (rows of people in airport chairs, parking lots, shelves of identical items) can trigger degenerate output where the model repeats the same sentence hundreds of times until it exhausts the context window. Observed across multiple models (Qwen3-VL 8B, others) on a B&W airport gate photo (United gate B8, ~8 silhouetted figures in rows of chairs, backlit by floor-to-ceiling windows). The combination of heavy silhouettes, identical seating, and low foreground contrast leaves the model with nothing to differentiate figures, so it loops on "A person in a dark shirt sits near the center." Two mitigations are in place:
+
+  1. **Prompt-level self-check** — the description prompt now opens with an instruction to notice repeating elements and summarize them as a group with a count, rather than enumerating each one. This is the primary fix and was validated on the airport gate photo — the model produced a clean grouped description with no looping.
+  2. **Post-hoc repetition detection** — `detectRepetitionLoop()` in `cmd/describe/main.go` splits the response on sentence boundaries and flags any sentence (≥20 chars) that appears more than 5 times. Triggers a retry via the existing exponential backoff logic. This is the safety net for cases where the model ignores the prompt instruction.
 
 ## Context length trap when loading with `--parallel N`
 
