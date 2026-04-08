@@ -6,17 +6,47 @@ _Research preview :warning: this project is under heavy discovery work and devel
 
 A collection of utility shell scripts, go scripts, and python scripts to: organize, normalize, describe, and search media.
 
-This project is a photo/media organization toolkit with four main components:                                                                                                 
-               
-1. Go Media Organizer (cmd/organize) — Parallel file organizer: sorts media into type folders, date subfolders, and reunites orphaned sidecars. macOS-only.
+## Requirements
 
-2. Photo Describer (cmd/describe) — Sends photos to a local LM Studio vision model, outputs structured JSON with EXIF metadata and visual descriptions for RAG indexing.
+- **macOS** — the organizer uses macOS-specific syscalls for file birth time
+- **[LM Studio](https://lmstudio.ai/)** — local LLM inference server (vision + text + embedding models)
+- **[exiftool](https://exiftool.org/)** — EXIF metadata extraction (`brew install exiftool`)
+- **[ImageMagick](https://imagemagick.org/)** — image resizing for LLM previews (`brew install imagemagick`)
+- **[rclone](https://rclone.org/)** — NAS sync (`brew install rclone`)
+- **Go 1.21+** — for building the organizer
+- **Python 3.10+** — for GraphRAG search tools
 
-3. NAS Sync (scripts/clone.sh) — rclone-based sync to and from a mounted NAS with month/year filtering, parallel transfers, and --no-videos support.
+## Pipeline
 
-4. GraphRAG Search (tools/) — Indexes photo description JSONs into a LightRAG knowledge graph for semantic and graph-based search across the photo library.
+Each step feeds the next:
 
-Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (.files.env) as the single source of truth for extension mappings.                  
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
+│  1. Organize │ ──▶ │  2. Describe  │ ──▶ │   3. Index   │ ──▶ │  4. Search   │
+│  sort files  │     │  vision LLM   │     │  build graph  │     │  query graph │
+│  by type/date│     │  + EXIF → JSON│     │  + embeddings │     │  + synthesize│
+└─────────────┘     └──────────────┘     └─────────────┘     └──────────────┘
+scripts/organize.sh   scripts/photo_      tools/index_and_     tools/search.sh
+                      describe.sh         vectorize.sh
+```
+
+1. **Organize** — Sort media into type folders (JPEG, RAW, MOV…) and date subfolders
+2. **Describe** — Send each photo to a vision LLM, get structured JSON with EXIF + visual description
+3. **Index** — Extract entities/relationships into a knowledge graph and embed descriptions as vectors
+4. **Search** — Query the graph with natural language, get synthesized answers or file lists
+
+Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. But the typical flow is organize → describe → index → search.
+
+## Components
+
+| Component | Location | Description |
+|-----------|----------|-------------|
+| Go Media Organizer | `cmd/organize` | Parallel file organizer: sorts media into type/date folders, reunites sidecars. macOS-only. |
+| Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata → structured JSON |
+| NAS Sync | `scripts/clone.sh` | rclone-based sync with month/year filtering and `--no-videos` |
+| GraphRAG Search | `tools/` | LightRAG knowledge graph for semantic and graph-based photo search |
+
+Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (`.files.env`) as the single source of truth for extension mappings.
 
 ## Go Media Organizer (`cmd/organize`)
 
@@ -212,8 +242,20 @@ lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 ./tools/search.sh --mode global "summarize all indoor scenes" # full graph reasoning
 ./tools/search.sh --mode hybrid "what cameras were used"      # local + global combined
 
+# Synthesis + list all retrieved source files
+./tools/search.sh --sources --mode global "summarize all indoor scenes"
+
+# Retrieval only — strict matching, no LLM synthesis, just the file list
+./tools/search.sh --retrieve "airplanes"
+
+# Strict retrieval then synthesize over only exact matches
+./tools/search.sh --precise "what is the most common framing I use indoors"
+
 # Use a different model for search
-SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --mode global "roadtrip in winter"
+
+# Precise mode with devstral for exhaustive multi-photo analysis
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "analyze the framing of every indoor photo"
 ```
 
 **Query modes:**
@@ -225,14 +267,27 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"
 | `global` | Uses community summaries from the full knowledge graph for broad thematic answers |
 | `hybrid` | Combines local + global for the most comprehensive results (default) |
 
+**Output flags** (mutually exclusive):
+
+| Flag | Description |
+|------|-------------|
+| *(default)* | Synthesis only — LLM answer from retrieved context |
+| `--sources` | Synthesis + full list of all retrieved source files |
+| `--retrieve` | Retrieval only — strict matching (cosine ≥ 0.5, naive mode), returns matched file list with no LLM synthesis |
+| `--precise` | Strict retrieval (cosine ≥ 0.5, naive mode) then synthesize over only exact matches. Best with `SEARCH_MODEL` override for large result sets. See [`STRATEGIES.md`](STRATEGIES.md). |
+
 **Environment variables:**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `INDEX_MODEL` | `mistralai/ministral-3-3b` | LLM for entity extraction during indexing. Text-only task — 3B is fast with GGUF parallel batching and validated equivalent to devstral on entity density (~9 entities/photo). See `STRATEGIES.md`. |
-| `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for query keyword extraction and answer synthesis. 3B is adequate for `naive`/`local` and most single-photo answers. **For `global`/`hybrid` multi-document synthesis, override per-query: `SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --mode global "..."`** — small models fixate on one chunk in synthesis mode; 24B cites across many. See `STRATEGIES.md`. |
+| `INDEX_MODEL` | `mistralai/ministral-3-3b` | LLM for entity extraction during indexing |
+| `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for query synthesis |
 | `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model for vector search |
+| `COSINE_THRESHOLD` | `0.2` | Cosine similarity threshold for vector retrieval |
+| `CHUNK_TOP_K` | `20` | Max chunks returned by retrieval |
+
+> **Model sizing notes:** `INDEX_MODEL` is a text-only task — 3B is fast with GGUF parallel batching and validated equivalent to devstral on entity density (~9 entities/photo). `SEARCH_MODEL` at 3B is adequate for `naive`/`local` and most single-photo answers, but for `global`/`hybrid`/`--precise` multi-document synthesis, override to 24B: `SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "..."` — small models fixate on a few chunks; 24B cites across many. `--retrieve` and `--precise` override `COSINE_THRESHOLD` to 0.5 and `CHUNK_TOP_K` to 500 (effectively uncapped). See [`STRATEGIES.md`](STRATEGIES.md) for validated thresholds and model comparisons.
 
 **Key details:**
 
