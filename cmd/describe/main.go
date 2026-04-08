@@ -220,7 +220,7 @@ func describeWithRetry(cfg config, b64, exif string) (string, error) {
 }
 
 func describeImage(cfg config, b64, exif string) (string, error) {
-	prompt := "Describe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame\n- Setting: specific location type, surfaces, objects\n- Light: direction, color, source (window/lamp/sun/etc)\n- Colors: dominant palette\n- Composition: framing, angle, depth of field\n\nCamera metadata for context:\n" + exif
+	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame\n- Setting: specific location type, surfaces, objects\n- Light: direction, color, source (window/lamp/sun/etc)\n- Colors: dominant palette\n- Composition: framing, angle, depth of field\n\nCamera metadata for context:\n" + exif
 
 	sessionID := fmt.Sprintf("photo-describe-%d-%d", time.Now().UnixNano(), rand.Int64())
 
@@ -298,7 +298,35 @@ func describeImage(cfg config, b64, exif string) (string, error) {
 			len(choice.Message.ReasoningContent), choice.FinishReason)
 	}
 
+	if sentence, count := detectRepetitionLoop(content, 20, 5); count > 0 {
+		return "", fmt.Errorf("repetition loop detected: %q repeated %d times", truncate(sentence, 80), count)
+	}
+
 	return content, nil
+}
+
+// detectRepetitionLoop checks whether any sentence (split on ". ") of at least
+// minLen characters appears more than maxRepeats times. Returns the offending
+// sentence and its count, or ("", 0) if no loop is detected.
+func detectRepetitionLoop(text string, minLen, maxRepeats int) (string, int) {
+	sentences := strings.Split(text, ". ")
+	counts := make(map[string]int)
+	for _, s := range sentences {
+		s = strings.TrimSpace(s)
+		if len(s) < minLen {
+			continue
+		}
+		counts[s]++
+	}
+	var worst string
+	var worstCount int
+	for s, c := range counts {
+		if c > maxRepeats && c > worstCount {
+			worst = s
+			worstCount = c
+		}
+	}
+	return worst, worstCount
 }
 
 func collectFiles(dir string, maxDepth int) ([]string, error) {

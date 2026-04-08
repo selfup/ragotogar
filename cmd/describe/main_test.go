@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestParseDescriptionFields covers the section-header variants we've seen in
 // the wild from both devstral and ministral. The key regression cases are the
@@ -126,6 +129,56 @@ Composition: low angle, shallow DOF`,
 			}
 			if got.Composition != tc.want.Composition {
 				t.Errorf("Composition mismatch:\n  got:  %q\n  want: %q", got.Composition, tc.want.Composition)
+			}
+		})
+	}
+}
+
+func TestDetectRepetitionLoop(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		wantLoop  bool
+		wantCount int
+	}{
+		{
+			name:     "normal description, no loop",
+			text:     "Subject: a red cup on a desk. Setting: wooden table near a window. Light: warm afternoon sun from the left. Colors: red, brown, cream. Composition: centered, shallow depth of field.",
+			wantLoop: false,
+		},
+		{
+			name:      "repetition loop like qwen airport bug",
+			text:      "Subject: Several people seated. " + strings.Repeat("A person in a dark shirt sits near the center-right. ", 50) + "Composition: wide angle.",
+			wantLoop:  true,
+			wantCount: 50,
+		},
+		{
+			name:     "short repeated fragments are ignored",
+			text:     strings.Repeat("yes. ", 100),
+			wantLoop: false, // "yes" is under minLen=20
+		},
+		{
+			name:     "exactly at threshold is not flagged",
+			text:     strings.Repeat("A person in a dark shirt sits near the center. ", 5) + "Done.",
+			wantLoop: false, // 5 repeats, threshold is >5
+		},
+		{
+			name:      "just over threshold is flagged",
+			text:      strings.Repeat("A person in a dark shirt sits near the center. ", 6) + "Done.",
+			wantLoop:  true,
+			wantCount: 6,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sentence, count := detectRepetitionLoop(tc.text, 20, 5)
+			gotLoop := count > 0
+			if gotLoop != tc.wantLoop {
+				t.Errorf("wantLoop=%v but got sentence=%q count=%d", tc.wantLoop, sentence, count)
+			}
+			if tc.wantLoop && count != tc.wantCount {
+				t.Errorf("wantCount=%d but got %d", tc.wantCount, count)
 			}
 		})
 	}
