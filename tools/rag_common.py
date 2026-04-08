@@ -77,10 +77,14 @@ async def embed_func(texts: list[str], **kwargs) -> np.ndarray:
     return np.array([d.embedding for d in resp.data])
 
 
-async def create_rag(model=INDEX_MODEL):
+async def create_rag(model=INDEX_MODEL, cosine_threshold=None):
+    extra = {}
+    if cosine_threshold is not None:
+        extra["cosine_better_than_threshold"] = cosine_threshold
     rag = LightRAG(
         working_dir=INDEX_DIR,
         llm_model_func=make_llm_func(model),
+        **extra,
         llm_model_max_async=8,  # LM Studio supports continuous batching (default max: 4, but configurable)
         max_parallel_insert=8,  # process 8 documents through the pipeline concurrently (default: 2)
         default_llm_timeout=600,  # worker timeout = 2x this; 8 concurrent requests need more headroom

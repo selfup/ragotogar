@@ -7,7 +7,8 @@
 #   ./tools/search.sh --mode local "what cameras were used"
 #   ./tools/search.sh --mode global "summarize all indoor scenes"
 #   ./tools/search.sh --sources --mode global "summarize all indoor scenes"
-#   ./tools/search.sh --retrieve --mode hybrid "indoor scenes with warm light"
+#   ./tools/search.sh --retrieve "indoor scenes with warm light"
+#   ./tools/search.sh --precise "what is the most common framing I use indoors"
 #
 #   # Use a different model for search (default: ministral-3-3b)
 #   SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh "warm light"

@@ -148,6 +148,38 @@ Loading two instances of the *same* model doubles VRAM but doesn't give 2× thro
 
 Loading **different** models simultaneously (Ministral for describe+index, devstral for search synthesis, nemotron for fast lookups, nomic for embeddings) is the right use of multi-model loading. Each serves a distinct job and per-instance latency matters more than aggregate throughput. All four can coexist on an M3 Ultra without memory pressure.
 
+## Cosine similarity threshold for retrieval
+
+The default `COSINE_THRESHOLD` in LightRAG is 0.2 — far too permissive for nomic-embed-text-v1.5. At 0.2, a query for "airplanes" returns 69 results, of which only 1 actually contains an airplane. The rest are semantically adjacent (sky, travel, vehicles, roads) but irrelevant.
+
+### Validated thresholds with nomic-embed-text-v1.5
+
+| Threshold | "airplanes" results | "indoor" results | Notes |
+|---|---|---|---|
+| 0.2 (default) | 69 | 100+ | Mostly noise — sky/travel/vehicle scenes flood airplane results |
+| 0.4 | ~few | ~many | Tighter but still loose |
+| 0.5 | **1 (correct)** | **63** | Sweet spot — high precision, no false positives on concrete nouns |
+| 0.6 | 0 | 0 | Too strict — nomic embeddings don't score this high |
+| 0.7+ | 0 | 0 | Nothing passes |
+
+Nomic embeddings top out around 0.5–0.6 cosine similarity even for strong matches. This is a property of the embedding model, not a bug — different embedding models have different score distributions.
+
+### Recommended usage
+
+For retrieval-only queries (`--retrieve`), set `COSINE_THRESHOLD=0.5` for high-precision results:
+
+```bash
+COSINE_THRESHOLD=0.5 CHUNK_TOP_K=500 ./tools/search.sh --retrieve --mode naive "airplanes"
+```
+
+For synthesis queries (default, `--sources`), the default 0.2 is fine — the LLM filters noise during synthesis, and wider retrieval gives it more material to work with.
+
+### Why `naive` mode is better for retrieval
+
+For concrete-noun queries like "airplanes", `naive` mode (pure vector search across all 477 chunks) outperforms `hybrid` mode. Hybrid pre-filters through graph entity matching, which can exclude chunks whose text mentions airplanes but whose entities weren't linked to an "airplane" graph node. Tested: `naive` returned 69 candidates at default threshold vs `hybrid`'s 41 — the graph acted as an accidental filter that dropped real matches.
+
+For retrieval-only use cases, `naive` casts the widest net. Graph modes add value for synthesis where structured context matters.
+
 ## Sanity-check queries after any re-index
 
 ```bash
