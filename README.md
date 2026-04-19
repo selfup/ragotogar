@@ -131,8 +131,10 @@ Each photo produces a JSON file named `<date>_<camera>_<filename>.json`:
   "name": "20250928_X100VI_DSCF1516",
   "file": "DSCF1516.JPG",
   "path": "/path/to/DSCF1516.JPG",
-  "duration_ms": 24251,
-  "duration": "24.252s",
+  "preview_ms": 180,
+  "preview": "180ms",
+  "inference_ms": 24251,
+  "inference": "24.252s",
   "metadata": {
     "file_name": "DSCF1516.JPG",
     "date_time_original": "2025:09:28 16:38:17",

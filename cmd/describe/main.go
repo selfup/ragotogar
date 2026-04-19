@@ -164,25 +164,28 @@ func run(cfg config) error {
 
 		fmt.Printf("  [%d/%d] %s", i+1, len(files), safeName)
 
-		start := time.Now()
-
+		previewStart := time.Now()
 		b64, err := makePreviewBase64(magickCmd, file, cfg.resizePx, cfg.jpegQuality)
+		previewElapsed := time.Since(previewStart)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\n    !! Preview failed: %v, skipping\n", err)
 			errors++
 			continue
 		}
 
+		inferenceStart := time.Now()
 		description, err := describeWithRetry(cfg, b64, exifToPromptString(exif))
-		elapsed := time.Since(start)
+		inferenceElapsed := time.Since(inferenceStart)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\n    !! Vision API failed after %d attempts: %v\n", cfg.maxRetries, err)
 			errors++
 		}
 
-		fmt.Printf(" (%s)\n", elapsed.Round(time.Millisecond))
+		fmt.Printf(" (preview %s, inference %s)\n",
+			previewElapsed.Round(time.Millisecond),
+			inferenceElapsed.Round(time.Millisecond))
 
-		if err := writeOutput(txtOut, safeName, file, exif, description, elapsed); err != nil {
+		if err := writeOutput(txtOut, safeName, file, exif, description, previewElapsed, inferenceElapsed); err != nil {
 			fmt.Fprintf(os.Stderr, "    !! Write failed: %v\n", err)
 			errors++
 			continue
@@ -600,14 +603,16 @@ type descriptionFields struct {
 }
 
 type photoDescription struct {
-	Name        string            `json:"name"`
-	File        string            `json:"file"`
-	Path        string            `json:"path"`
-	DurationMs  int64             `json:"duration_ms"`
-	Duration    string            `json:"duration"`
-	Metadata    exifData          `json:"metadata"`
-	Fields      descriptionFields `json:"fields"`
-	Description string            `json:"description"`
+	Name          string            `json:"name"`
+	File          string            `json:"file"`
+	Path          string            `json:"path"`
+	PreviewMs     int64             `json:"preview_ms"`
+	Preview       string            `json:"preview"`
+	InferenceMs   int64             `json:"inference_ms"`
+	Inference     string            `json:"inference"`
+	Metadata      exifData          `json:"metadata"`
+	Fields        descriptionFields `json:"fields"`
+	Description   string            `json:"description"`
 }
 
 // parseDescriptionFields extracts structured sections from the model output.
@@ -686,13 +691,15 @@ func parseDescriptionFields(description string) descriptionFields {
 	return fields
 }
 
-func writeOutput(path, safeName, srcFile string, exif exifData, description string, elapsed time.Duration) error {
+func writeOutput(path, safeName, srcFile string, exif exifData, description string, preview, inference time.Duration) error {
 	out := photoDescription{
 		Name:        safeName,
 		File:        filepath.Base(srcFile),
 		Path:        srcFile,
-		DurationMs:  elapsed.Milliseconds(),
-		Duration:    elapsed.Round(time.Millisecond).String(),
+		PreviewMs:   preview.Milliseconds(),
+		Preview:     preview.Round(time.Millisecond).String(),
+		InferenceMs: inference.Milliseconds(),
+		Inference:   inference.Round(time.Millisecond).String(),
 		Metadata:    exif,
 		Fields:      parseDescriptionFields(description),
 		Description: description,

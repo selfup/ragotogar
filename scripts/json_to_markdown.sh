@@ -72,8 +72,9 @@ render_one() {
   w=$(jq -r '.metadata.image_width // empty' "$f")
   h=$(jq -r '.metadata.image_height // empty' "$f")
 
-  local duration
-  duration=$(jq -r '.duration // empty' "$f")
+  local preview inference
+  preview=$(jq -r '.preview // empty' "$f")
+  inference=$(jq -r '.inference // empty' "$f")
 
   # Format date for display: "2026:03:21 09:32:17" -> "March 21, 2026 at 09:32:17"
   local display_date="$date_orig"
@@ -100,7 +101,8 @@ render_one() {
   echo ""
   echo "**File:** \`$file\`"
   [[ -n "$display_date" ]] && echo "**Date:** $display_date"
-  [[ -n "$duration" ]] && echo "**LLM Processing Time:** $duration"
+  [[ -n "$preview" ]] && echo "**Preview Time:** $preview"
+  [[ -n "$inference" ]] && echo "**Inference Time:** $inference"
   echo ""
 
   # Camera settings table

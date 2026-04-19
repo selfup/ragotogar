@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ! command -v rclone >/dev/null 2>&1; then
+  echo "FAILURE: rclone not installed (brew install rclone)" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLONE_SH="$SCRIPT_DIR/clone.sh"
 TEST_DIR="/tmp/clone_test_$$"

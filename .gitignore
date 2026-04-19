@@ -1,10 +1,13 @@
 .test_log.txt
 .env
-*_test
+describe_test*
 tools/.venv
 tools/.rag_index
 tools/__pycache__
 .DS_Store
 ._*
+
 descriptions
 mistralai
+
+001-*
