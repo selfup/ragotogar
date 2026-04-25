@@ -75,7 +75,7 @@ func runPhoto(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: cashier photo <input.json> <output.md>")
 		os.Exit(1)
 	}
-	md, err := photoFromFile(args[0])
+	data, md, err := photoFromFile(args[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -85,6 +85,13 @@ func runPhoto(args []string) {
 		os.Exit(1)
 	}
 	fmt.Fprintln(os.Stderr, "wrote", args[1])
+
+	thumbPath := strings.TrimSuffix(args[1], ".md") + ".jpg"
+	if err := writeThumbnail(data.Path, thumbPath, thumbnailWidth); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: thumbnail %s: %v\n", thumbPath, err)
+	} else {
+		fmt.Fprintln(os.Stderr, "wrote", thumbPath)
+	}
 }
 
 func runBuild(args []string) {
@@ -106,18 +113,22 @@ func runBuild(args []string) {
 
 // ── file helpers ──────────────────────────────────────────────────────────
 
-func photoFromFile(jsonPath string) (string, error) {
+// thumbnailWidth is the longest-edge resize for the .jpg sidecar written next
+// to each .md/.html. 1024px matches cmd/describe's preview resolution.
+const thumbnailWidth = 1024
+
+func photoFromFile(jsonPath string) (PhotoData, string, error) {
 	raw, err := os.ReadFile(jsonPath)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", jsonPath, err)
+		return PhotoData{}, "", fmt.Errorf("read %s: %w", jsonPath, err)
 	}
 	var data PhotoData
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if err := dec.Decode(&data); err != nil {
-		return "", fmt.Errorf("decode %s: %w", jsonPath, err)
+		return PhotoData{}, "", fmt.Errorf("decode %s: %w", jsonPath, err)
 	}
-	return buildMarkdown(data), nil
+	return data, buildMarkdown(data), nil
 }
 
 func buildFromFile(mdPath string) (string, error) {
@@ -129,12 +140,18 @@ func buildFromFile(mdPath string) (string, error) {
 }
 
 func runPhotoFile(jsonPath string) error {
-	md, err := photoFromFile(jsonPath)
+	data, md, err := photoFromFile(jsonPath)
 	if err != nil {
 		return err
 	}
-	outPath := strings.TrimSuffix(jsonPath, ".json") + ".md"
-	return os.WriteFile(outPath, []byte(md), 0644)
+	stem := strings.TrimSuffix(jsonPath, ".json")
+	if err := os.WriteFile(stem+".md", []byte(md), 0644); err != nil {
+		return err
+	}
+	if err := writeThumbnail(data.Path, stem+".jpg", thumbnailWidth); err != nil {
+		fmt.Fprintf(os.Stderr, "  [warn] thumbnail %s: %v\n", stem+".jpg", err)
+	}
+	return nil
 }
 
 func runBuildFile(mdPath string) error {
@@ -244,7 +261,7 @@ func runAll(args []string) {
 			defer func() { <-sem }()
 
 			stem := strings.TrimSuffix(jsonPath, ".json")
-			md, err := photoFromFile(jsonPath)
+			data, md, err := photoFromFile(jsonPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "  [error] %s: %v\n", jsonPath, err)
 				errors.Add(1)
@@ -254,6 +271,9 @@ func runAll(args []string) {
 				fmt.Fprintf(os.Stderr, "  [error] write md %s: %v\n", stem+".md", err)
 				errors.Add(1)
 				return
+			}
+			if err := writeThumbnail(data.Path, stem+".jpg", thumbnailWidth); err != nil {
+				fmt.Fprintf(os.Stderr, "  [warn] thumbnail %s: %v\n", stem+".jpg", err)
 			}
 			html, err := buildHTML(md, styles)
 			if err != nil {
