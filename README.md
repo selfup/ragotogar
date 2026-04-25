@@ -356,8 +356,11 @@ Run the full test suite (all Go and bash tests):
 Or run individually:
 
 ```bash
-# Go tests
+# Go tests — sub-modules
 cd cmd/organize && go test -v ./...
+
+# Go tests — root module (cmd/cashier)
+go test -v ./cmd/cashier/...
 
 # Individual bash test scripts
 ./scripts/clone_test.sh
@@ -367,7 +370,7 @@ cd cmd/organize && go test -v ./...
 ./scripts/sync_to_nas_test.sh
 ```
 
-`test.sh` auto-discovers all `cmd/*/go.mod` Go modules and all `scripts/*_test.sh` bash tests.
+`test.sh` auto-discovers all `cmd/*/go.mod` Go sub-modules, the root module (`cmd/cashier`), and all `scripts/*_test.sh` bash tests.
 
 **Go organizer test details:**
 

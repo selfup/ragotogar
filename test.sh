@@ -19,12 +19,17 @@ run() {
   echo ""
 }
 
-# Go tests
+# Go tests — sub-modules (cmd/organize, cmd/describe each have their own go.mod)
 for mod in "$ROOT_DIR"/cmd/*/; do
   [ -f "$mod/go.mod" ] || continue
   name="go test $(basename "$mod")"
   run "$name" bash -c "cd '$mod' && go test -count=1 ./..."
 done
+
+# Go tests — root module (cmd/cashier and any future root-module packages)
+if [ -f "$ROOT_DIR/go.mod" ]; then
+  run "go test (root module)" bash -c "cd '$ROOT_DIR' && go test -count=1 ./..."
+fi
 
 # Bash tests
 for test_script in "$ROOT_DIR"/scripts/*_test.sh; do
