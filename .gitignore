@@ -1,3 +1,8 @@
+# compiled Go binaries (never commit — always use go run)
+cmd/describe/describe
+cmd/organize/organize
+cmd/cashier/cashier
+
 .test_log.txt
 .env
 describe_test*
