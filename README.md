@@ -4,16 +4,16 @@ _Research preview :warning: this project is under heavy discovery work and devel
 
 **RAG Photo Organizer** — a local-LLM photo library with GraphRAG search. *(Yes, it's a palindrome.)*
 
-A collection of utility shell scripts, go scripts, and python scripts to: organize, normalize, describe, and search media.
+A collection of utility shell scripts and Go programs to: organize, normalize, describe, render, and search media.
 
 ## Requirements
 
 - **macOS** — the organizer uses macOS-specific syscalls for file birth time
 - **[LM Studio](https://lmstudio.ai/)** — local LLM inference server (vision + text + embedding models)
 - **[exiftool](https://exiftool.org/)** — EXIF metadata extraction (`brew install exiftool`)
-- **[ImageMagick](https://imagemagick.org/)** — image resizing for LLM previews (`brew install imagemagick`)
+- **[ImageMagick](https://imagemagick.org/)** — image resizing for LLM previews and HTML rendering (`brew install imagemagick`)
 - **[rclone](https://rclone.org/)** — NAS sync (`brew install rclone`)
-- **Go 1.21+** — for building the organizer
+- **Go 1.26+** — all pipeline tools are pure Go (`go run`, no build step)
 - **Python 3.10+** — for GraphRAG search tools
 
 ## Pipeline
@@ -24,10 +24,11 @@ Each step feeds the next:
 |------|------|--------|
 | 1. **Organize** | Sort media into type folders (JPEG, RAW, MOV...) and date subfolders | `scripts/organize.sh` |
 | 2. **Describe** | Send each photo to a vision LLM, get structured JSON with EXIF + visual description | `scripts/photo_describe.sh` |
-| 3. **Index** | Extract entities/relationships into a knowledge graph and embed descriptions as vectors | `tools/index_and_vectorize.sh` |
-| 4. **Search** | Query the graph with natural language, get synthesized answers or file lists | `tools/search.sh` |
+| 3. **Render** | Convert JSON descriptions → markdown → self-contained HTML photo pages | `scripts/dir_photos.sh` |
+| 4. **Index** | Extract entities/relationships into a knowledge graph and embed descriptions as vectors | `tools/index_and_vectorize.sh` |
+| 5. **Search** | Query the graph with natural language, get synthesized answers or file lists | `tools/search.sh` |
 
-Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. But the typical flow is 1 → 2 → 3 → 4.
+Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. The typical full flow is 1 → 2 → 3 → 4 → 5.
 
 ## Components
 
@@ -35,10 +36,61 @@ Steps are independent — you can run search without ever organizing, or describ
 |-----------|----------|-------------|
 | Go Media Organizer | `cmd/organize` | Parallel file organizer: sorts media into type/date folders, reunites sidecars. macOS-only. |
 | Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata → structured JSON |
+| Photo Renderer | `cmd/cashier` | JSON → markdown → self-contained HTML photo pages |
 | NAS Sync | `scripts/clone.sh` | rclone-based sync with month/year filtering and `--no-videos` |
 | GraphRAG Search | `tools/` | LightRAG knowledge graph for semantic and graph-based photo search |
 
 Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (`.files.env`) as the single source of truth for extension mappings.
+
+## Photo Renderer (`cmd/cashier`)
+
+Converts photo description JSON files into styled, self-contained HTML pages. Takes the output of `cmd/describe` and produces one `.md` and one `.html` per photo — all styles are inlined, no external dependencies at view time.
+
+**Full directory pipeline (describe + render):**
+
+```bash
+# Describe all photos in a directory and render to HTML in one command
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
+
+# Custom output directory
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april
+
+# With photo_describe flags (model, retries, etc.)
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april -model mistralai/ministral-3b
+```
+
+**Render only (JSON already exists):**
+
+```bash
+# Single photo: JSON → md + html, then open
+./scripts/photo.sh describe_april/20260417_X100VI_DSCF1781.json \
+                   describe_april/20260417_X100VI_DSCF1781.md \
+                   describe_april/20260417_X100VI_DSCF1781.html
+
+# Batch: all JSON → md + html, 8 workers
+go run ./cmd/cashier all describe_april
+
+# Or as separate passes:
+go run ./cmd/cashier photo-all describe_april   # JSON → md
+go run ./cmd/cashier build-all describe_april   # md → html
+```
+
+**Single file:**
+
+```bash
+go run ./cmd/cashier photo input.json output.md
+go run ./cmd/cashier build input.md output.html
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-workers N` | `8` | Parallel workers for batch commands |
+
+**Output:** Each photo gets a `<date>_<camera>_<filename>.html` with the photo embedded as a base64 JPEG alongside structured sections: visual analysis (subject, setting, light, colors, composition), full EXIF metadata table, and a closing summary.
+
+**Requirements:** [ImageMagick](https://imagemagick.org/) (for embedding the photo into the HTML), Go 1.26+
 
 ## Go Media Organizer (`cmd/organize`)
 
@@ -366,6 +418,40 @@ MACOS_EXCLUDES=("._*" ".DS_Store")
 ```
 
 The Go organizer reads this file via the `-config` flag (passed automatically by `organize.sh`). Each `FOO_EXTS` array maps its extensions to a `FOO` type folder. `SIDECAR_EXTS` defines the sidecar file set.
+
+### `scripts/cashier.sh` — Photo Renderer Wrapper
+
+Convenience wrapper around `go run ./cmd/cashier`. Passes all arguments through.
+
+```bash
+./scripts/cashier.sh photo input.json output.md
+./scripts/cashier.sh build input.md output.html
+./scripts/cashier.sh all describe_output/
+./scripts/cashier.sh photo-all describe_output/
+./scripts/cashier.sh build-all describe_output/
+```
+
+### `scripts/dir_photos.sh` — Full Directory Pipeline
+
+Runs the complete pipeline on a directory of photos: describe → render.
+
+```bash
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april -model mistralai/ministral-3b
+```
+
+Arguments: `<photo_dir> [output_dir] [photo_describe flags...]`. Output directory defaults to `describe_output`.
+
+### `scripts/photo.sh` — Single Photo Render
+
+Converts a single description JSON to markdown and HTML, then opens the result.
+
+```bash
+./scripts/photo.sh describe_output/20260417_X100VI_DSCF1781.json \
+                   describe_output/20260417_X100VI_DSCF1781.md \
+                   describe_output/20260417_X100VI_DSCF1781.html
+```
 
 ### `scripts/organize.sh` — Go Organizer Wrapper
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-node cashier/photo.mjs $1 $2
-node cashier/cli.mjs build $2 > $3
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-open $3
+"$SCRIPT_DIR/cashier.sh" photo "$1" "$2"
+"$SCRIPT_DIR/cashier.sh" build "$2" "$3"
+
+open "$3"
