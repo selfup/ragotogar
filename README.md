@@ -42,56 +42,6 @@ Steps are independent — you can run search without ever organizing, or describ
 
 Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (`.files.env`) as the single source of truth for extension mappings.
 
-## Photo Renderer (`cmd/cashier`)
-
-Converts photo description JSON files into styled, self-contained HTML pages. Takes the output of `cmd/describe` and produces one `.md` and one `.html` per photo — all styles are inlined, no external dependencies at view time.
-
-**Full directory pipeline (describe + render):**
-
-```bash
-# Describe all photos in a directory and render to HTML in one command
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
-
-# Custom output directory
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april
-
-# With photo_describe flags (model, retries, etc.)
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april -model mistralai/ministral-3b
-```
-
-**Render only (JSON already exists):**
-
-```bash
-# Single photo: JSON → md + html, then open
-./scripts/photo.sh describe_april/20260417_X100VI_DSCF1781.json \
-                   describe_april/20260417_X100VI_DSCF1781.md \
-                   describe_april/20260417_X100VI_DSCF1781.html
-
-# Batch: all JSON → md + html, 8 workers
-go run ./cmd/cashier all describe_april
-
-# Or as separate passes:
-go run ./cmd/cashier photo-all describe_april   # JSON → md
-go run ./cmd/cashier build-all describe_april   # md → html
-```
-
-**Single file:**
-
-```bash
-go run ./cmd/cashier photo input.json output.md
-go run ./cmd/cashier build input.md output.html
-```
-
-**Options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-workers N` | `8` | Parallel workers for batch commands |
-
-**Output:** Each photo gets a `<date>_<camera>_<filename>.html` with the photo embedded as a base64 JPEG alongside structured sections: visual analysis (subject, setting, light, colors, composition), full EXIF metadata table, and a closing summary.
-
-**Requirements:** [ImageMagick](https://imagemagick.org/) (for embedding the photo into the HTML), Go 1.26+
-
 ## Go Media Organizer (`cmd/organize`)
 
 Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutines) to move files concurrently across all 3 passes.
@@ -225,6 +175,56 @@ Each photo produces a JSON file named `<date>_<camera>_<filename>.json`:
 - Skips already-processed files (re-run safe)
 - **Requirements:** [exiftool](https://exiftool.org/), [ImageMagick](https://imagemagick.org/), LM Studio running with a vision model loaded
 
+## Photo Renderer (`cmd/cashier`)
+
+Converts photo description JSON files into styled, self-contained HTML pages. Takes the output of `cmd/describe` and produces one `.md` and one `.html` per photo — all styles are inlined, no external dependencies at view time.
+
+**Full directory pipeline (describe + render):**
+
+```bash
+# Describe all photos in a directory and render to HTML in one command
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
+
+# Custom output directory
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april
+
+# With photo_describe flags (model, retries, etc.)
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april -model mistralai/ministral-3b
+```
+
+**Render only (JSON already exists):**
+
+```bash
+# Single photo: JSON → md + html, then open
+./scripts/photo.sh describe_april/20260417_X100VI_DSCF1781.json \
+                   describe_april/20260417_X100VI_DSCF1781.md \
+                   describe_april/20260417_X100VI_DSCF1781.html
+
+# Batch: all JSON → md + html, 8 workers
+go run ./cmd/cashier all describe_april
+
+# Or as separate passes:
+go run ./cmd/cashier photo-all describe_april   # JSON → md
+go run ./cmd/cashier build-all describe_april   # md → html
+```
+
+**Single file:**
+
+```bash
+go run ./cmd/cashier photo input.json output.md
+go run ./cmd/cashier build input.md output.html
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-workers N` | `8` | Parallel workers for batch commands |
+
+**Output:** Each photo gets a `<date>_<camera>_<filename>.html` with the photo embedded as a base64 JPEG alongside structured sections: visual analysis (subject, setting, light, colors, composition), full EXIF metadata table, and a closing summary.
+
+**Requirements:** [ImageMagick](https://imagemagick.org/) (for embedding the photo into the HTML), Go 1.26+
+
 ## Photo Search — GraphRAG (`tools/`)
 
 Indexes photo description JSONs into a knowledge graph using [LightRAG](https://github.com/HKUDS/LightRAG), enabling semantic and graph-based search across your photo library. Uses LM Studio for both LLM (entity/relationship extraction) and embeddings.
@@ -245,7 +245,7 @@ Split into three modules with separate concerns:
 **Setup:**
 
 ```bash
-./tools/setup.sh              # uv sync — installs dependencies into tools/.venv
+./tools/setup.sh              # uv sync — installs dependencies
 ```
 
 **Prerequisites — models loaded in LM Studio:**
@@ -418,16 +418,13 @@ MACOS_EXCLUDES=("._*" ".DS_Store")
 
 The Go organizer reads this file via the `-config` flag (passed automatically by `organize.sh`). Each `FOO_EXTS` array maps its extensions to a `FOO` type folder. `SIDECAR_EXTS` defines the sidecar file set.
 
-### `scripts/cashier.sh` — Photo Renderer Wrapper
+### `scripts/organize.sh` — Go Organizer Wrapper
 
-Convenience wrapper around `go run ./cmd/cashier`. Passes all arguments through.
+Convenience wrapper that runs the Go media organizer. Passes all arguments through.
 
 ```bash
-./scripts/cashier.sh photo input.json output.md
-./scripts/cashier.sh build input.md output.html
-./scripts/cashier.sh all describe_output/
-./scripts/cashier.sh photo-all describe_output/
-./scripts/cashier.sh build-all describe_output/
+./scripts/organize.sh /path/to/directory
+./scripts/organize.sh -mtime /path/to/directory
 ```
 
 ### `scripts/dir_photos.sh` — Full Directory Pipeline
@@ -452,13 +449,16 @@ Converts a single description JSON to markdown and HTML, then opens the result.
                    describe_output/20260417_X100VI_DSCF1781.html
 ```
 
-### `scripts/organize.sh` — Go Organizer Wrapper
+### `scripts/cashier.sh` — Photo Renderer Wrapper
 
-Convenience wrapper that runs the Go media organizer. Passes all arguments through.
+Convenience wrapper around `go run ./cmd/cashier`. Passes all arguments through.
 
 ```bash
-./scripts/organize.sh /path/to/directory
-./scripts/organize.sh -mtime /path/to/directory
+./scripts/cashier.sh photo input.json output.md
+./scripts/cashier.sh build input.md output.html
+./scripts/cashier.sh all describe_output/
+./scripts/cashier.sh photo-all describe_output/
+./scripts/cashier.sh build-all describe_output/
 ```
 
 ### `scripts/batch_photo_describe.sh` — Describe Across Matching Subdirectories
