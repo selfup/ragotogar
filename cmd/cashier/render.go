@@ -263,9 +263,10 @@ func highlightRust(src string) string {
 			j := i + 2
 			depth := 1
 			for j < n && depth > 0 {
-				if src[j] == '[' {
+				switch src[j] {
+				case '[':
 					depth++
-				} else if src[j] == ']' {
+				case ']':
 					depth--
 				}
 				j++
