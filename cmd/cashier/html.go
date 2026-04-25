@@ -15,7 +15,7 @@ func buildHTML(md, stylesCSS string) (string, error) {
 
 	if fm := reFrontmatter.FindStringSubmatch(md); fm != nil {
 		body = md[len(fm[0]):]
-		for _, l := range strings.Split(fm[1], "\n") {
+		for l := range strings.SplitSeq(fm[1], "\n") {
 			if m := reMetaLine.FindStringSubmatch(l); m != nil && m[1] == "title" {
 				title = strings.Trim(m[2], `"'`)
 			}

@@ -80,8 +80,8 @@ func parseBlocks(md string) []Block {
 		}
 
 		// code fence
-		if strings.HasPrefix(line, "```") {
-			header := strings.TrimPrefix(line, "```")
+		if after, ok := strings.CutPrefix(line, "```"); ok {
+			header := after
 			parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
 			lang, file := "", ""
 			if len(parts) > 0 {

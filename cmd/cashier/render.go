@@ -483,11 +483,11 @@ func renderPhotoMeta(sec Section) string {
 	}
 	var rows strings.Builder
 	for _, t := range items {
-		sep := strings.Index(t, ": ")
+		before, after, ok := strings.Cut(t, ": ")
 		key, val := t, ""
-		if sep >= 0 {
-			key = t[:sep]
-			val = t[sep+2:]
+		if ok {
+			key = before
+			val = after
 		}
 		fmt.Fprintf(&rows, `<div class="requirement"><div class="num">%s</div><div class="text">%s</div></div>`+"\n    ",
 			esc(key), inline(val))
@@ -590,7 +590,7 @@ func renderLandscape(sec Section) string {
 	}
 	sm, _ := splitHeading(statBlock)
 	caption := ""
-	for _, l := range strings.Split(statBlock, "\n") {
+	for l := range strings.SplitSeq(statBlock, "\n") {
 		if strings.TrimSpace(l) != "" && !reHeadingLine.MatchString(l) {
 			caption = strings.TrimSpace(l)
 			break
@@ -881,7 +881,7 @@ func renderFalseChoice(sec Section) string {
 func renderComparison(sec Section) string {
 	heading, rest := splitHeading(sec.Body)
 	var rows [][]string
-	for _, l := range strings.Split(rest, "\n") {
+	for l := range strings.SplitSeq(rest, "\n") {
 		l = strings.TrimSpace(l)
 		if !strings.HasPrefix(l, "|") {
 			continue
@@ -891,7 +891,7 @@ func renderComparison(sec Section) string {
 		}
 		l = strings.TrimPrefix(strings.TrimSuffix(l, "|"), "|")
 		var cells []string
-		for _, c := range strings.Split(l, "|") {
+		for c := range strings.SplitSeq(l, "|") {
 			cells = append(cells, strings.TrimSpace(c))
 		}
 		rows = append(rows, cells)
