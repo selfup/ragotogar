@@ -15,12 +15,5 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_DIR="$SCRIPT_DIR/.venv"
 
-if [[ ! -d "$VENV_DIR" ]]; then
-  echo "No venv found. Run ./setup.sh first." >&2
-  exit 1
-fi
-
-source "$VENV_DIR/bin/activate"
-python "$SCRIPT_DIR/search.py" "$@"
+uv run --project "$SCRIPT_DIR" python "$SCRIPT_DIR/search.py" "$@"

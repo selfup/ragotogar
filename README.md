@@ -14,7 +14,7 @@ A collection of utility shell scripts and Go programs to: organize, normalize, d
 - **[ImageMagick](https://imagemagick.org/)** — image resizing for LLM previews and HTML rendering (`brew install imagemagick`)
 - **[rclone](https://rclone.org/)** — NAS sync (`brew install rclone`)
 - **Go 1.26+** — all pipeline tools are pure Go (`go run`, no build step)
-- **Python 3.10+** — for GraphRAG search tools
+- **Python 3.10+** + **[uv](https://docs.astral.sh/uv/)** — for GraphRAG search tools (`brew install uv`)
 
 ## Pipeline
 
@@ -245,8 +245,7 @@ Split into three modules with separate concerns:
 **Setup:**
 
 ```bash
-cd tools
-./setup.sh                    # creates .venv and installs dependencies
+./tools/setup.sh              # uv sync — installs dependencies into tools/.venv
 ```
 
 **Prerequisites — models loaded in LM Studio:**
