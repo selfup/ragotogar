@@ -722,9 +722,10 @@ func renderAnalogy(sec Section) string {
 	sceneBlocks := parseBlocks(scene)
 	var sceneHTMLParts []string
 	for _, b := range sceneBlocks {
-		if b.Type == "p" {
+		switch b.Type {
+		case "p":
 			sceneHTMLParts = append(sceneHTMLParts, fmt.Sprintf(`<p class="scene">%s</p>`, inline(b.Text)))
-		} else if b.Type == "code" {
+		case "code":
 			sceneHTMLParts = append(sceneHTMLParts, renderCode(b))
 		}
 	}
@@ -791,9 +792,10 @@ func renderAction(sec Section) string {
 		blocks := parseBlocks(s)
 		stepH, desc := "", ""
 		for _, b := range blocks {
-			if b.Type == "h" {
+			switch b.Type {
+			case "h":
 				stepH = b.Text
-			} else if b.Type == "p" {
+			case "p":
 				if desc != "" {
 					desc += " "
 				}
@@ -845,9 +847,10 @@ func renderFalseChoice(sec Section) string {
 		b, rest2 := splitHeading(rest1)
 		var parts []string
 		for _, bl := range parseBlocks(rest2) {
-			if bl.Type == "p" {
+			switch bl.Type {
+			case "p":
 				parts = append(parts, fmt.Sprintf("<p>%s</p>", inline(bl.Text)))
-			} else if bl.Type == "code" {
+			case "code":
 				parts = append(parts, renderCode(bl))
 			}
 		}
@@ -917,11 +920,12 @@ func renderComparison(sec Section) string {
 
 	var headerCells []string
 	for i, h := range header {
-		if i == 0 {
+		switch i {
+		case 0:
 			headerCells = append(headerCells, fmt.Sprintf(`<div class="feature">%s</div>`, inline(h)))
-		} else if i == oursIdx {
+		case oursIdx:
 			headerCells = append(headerCells, fmt.Sprintf(`<div class="ours">%s</div>`, inline(h)))
-		} else {
+		default:
 			headerCells = append(headerCells, fmt.Sprintf(`<div>%s</div>`, inline(h)))
 		}
 	}
