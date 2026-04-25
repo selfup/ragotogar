@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,15 +30,17 @@ var supportedExts = map[string]bool{
 var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 type config struct {
-	inputDir    string
-	outputDir   string
-	dryRun      bool
-	lmBase      string
-	model       string
-	resizePx    int
-	jpegQuality int
-	maxRetries  int
-	retryDelay  time.Duration
+	inputDir       string
+	inputFile      string // set when a single file is passed instead of a directory
+	outputDir      string
+	dryRun         bool
+	lmBase         string
+	model          string
+	resizePx       int
+	jpegQuality    int
+	maxRetries     int
+	retryDelay     time.Duration
+	previewWorkers int
 }
 
 // LM Studio chat completion request/response types.
@@ -79,31 +82,38 @@ type chatResponse struct {
 
 func main() {
 	cfg := config{
-		lmBase:      envOr("LM_STUDIO_BASE", "http://localhost:1234"),
-		model:       envOr("LM_MODEL", "qwen/qwen3-vl-8b"),
-		resizePx:    envOrInt("RESIZE_PX", 1024),
-		jpegQuality: envOrInt("JPEG_QUALITY", 85),
-		maxRetries:  3,
-		retryDelay:  5 * time.Second,
+		lmBase:         envOr("LM_STUDIO_BASE", "http://localhost:1234"),
+		model:          envOr("LM_MODEL", "qwen/qwen3-vl-8b"),
+		resizePx:       envOrInt("RESIZE_PX", 1024),
+		jpegQuality:    envOrInt("JPEG_QUALITY", 85),
+		maxRetries:     3,
+		retryDelay:     5 * time.Second,
+		previewWorkers: 4,
 	}
 
 	flag.StringVar(&cfg.outputDir, "output", "", "Output directory for .txt files (default: <input_dir>/descriptions)")
 	flag.StringVar(&cfg.model, "model", cfg.model, "LM Studio model name")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "List files that would be processed without calling the LLM")
 	flag.IntVar(&cfg.maxRetries, "retries", cfg.maxRetries, "Max retry attempts per image on API failure")
+	flag.IntVar(&cfg.previewWorkers, "preview-workers", cfg.previewWorkers, "Parallel preview (resize/extract) workers; inference stays serial")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <input_dir>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <input_dir|image_file>\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
-	cfg.inputDir = flag.Arg(0)
-
-	info, err := os.Stat(cfg.inputDir)
-	if err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "Error: '%s' is not a directory\n", cfg.inputDir)
+	input := flag.Arg(0)
+	info, err := os.Stat(input)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: '%s': %v\n", input, err)
 		os.Exit(1)
+	}
+	if info.IsDir() {
+		cfg.inputDir = input
+	} else {
+		cfg.inputFile = input
+		cfg.inputDir = filepath.Dir(input)
 	}
 
 	if cfg.outputDir == "" {
@@ -122,9 +132,15 @@ func main() {
 }
 
 func run(cfg config) error {
-	files, err := collectFiles(cfg.inputDir, 3)
-	if err != nil {
-		return err
+	var files []string
+	if cfg.inputFile != "" {
+		files = []string{cfg.inputFile}
+	} else {
+		var err error
+		files, err = collectFiles(cfg.inputDir, 3)
+		if err != nil {
+			return err
+		}
 	}
 	if len(files) == 0 {
 		fmt.Printf("No image files found in '%s'\n", cfg.inputDir)
@@ -134,7 +150,8 @@ func run(cfg config) error {
 	fmt.Printf("Found %d image(s) in '%s'\n", len(files), cfg.inputDir)
 	fmt.Printf("Output: %s\n", cfg.outputDir)
 	fmt.Printf("Model:  %s @ %s\n", cfg.model, cfg.lmBase)
-	fmt.Printf("Retries: %d (delay %s)\n\n", cfg.maxRetries, cfg.retryDelay)
+	fmt.Printf("Retries: %d (delay %s)\n", cfg.maxRetries, cfg.retryDelay)
+	fmt.Printf("Preview workers: %d\n\n", cfg.previewWorkers)
 
 	if cfg.dryRun {
 		for _, f := range files {
@@ -150,42 +167,99 @@ func run(cfg config) error {
 
 	magickCmd := findMagick()
 
-	var processed, errors, skipped int
-	for i, file := range files {
+	type job struct {
+		file     string
+		exif     exifData
+		safeName string
+		txtOut   string
+	}
+	type previewResult struct {
+		b64      string
+		duration time.Duration
+		err      error
+	}
+
+	// Build job list up front, applying skip-exists serially so we don't
+	// spawn preview workers for files we won't process.
+	var jobs []job
+	var skipped int
+	for _, file := range files {
 		exif := extractEXIF(file)
 		safeName := safeOutputName(cfg.inputDir, file, exif)
 		txtOut := filepath.Join(cfg.outputDir, safeName+".json")
-
 		if _, err := os.Stat(txtOut); err == nil {
 			fmt.Printf("  [skip] %s (already exists)\n", safeName)
 			skipped++
 			continue
 		}
+		jobs = append(jobs, job{file: file, exif: exif, safeName: safeName, txtOut: txtOut})
+	}
 
-		fmt.Printf("  [%d/%d] %s", i+1, len(files), safeName)
+	if len(jobs) == 0 {
+		fmt.Printf("\nDone. Processed: 0, Errors: 0, Skipped: %d\n", skipped)
+		fmt.Printf("Output: %s\n", cfg.outputDir)
+		return nil
+	}
 
-		previewStart := time.Now()
-		b64, err := makePreviewBase64(magickCmd, file, cfg.resizePx, cfg.jpegQuality)
-		previewElapsed := time.Since(previewStart)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "\n    !! Preview failed: %v, skipping\n", err)
+	// Per-job result slot; buffered so a finished worker can drop its
+	// result and move on without waiting for the (serial) consumer.
+	previews := make([]chan previewResult, len(jobs))
+	for i := range previews {
+		previews[i] = make(chan previewResult, 1)
+	}
+
+	workers := cfg.previewWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	jobCh := make(chan int, len(jobs))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobCh {
+				start := time.Now()
+				b64, err := makePreviewBase64(magickCmd, jobs[idx].file, cfg.resizePx, cfg.jpegQuality)
+				previews[idx] <- previewResult{
+					b64:      b64,
+					duration: time.Since(start),
+					err:      err,
+				}
+			}
+		}()
+	}
+	for i := range jobs {
+		jobCh <- i
+	}
+	close(jobCh)
+
+	var processed, errors int
+	for i, j := range jobs {
+		res := <-previews[i]
+		if res.err != nil {
+			fmt.Fprintf(os.Stderr, "  [%d/%d] %s\n    !! Preview failed: %v, skipping\n",
+				i+1, len(jobs), j.safeName, res.err)
 			errors++
 			continue
 		}
 
 		inferenceStart := time.Now()
-		description, err := describeWithRetry(cfg, b64, exifToPromptString(exif))
+		description, err := describeWithRetry(cfg, res.b64, exifToPromptString(j.exif))
 		inferenceElapsed := time.Since(inferenceStart)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "\n    !! Vision API failed after %d attempts: %v\n", cfg.maxRetries, err)
+			fmt.Fprintf(os.Stderr, "  [%d/%d] %s\n    !! Vision API failed after %d attempts: %v\n",
+				i+1, len(jobs), j.safeName, cfg.maxRetries, err)
 			errors++
+			continue
 		}
 
-		fmt.Printf(" (preview %s, inference %s)\n",
-			previewElapsed.Round(time.Millisecond),
+		fmt.Printf("  [%d/%d] %s (preview %s, inference %s)\n",
+			i+1, len(jobs), j.safeName,
+			res.duration.Round(time.Millisecond),
 			inferenceElapsed.Round(time.Millisecond))
 
-		if err := writeOutput(txtOut, safeName, file, exif, description, previewElapsed, inferenceElapsed); err != nil {
+		if err := writeOutput(j.txtOut, j.safeName, j.file, j.exif, description, res.duration, inferenceElapsed); err != nil {
 			fmt.Fprintf(os.Stderr, "    !! Write failed: %v\n", err)
 			errors++
 			continue
@@ -193,6 +267,7 @@ func run(cfg config) error {
 
 		processed++
 	}
+	wg.Wait()
 
 	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed, errors, skipped)
 	fmt.Printf("Output: %s\n", cfg.outputDir)
@@ -397,29 +472,29 @@ func safeOutputName(inputDir, filePath string, exif exifData) string {
 }
 
 type exifData struct {
-	FileName              string `json:"file_name"`
-	DateTimeOriginal      string `json:"date_time_original"`
-	Make                  string `json:"make"`
-	Model                 string `json:"model"`
-	LensModel             string `json:"lens_model"`
-	LensInfo              string `json:"lens_info"`
-	FocalLength           string `json:"focal_length"`
-	FocalLengthIn35mm     string `json:"focal_length_in_35mm"`
-	FNumber               string `json:"f_number"`
-	ExposureTime          string `json:"exposure_time"`
-	ISO                   string `json:"iso"`
-	ExposureCompensation  string `json:"exposure_compensation"`
-	WhiteBalance          string `json:"white_balance"`
-	MeteringMode          string `json:"metering_mode"`
-	ExposureMode          string `json:"exposure_mode"`
-	Flash                 string `json:"flash"`
-	ImageWidth            string `json:"image_width"`
-	ImageHeight           string `json:"image_height"`
-	GPSLatitude           string `json:"gps_latitude,omitempty"`
-	GPSLongitude          string `json:"gps_longitude,omitempty"`
-	Artist                string `json:"artist,omitempty"`
-	Copyright             string `json:"copyright,omitempty"`
-	Software              string `json:"software,omitempty"`
+	FileName             string `json:"file_name"`
+	DateTimeOriginal     string `json:"date_time_original"`
+	Make                 string `json:"make"`
+	Model                string `json:"model"`
+	LensModel            string `json:"lens_model"`
+	LensInfo             string `json:"lens_info"`
+	FocalLength          string `json:"focal_length"`
+	FocalLengthIn35mm    string `json:"focal_length_in_35mm"`
+	FNumber              string `json:"f_number"`
+	ExposureTime         string `json:"exposure_time"`
+	ISO                  string `json:"iso"`
+	ExposureCompensation string `json:"exposure_compensation"`
+	WhiteBalance         string `json:"white_balance"`
+	MeteringMode         string `json:"metering_mode"`
+	ExposureMode         string `json:"exposure_mode"`
+	Flash                string `json:"flash"`
+	ImageWidth           string `json:"image_width"`
+	ImageHeight          string `json:"image_height"`
+	GPSLatitude          string `json:"gps_latitude,omitempty"`
+	GPSLongitude         string `json:"gps_longitude,omitempty"`
+	Artist               string `json:"artist,omitempty"`
+	Copyright            string `json:"copyright,omitempty"`
+	Software             string `json:"software,omitempty"`
 }
 
 func extractEXIF(file string) exifData {
@@ -603,16 +678,16 @@ type descriptionFields struct {
 }
 
 type photoDescription struct {
-	Name          string            `json:"name"`
-	File          string            `json:"file"`
-	Path          string            `json:"path"`
-	PreviewMs     int64             `json:"preview_ms"`
-	Preview       string            `json:"preview"`
-	InferenceMs   int64             `json:"inference_ms"`
-	Inference     string            `json:"inference"`
-	Metadata      exifData          `json:"metadata"`
-	Fields        descriptionFields `json:"fields"`
-	Description   string            `json:"description"`
+	Name        string            `json:"name"`
+	File        string            `json:"file"`
+	Path        string            `json:"path"`
+	PreviewMs   int64             `json:"preview_ms"`
+	Preview     string            `json:"preview"`
+	InferenceMs int64             `json:"inference_ms"`
+	Inference   string            `json:"inference"`
+	Metadata    exifData          `json:"metadata"`
+	Fields      descriptionFields `json:"fields"`
+	Description string            `json:"description"`
 }
 
 // parseDescriptionFields extracts structured sections from the model output.

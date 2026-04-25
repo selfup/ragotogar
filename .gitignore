@@ -1,6 +1,7 @@
 .test_log.txt
 .env
 describe_test*
+describe_*
 tools/.venv
 tools/.rag_index
 tools/__pycache__
