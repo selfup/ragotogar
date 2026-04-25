@@ -281,13 +281,13 @@ func TestBuildMarkdownContains(t *testing.T) {
 	md := buildMarkdown(data)
 
 	checks := []string{
-		"DSCF1781",               // file stem in title
-		"FUJIFILM X100VI",        // camera
-		"17 April 2026",          // formatted date
+		"DSCF1781",                // file stem in title
+		"FUJIFILM X100VI",         // camera
+		"17 April 2026",           // formatted date
 		"file_name: DSCF1781.JPG", // metadata entry
-		"iso: 200",               // metadata entry
-		"A street scene",         // subject field
-		"Urban environment.",     // setting field (first sentence)
+		"iso: 200",                // metadata entry
+		"A street scene",          // subject field
+		"Urban environment.",      // setting field (first sentence)
 	}
 	for _, want := range checks {
 		if !strings.Contains(md, want) {
@@ -589,5 +589,448 @@ func TestRenderSection_UnknownType(t *testing.T) {
 	}
 	if !strings.Contains(got, "some body text") {
 		t.Errorf("missing body: %q", got)
+	}
+}
+
+func TestSectionMarker(t *testing.T) {
+	got := sectionMarker("III.", "Camera Settings")
+	if !strings.Contains(got, "III.") {
+		t.Errorf("missing numeral: %q", got)
+	}
+	if !strings.Contains(got, "Camera Settings") {
+		t.Errorf("missing label: %q", got)
+	}
+	if !strings.Contains(got, `class="section-marker"`) {
+		t.Errorf("missing section-marker class: %q", got)
+	}
+}
+
+func TestRenderHero(t *testing.T) {
+	// no image prop so embedImage (magick) is not called
+	sec := Section{
+		Type:  "hero",
+		Props: map[string]any{"masthead": "Photograph Analysis", "meta": "17 April 2026"},
+		Body: `Camera line
+
+# Filename / *Camera.*
+
+---
+
+Sub paragraph text.
+
+---
+
+Tagline text here.`,
+	}
+	got, err := renderSection(sec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, `class="hero"`) {
+		t.Errorf("missing hero class: %q", got)
+	}
+	if !strings.Contains(got, "Photograph Analysis") {
+		t.Errorf("missing masthead: %q", got)
+	}
+	if !strings.Contains(got, "17 April 2026") {
+		t.Errorf("missing meta: %q", got)
+	}
+	if !strings.Contains(got, "Tagline text here.") {
+		t.Errorf("missing tagline: %q", got)
+	}
+}
+
+func TestRenderBuilt(t *testing.T) {
+	sec := Section{
+		Type:  "built",
+		Props: map[string]any{"num": "III.", "label": "Requirements"},
+		Body: `# What It Does
+
+1. First requirement
+2. Second requirement
+3. Third requirement
+
+---
+
+A kicker sentence at the end.`,
+	}
+	got := renderBuilt(sec)
+
+	if !strings.Contains(got, `class="built"`) {
+		t.Errorf("missing built class: %q", got)
+	}
+	if !strings.Contains(got, "What It Does") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "First requirement") {
+		t.Errorf("missing first item: %q", got)
+	}
+	if !strings.Contains(got, "A kicker sentence") {
+		t.Errorf("missing kicker: %q", got)
+	}
+	if !strings.Contains(got, "i.") {
+		t.Errorf("missing roman numeral i.: %q", got)
+	}
+}
+
+func TestRenderDualPillars(t *testing.T) {
+	sec := Section{
+		Type:  "dual-pillars",
+		Props: map[string]any{"num": "II.", "label": "Visual Analysis"},
+		Body: `# Five fields.
+
+---
+
+# Subject & Setting
+- Subject. — A street scene.
+- Setting. — Urban environment.
+
+---
+
+# Light & Colors
+- Light. — Bright daylight.
+- Colors. — Blues and greys.`,
+	}
+	got := renderDualPillars(sec)
+
+	if !strings.Contains(got, `class="dual-pillars"`) {
+		t.Errorf("missing dual-pillars class: %q", got)
+	}
+	if !strings.Contains(got, "Five fields.") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "Subject &amp; Setting") {
+		t.Errorf("missing left pillar label (escaped): %q", got)
+	}
+	if !strings.Contains(got, "A street scene.") {
+		t.Errorf("missing pillar item body: %q", got)
+	}
+}
+
+func TestRenderLandscape(t *testing.T) {
+	sec := Section{
+		Type:  "landscape",
+		Props: map[string]any{"num": "II.", "label": "Landscape"},
+		Body: `# Main Heading
+
+Lead paragraph text.
+
+- chip one
+- chip two
+
+---
+
+# 42K
+
+Caption text here.`,
+	}
+	got := renderLandscape(sec)
+
+	if !strings.Contains(got, `class="landscape"`) {
+		t.Errorf("missing landscape class: %q", got)
+	}
+	if !strings.Contains(got, "Main Heading") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "Lead paragraph text.") {
+		t.Errorf("missing lead: %q", got)
+	}
+	if !strings.Contains(got, "42K") {
+		t.Errorf("missing stat: %q", got)
+	}
+	if !strings.Contains(got, "chip one") {
+		t.Errorf("missing chip: %q", got)
+	}
+}
+
+func TestRenderHow(t *testing.T) {
+	sec := Section{
+		Type:  "how",
+		Props: map[string]any{"num": "VI.", "label": "Journey"},
+		Body: `# How It Works
+
+---
+
+Step one label
+
+## First Step
+
+Description of the first step.
+
+---
+
+Step two label
+
+## Second Step
+
+Description of the second step.`,
+	}
+	got := renderHow(sec)
+
+	if !strings.Contains(got, `class="how"`) {
+		t.Errorf("missing how class: %q", got)
+	}
+	if !strings.Contains(got, "How It Works") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "First Step") {
+		t.Errorf("missing step heading: %q", got)
+	}
+	if !strings.Contains(got, "Description of the first step.") {
+		t.Errorf("missing step description: %q", got)
+	}
+	if !strings.Contains(got, `<div class="num">i</div>`) {
+		t.Errorf("missing roman step number: %q", got)
+	}
+}
+
+func TestRenderAnalogy(t *testing.T) {
+	sec := Section{
+		Type:  "analogy",
+		Props: map[string]any{"num": "IV.", "label": "Analogy"},
+		Body: `# Analogy Heading
+
+- Label One — First description.
+- Label Two — Second description.
+- Label Three — Third description.
+
+---
+
+A scene paragraph describing the context.`,
+	}
+	got := renderAnalogy(sec)
+
+	if !strings.Contains(got, `class="analogy"`) {
+		t.Errorf("missing analogy class: %q", got)
+	}
+	if !strings.Contains(got, "Analogy Heading") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "Label One") {
+		t.Errorf("missing icon label: %q", got)
+	}
+	if !strings.Contains(got, "A scene paragraph") {
+		t.Errorf("missing scene: %q", got)
+	}
+}
+
+func TestRenderObjections(t *testing.T) {
+	sec := Section{
+		Type:  "objections",
+		Props: map[string]any{"num": "IX.", "label": "Objections"},
+		Body: `# Common Objections
+
+First question text?
+
+Answer to the first question.
+
+---
+
+Second question?
+
+Second answer here.`,
+	}
+	got := renderObjections(sec)
+
+	if !strings.Contains(got, `class="objections"`) {
+		t.Errorf("missing objections class: %q", got)
+	}
+	if !strings.Contains(got, "Common Objections") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "First question text?") {
+		t.Errorf("missing question: %q", got)
+	}
+	if !strings.Contains(got, "Answer to the first question.") {
+		t.Errorf("missing answer: %q", got)
+	}
+	if !strings.Contains(got, `class="qa"`) {
+		t.Errorf("missing qa div: %q", got)
+	}
+}
+
+func TestRenderAction(t *testing.T) {
+	sec := Section{
+		Type:  "action",
+		Props: map[string]any{"num": "XI.", "label": "Action"},
+		Body: `# Action Heading
+
+---
+
+## Step One Title
+
+Description of step one.
+
+---
+
+## Step Two Title
+
+Description of step two.`,
+	}
+	got := renderAction(sec)
+
+	if !strings.Contains(got, `class="action"`) {
+		t.Errorf("missing action class: %q", got)
+	}
+	if !strings.Contains(got, "Action Heading") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "Step One Title") {
+		t.Errorf("missing step heading: %q", got)
+	}
+	if !strings.Contains(got, "Step One") {
+		t.Errorf("missing step marker: %q", got)
+	}
+	if !strings.Contains(got, "Step Two") {
+		t.Errorf("missing second step marker: %q", got)
+	}
+}
+
+func TestRenderFalseChoice(t *testing.T) {
+	sec := Section{
+		Type:  "false-choice",
+		Props: map[string]any{"num": "I.", "label": "The Premise"},
+		Body: `# The False Choice
+
+---
+
+# Option A
+## Sub A
+
+Content for option A.
+
+---
+
+# Option B
+## Sub B
+
+Content for option B.
+
+---
+
+The conclusion paragraph.`,
+	}
+	got := renderFalseChoice(sec)
+
+	if !strings.Contains(got, `class="false-choice"`) {
+		t.Errorf("missing false-choice class: %q", got)
+	}
+	if !strings.Contains(got, "The False Choice") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "Option A") {
+		t.Errorf("missing left label: %q", got)
+	}
+	if !strings.Contains(got, "Option B") {
+		t.Errorf("missing right label: %q", got)
+	}
+	if !strings.Contains(got, "versus") {
+		t.Errorf("missing vs divider: %q", got)
+	}
+	if !strings.Contains(got, "The conclusion paragraph.") {
+		t.Errorf("missing conclusion: %q", got)
+	}
+}
+
+func TestRenderComparison(t *testing.T) {
+	sec := Section{
+		Type:  "comparison",
+		Props: map[string]any{"num": "VIII.", "label": "Comparison"},
+		Body: `# Comparison Heading
+
+| Feature | Option A | Ours |
+|---------|----------|------|
+| Speed | Slow | Fast |
+| Cost | High | Low |`,
+	}
+	got := renderComparison(sec)
+
+	if !strings.Contains(got, `class="comparison"`) {
+		t.Errorf("missing comparison class: %q", got)
+	}
+	if !strings.Contains(got, "Comparison Heading") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "Speed") {
+		t.Errorf("missing row feature: %q", got)
+	}
+	if !strings.Contains(got, `class="val good"`) {
+		t.Errorf("missing good (ours) cell: %q", got)
+	}
+	if !strings.Contains(got, `class="val bad"`) {
+		t.Errorf("missing bad (other) cell: %q", got)
+	}
+	if !strings.Contains(got, `class="ours"`) {
+		t.Errorf("missing ours header cell: %q", got)
+	}
+}
+
+func TestRenderProposal(t *testing.T) {
+	sec := Section{
+		Type:  "proposal",
+		Props: map[string]any{"num": "V.", "label": "The Proposal"},
+		Body: `# Proposal Heading
+
+The lede paragraph goes here.
+
+---
+
+MARK | Tier Name
+### Card Title
+Card subtitle text.
+
+1. CODE-001 | Sealed
+2. CODE-002 | Used
+
+---
+
+- Label One — Annotation content one.
+- Label Two — Annotation content two.`,
+	}
+	got := renderProposal(sec)
+
+	if !strings.Contains(got, `class="proposal"`) {
+		t.Errorf("missing proposal class: %q", got)
+	}
+	if !strings.Contains(got, "Proposal Heading") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "The lede paragraph") {
+		t.Errorf("missing lede: %q", got)
+	}
+	if !strings.Contains(got, "Card Title") {
+		t.Errorf("missing card title: %q", got)
+	}
+	if !strings.Contains(got, "Label One") {
+		t.Errorf("missing annotation label: %q", got)
+	}
+}
+
+func TestProseRender(t *testing.T) {
+	sec := Section{
+		Type:  "prose",
+		Props: map[string]any{"num": "V.", "label": "Notes"},
+		Body: `# Prose Heading
+
+A body paragraph here.
+
+- list item one
+- list item two`,
+	}
+	got, err := renderSection(sec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, `class="prose"`) {
+		t.Errorf("missing prose class: %q", got)
+	}
+	if !strings.Contains(got, "Prose Heading") {
+		t.Errorf("missing heading: %q", got)
+	}
+	if !strings.Contains(got, "A body paragraph here.") {
+		t.Errorf("missing body paragraph: %q", got)
+	}
+	if !strings.Contains(got, "list item one") {
+		t.Errorf("missing list item: %q", got)
 	}
 }
