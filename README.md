@@ -24,11 +24,12 @@ Each step feeds the next:
 |------|------|--------|
 | 1. **Organize** | Sort media into type folders (JPEG, RAW, MOV...) and date subfolders | `scripts/organize.sh` |
 | 2. **Describe** | Send each photo to a vision LLM, get structured JSON with EXIF + visual description | `scripts/photo_describe.sh` |
-| 3. **Render** | Convert JSON descriptions → markdown → self-contained HTML photo pages | `scripts/dir_photos.sh` |
+| 3. **Render** | Convert JSON descriptions → markdown + standalone HTML + thumbnail JPEG | `scripts/dir_photos.sh` |
 | 4. **Index** | Extract entities/relationships into a knowledge graph and embed descriptions as vectors | `tools/index_and_vectorize.sh` |
 | 5. **Search** | Query the graph with natural language, get synthesized answers or file lists | `tools/search.sh` |
+| 6. **Browse** | Web landing page — search box + thumbnail grid linking to full photo pages | `scripts/web.sh` |
 
-Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. The typical full flow is 1 → 2 → 3 → 4 → 5.
+Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. The typical full flow is 1 → 2 → 3 → 4 → 5 → 6.
 
 ## Components
 
@@ -36,9 +37,10 @@ Steps are independent — you can run search without ever organizing, or describ
 |-----------|----------|-------------|
 | Go Media Organizer | `cmd/organize` | Parallel file organizer: sorts media into type/date folders, reunites sidecars. macOS-only. |
 | Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata → structured JSON |
-| Photo Renderer | `cmd/cashier` | JSON → markdown → self-contained HTML photo pages |
+| Photo Renderer | `cmd/cashier` | JSON → markdown + self-contained HTML + thumbnail JPEG |
 | NAS Sync | `scripts/clone.sh` | rclone-based sync with month/year filtering and `--no-videos` |
 | GraphRAG Search | `tools/` | LightRAG knowledge graph for semantic and graph-based photo search |
+| Web Landing Page | `cmd/web` | Browser UI on top of search + render — search box + thumbnail grid linking to full photo pages |
 
 Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (`.files.env`) as the single source of truth for extension mappings.
 
@@ -221,7 +223,7 @@ go run ./cmd/cashier build input.md output.html
 |------|---------|-------------|
 | `-workers N` | `8` | Parallel workers for batch commands |
 
-**Output:** Each photo gets a `<date>_<camera>_<filename>.html` with the photo embedded as a base64 JPEG alongside structured sections: visual analysis (subject, setting, light, colors, composition), full EXIF metadata table, and a closing summary.
+**Output:** Each photo gets `.md`, `.html`, and `.jpg` files next to the input `.json`. The HTML embeds the photo as base64 (so it stays standalone) and includes structured sections: visual analysis (subject, setting, light, colors, composition), full EXIF metadata table, and a closing summary. The `.jpg` is a 1024px-wide resized sidecar used by `cmd/web` for thumbnail grids.
 
 **Requirements:** [ImageMagick](https://imagemagick.org/) (for embedding the photo into the HTML), Go 1.26+
 
@@ -318,8 +320,8 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "anal
 |------|-------------|
 | *(default)* | Synthesis only — LLM answer from retrieved context |
 | `--sources` | Synthesis + full list of all retrieved source files |
-| `--retrieve` | Retrieval only — strict matching (cosine ≥ 0.5, naive mode), returns matched file list with no LLM synthesis |
-| `--precise` | Strict retrieval (cosine ≥ 0.5, naive mode) then synthesize over only exact matches. Best with `SEARCH_MODEL` override for large result sets. See [`STRATEGIES.md`](STRATEGIES.md). |
+| `--retrieve` | Retrieval only — strict matching (cosine ≥ 0.5), returns matched file list with no LLM synthesis. Honors `--mode` (default: `hybrid`). |
+| `--precise` | Strict retrieval (cosine ≥ 0.5) then synthesize over only exact matches. Honors `--mode`. Best with `SEARCH_MODEL` override for large result sets. See [`STRATEGIES.md`](STRATEGIES.md). |
 
 **Environment variables:**
 
@@ -344,6 +346,46 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "anal
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
 - Index is stored in `tools/.rag_index/` (gitignored)
 - **Requirements:** Python 3.10+, LM Studio with an LLM and embedding model loaded
+
+## Web Landing Page (`cmd/web`)
+
+Browser UI sitting on top of the search + render pipeline. Type a query, get a grid of matching photo thumbnails; click a thumbnail to open the full standalone HTML photo page.
+
+**Usage:**
+
+```bash
+./scripts/web.sh                       # default: :8080, dir=describe_output
+./scripts/web.sh -dir descriptions     # different photo dir
+./scripts/web.sh -addr :9000           # different port
+```
+
+Then open `http://localhost:8080`.
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-addr` | `:8080` | Listen address |
+| `-dir` | `describe_output` | Directory of cashier outputs (.json/.md/.html/.jpg) |
+| `-repo` | `.` | Repo root (where `tools/search.sh` lives) |
+
+**How it works:**
+
+1. `GET /` — search box + a three-pill mode toggle (vector / graph / hybrid) + result grid
+2. `GET /?q=<query>&mode=<mode>` — shells out to `./tools/search.sh --retrieve --mode <mode> "<query>"`, parses the file list, renders thumbnails for results that have a `.jpg` sidecar in `-dir`
+3. `GET /photos/...` — static file server over `-dir`; serves `<name>.jpg` for thumbs and `<name>.html` for the full post
+
+**Mode toggle:**
+
+| Pill | Mode | Behavior |
+|------|------|----------|
+| `vector` | `naive` | Pure vector similarity. **Default and recommended** — wins on this corpus. |
+| `graph` | `local` | LLM extracts keywords from the query, then walks the graph from matched entities. Slower (~1–2s LLM call), often underperforms naive on small corpora where entity coverage is thin. |
+| `hybrid` | `hybrid` | local + global community summaries. Broadest coverage, usually similar to local for direct photo lookup. |
+
+All modes use `--retrieve` (cosine ≥ 0.5, no LLM synthesis). Clicking a pill auto-submits the form. Results that don't have a corresponding `.jpg` sidecar in the photo dir are silently skipped — re-run `cmd/cashier` if you upgrade an old output dir.
+
+**Requirements:** A built LightRAG index (see [Photo Search](#photo-search--graphrag-tools)), photos rendered with `cmd/cashier` (so `.jpg` sidecars exist).
 
 ## Tests
 
@@ -462,6 +504,16 @@ Convenience wrapper around `go run ./cmd/cashier`. Passes all arguments through.
 ./scripts/cashier.sh all describe_output/
 ./scripts/cashier.sh photo-all describe_output/
 ./scripts/cashier.sh build-all describe_output/
+```
+
+### `scripts/web.sh` — Web Landing Page
+
+Runs the Go landing page server. Defaults to `:8080` and serves `describe_output/`. See the [Web Landing Page](#web-landing-page-cmdweb) section for details.
+
+```bash
+./scripts/web.sh                       # default
+./scripts/web.sh -dir descriptions     # different photo dir
+./scripts/web.sh -addr :9000           # different port
 ```
 
 ### `scripts/batch_photo_describe.sh` — Describe Across Matching Subdirectories

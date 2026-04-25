@@ -64,12 +64,17 @@ async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, pre
     cosine_threshold = 0.5 if (precise or retrieve) else None
     rag = await create_rag(model=SEARCH_MODEL, cosine_threshold=cosine_threshold)
 
+    # --retrieve and --precise both pin chunk_top_k=500; the user's chosen --mode
+    # (naive/local/hybrid) is preserved so retrieval can be either pure vector
+    # or graph-aware.
+    strict_top_k = 500
+
     try:
         if retrieve:
-            result = await rag.aquery_data(query_text, param=QueryParam(mode="naive", enable_rerank=False, chunk_top_k=500))
+            result = await rag.aquery_data(query_text, param=QueryParam(mode=mode, enable_rerank=False, chunk_top_k=strict_top_k))
             print_sources(result.get("data", {}))
         elif precise:
-            result = await rag.aquery_llm(query_text, param=QueryParam(mode="naive", enable_rerank=False, chunk_top_k=500))
+            result = await rag.aquery_llm(query_text, param=QueryParam(mode=mode, enable_rerank=False, chunk_top_k=strict_top_k))
             print(result.get("llm_response", {}).get("content", ""))
             print_sources(result.get("data", {}))
         elif sources:

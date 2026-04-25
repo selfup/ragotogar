@@ -179,13 +179,15 @@ The default `COSINE_THRESHOLD` in LightRAG is 0.2 — far too permissive for nom
 
 Nomic embeddings top out around 0.5–0.6 cosine similarity even for strong matches. This is a property of the embedding model, not a bug.
 
-`--retrieve` and `--precise` hardcode cosine ≥ 0.5 automatically. The default 0.2 is fine for synthesis queries — the LLM filters noise during synthesis, and wider retrieval gives it more material to work with.
+`--retrieve` and `--precise` hardcode cosine ≥ 0.5 automatically but compose with `--mode` (naive/local/hybrid) — the strict threshold applies to whichever retrieval mode you pick. The default 0.2 is fine for synthesis queries — the LLM filters noise during synthesis, and wider retrieval gives it more material to work with.
 
 ### Why `naive` mode is better for retrieval
 
 For concrete-noun queries like "airplanes", `naive` mode (pure vector search across all chunks) outperforms `hybrid` mode. Hybrid pre-filters through graph entity matching, which can exclude chunks whose text mentions airplanes but whose entities weren't linked to an "airplane" graph node. Tested: `naive` returned 69 candidates at default threshold vs `hybrid`'s 41 — the graph acted as an accidental filter that dropped real matches.
 
-`--retrieve` and `--precise` hardcode naive mode automatically. Graph modes add value for synthesis where structured context matters.
+This holds for *conceptual* queries too on small corpora (validated on 41-photo April set, queries like "planes in sky"): `naive` returned the right photos, `local` underperformed because entity-extraction depth on a 41-doc graph isn't dense enough to back graph-walking. `cmd/web` ships `naive` as the default mode for this reason; the toggle exists so you can A/B against `local`/`hybrid` if a query feels like it should benefit from graph traversal.
+
+`--retrieve` and `--precise` compose with `--mode` — the strict cosine threshold applies regardless of the retrieval mode you pick. Graph modes add value for synthesis where structured context matters.
 
 ### `--precise` mode
 

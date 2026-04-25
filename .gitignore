@@ -2,6 +2,7 @@
 cmd/describe/describe
 cmd/organize/organize
 cmd/cashier/cashier
+cmd/web/web
 
 .test_log.txt
 .env
