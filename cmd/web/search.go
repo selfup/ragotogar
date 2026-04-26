@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -12,15 +13,31 @@ import (
 // matches "  [N] <path>" lines printed by tools/search.py print_sources()
 var searchLineRE = regexp.MustCompile(`^\s*\[(\d+)\]\s+(.+)$`)
 
-// search shells out to tools/search.sh --retrieve --mode <mode> and returns
-// results that have a .jpg sidecar in photoDir. Order is preserved from the
-// search output (LightRAG retrieval order — most relevant first).
+// search shells out to tools/search.sh and returns results that have a .jpg
+// sidecar in photoDir. Order is preserved from the search output (LightRAG
+// retrieval order — most relevant first).
+//
+// Mode "naive-verify" is a compound: --retrieve --mode naive --verify, which
+// runs an LLM yes/no check on each candidate and keeps only the YES matches.
 func search(query, mode, repoRoot, photoDir string) []result {
-	cmd := exec.Command("./tools/search.sh", "--retrieve", "--mode", mode, query)
+	args := []string{"--retrieve"}
+	if mode == "naive-verify" {
+		// --json-dir lets verify resolve LightRAG basenames back to readable JSONs
+		args = append(args, "--mode", "naive", "--verify", "--json-dir", photoDir)
+	} else {
+		args = append(args, "--mode", mode)
+	}
+	args = append(args, query)
+
+	cmd := exec.Command("./tools/search.sh", args...)
 	cmd.Dir = repoRoot
-	out, err := cmd.CombinedOutput()
+	// Pass stderr through to the server's terminal so progress/debug output
+	// from search.py (e.g. per-photo verify verdicts) is visible.
+	cmd.Stderr = os.Stderr
+	fmt.Fprintf(os.Stderr, "search: q=%q mode=%s\n", query, mode)
+	out, err := cmd.Output()
 	if err != nil {
-		log.Printf("search %q (mode=%s): %v\n%s", query, mode, err, out)
+		log.Printf("search %q (mode=%s): %v", query, mode, err)
 		return nil
 	}
 	var results []result

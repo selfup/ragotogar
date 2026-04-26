@@ -18,25 +18,21 @@ Environment:
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 
 from lightrag import QueryParam
 
-from rag_common import INDEX_DIR, SEARCH_MODEL, create_rag
+from rag_common import INDEX_DIR, SEARCH_MODEL, create_rag, make_llm_func
 
 
-def print_sources(data):
-    """Print retrieved source files from structured query data."""
+def unique_files(data):
+    """Extract unique source file paths from a query-data response, in retrieval order."""
     refs = data.get("references", [])
     chunks = data.get("chunks", [])
-    if not refs and not chunks:
-        return
-
-    # Build ref_id -> file_path lookup
     ref_map = {r["reference_id"]: r["file_path"] for r in refs if "reference_id" in r}
 
-    # Collect unique file paths in retrieval order
     seen = set()
     files = []
     for chunk in chunks:
@@ -44,19 +40,98 @@ def print_sources(data):
         if fp and fp not in seen:
             seen.add(fp)
             files.append(fp)
-    # Pick up any refs not already covered by chunks
     for r in refs:
         fp = r.get("file_path", "")
         if fp and fp not in seen:
             seen.add(fp)
             files.append(fp)
+    return files
 
+
+def print_sources(data):
+    """Print retrieved source files from structured query data."""
+    files = unique_files(data)
+    if not files:
+        return
     print(f"\n--- Retrieved Sources ({len(files)} files) ---")
     for i, fp in enumerate(files, 1):
         print(f"  [{i}] {fp}")
 
 
-async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, precise=False):
+def _read_description(json_path, json_dir=None):
+    """Read the `description` field from a photo JSON.
+
+    LightRAG stores only basenames (see index_and_vectorize.py), so when the
+    indexed path doesn't resolve from cwd we fall back to <json_dir>/<basename>.
+    Returns None if neither lookup succeeds.
+    """
+    paths_to_try = [json_path]
+    if json_dir:
+        paths_to_try.append(os.path.join(json_dir, os.path.basename(json_path)))
+    for p in paths_to_try:
+        try:
+            with open(p, "r") as f:
+                data = json.load(f)
+            return data.get("description") or ""
+        except FileNotFoundError:
+            continue
+        except Exception:
+            return None
+    return None
+
+
+VERIFY_PROMPT = """Determine if a photo is relevant to a search query.
+
+Query: {query}
+
+Photo description:
+{description}
+
+If the description mentions or shows what the query is about — even as a small,
+background, or partial element — answer YES. Only answer NO if the photo is
+clearly unrelated to the query.
+
+Reply with exactly one word: YES or NO."""
+
+
+async def _verify_one(query, file_path, description, llm_func):
+    """Ask the LLM if a photo matches the query. Returns (file_path, verdict, raw_response)."""
+    if not description:
+        return file_path, False, "(no description)"
+    prompt = VERIFY_PROMPT.format(query=query, description=description[:2000])
+    try:
+        resp = await llm_func(prompt)
+    except Exception as e:
+        print(f"  [verify error] {file_path}: {e}", file=sys.stderr)
+        return file_path, False, f"(error: {e})"
+    verdict = resp.strip().upper().startswith("Y")
+    return file_path, verdict, resp.strip()
+
+
+async def verify_filter(query, files, llm_func, json_dir=None):
+    """Run parallel LLM verification on each file's description, return only matches.
+    Logs per-photo verdicts to stderr for debugging."""
+    descriptions = [_read_description(fp, json_dir) for fp in files]
+    print(f"\n--- Verifying {len(files)} candidate(s) with LLM ---", file=sys.stderr)
+    results = await asyncio.gather(*[
+        _verify_one(query, fp, desc, llm_func) for fp, desc in zip(files, descriptions)
+    ])
+    kept = []
+    for fp, verdict, raw in results:
+        marker = "✓" if verdict else "✗"
+        print(f"  {marker} {os.path.basename(fp)}: {raw[:80]}", file=sys.stderr)
+        if verdict:
+            kept.append(fp)
+    return kept
+
+
+def print_verified(query, kept, total):
+    print(f"\n--- Verified Sources ({len(kept)}/{total} kept) ---")
+    for i, fp in enumerate(kept, 1):
+        print(f"  [{i}] {fp}")
+
+
+async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, precise=False, verify=False, json_dir=None):
     if not os.path.exists(INDEX_DIR):
         print("No index found. Run index_and_vectorize.py first.", file=sys.stderr)
         sys.exit(1)
@@ -72,7 +147,12 @@ async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, pre
     try:
         if retrieve:
             result = await rag.aquery_data(query_text, param=QueryParam(mode=mode, enable_rerank=False, chunk_top_k=strict_top_k))
-            print_sources(result.get("data", {}))
+            if verify:
+                files = unique_files(result.get("data", {}))
+                kept = await verify_filter(query_text, files, make_llm_func(SEARCH_MODEL), json_dir=json_dir)
+                print_verified(query_text, kept, len(files))
+            else:
+                print_sources(result.get("data", {}))
         elif precise:
             result = await rag.aquery_llm(query_text, param=QueryParam(mode=mode, enable_rerank=False, chunk_top_k=strict_top_k))
             print(result.get("llm_response", {}).get("content", ""))
@@ -113,8 +193,18 @@ def main():
         action="store_true",
         help="Strict retrieval (cosine>=0.5, naive) then synthesize over exact matches only",
     )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="With --retrieve: run an LLM yes/no check on each candidate's description, keep only YES matches",
+    )
+    parser.add_argument(
+        "--json-dir",
+        default=None,
+        help="Directory containing the photo .json files; used by --verify to resolve LightRAG basenames to readable paths",
+    )
     args = parser.parse_args()
-    asyncio.run(do_query(args.text, mode=args.mode, sources=args.sources, retrieve=args.retrieve, precise=args.precise))
+    asyncio.run(do_query(args.text, mode=args.mode, sources=args.sources, retrieve=args.retrieve, precise=args.precise, verify=args.verify, json_dir=args.json_dir))
 
 
 if __name__ == "__main__":

@@ -72,10 +72,13 @@ const indexHTML = `<!doctype html>
     <h1><a href="/">ragotogar</a></h1>
     <form method="GET" action="/">
       <div class="modes" title="Retrieval mode">
-        <label class="{{if eq .Mode "naive"}}active{{end}}" title="Pure vector similarity. Best for concrete nouns.">
+        <label class="{{if eq .Mode "naive"}}active{{end}}" title="Pure vector similarity. Fast, broad recall.">
           <input type="radio" name="mode" value="naive" {{if eq .Mode "naive"}}checked{{end}} onchange="this.form.submit()">vector
         </label>
-        <label class="{{if eq .Mode "local"}}active{{end}}" title="LLM extracts keywords, then walks the graph. Best for conceptual queries.">
+        <label class="{{if eq .Mode "naive-verify"}}active{{end}}" title="Vector retrieval, then LLM yes/no check on each candidate. Slower (~3–6s) but higher precision.">
+          <input type="radio" name="mode" value="naive-verify" {{if eq .Mode "naive-verify"}}checked{{end}} onchange="this.form.submit()">naive-verify
+        </label>
+        <label class="{{if eq .Mode "local"}}active{{end}}" title="LLM extracts keywords, then walks the graph. Often underperforms naive on small corpora.">
           <input type="radio" name="mode" value="local" {{if eq .Mode "local"}}checked{{end}} onchange="this.form.submit()">graph
         </label>
         <label class="{{if eq .Mode "hybrid"}}active{{end}}" title="Local + global. Broadest coverage.">

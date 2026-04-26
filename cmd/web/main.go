@@ -20,9 +20,15 @@ type pageData struct {
 	Results []result
 }
 
-// validModes mirrors search.py's --mode choices, minus "global" (which writes
-// thematic summaries — useless for photo lookup).
-var validModes = map[string]bool{"naive": true, "local": true, "hybrid": true}
+// validModes mirrors search.py's --mode choices, minus "global" (synthesis-only).
+// "naive-verify" is a cmd/web-specific compound mode → search.py --retrieve
+// --mode naive --verify (LLM filters each candidate).
+var validModes = map[string]bool{
+	"naive":        true,
+	"naive-verify": true,
+	"local":        true,
+	"hybrid":       true,
+}
 
 func resolveMode(m string) string {
 	if validModes[m] {

@@ -189,6 +189,14 @@ This holds for *conceptual* queries too on small corpora (validated on 41-photo 
 
 `--retrieve` and `--precise` compose with `--mode` — the strict cosine threshold applies regardless of the retrieval mode you pick. Graph modes add value for synthesis where structured context matters.
 
+### `naive-verify` — vector retrieval + LLM yes/no filter
+
+`--retrieve --verify` (exposed in `cmd/web` as the `naive-verify` pill) takes vector retrieval's candidate set and runs a parallel `yes/no does this match` check against each photo's `description` field via Ministral 3B. Only YES matches survive.
+
+It's a precision lever, not a recall lever — the LLM can only filter what retrieval already surfaced. For a query like "horses" against a description that says "cows", vector finds the photo via embedding similarity (cows ≈ horses semantically) but verify drops it because the description doesn't actually mention horses. Switching the query to "cow" surfaces the same photo and verify keeps it.
+
+When to use it: vector mode is returning too many off-topic hits and you want a stricter filter without losing the exact-match discipline. ~3–6s overhead per query (8-way parallel through Ministral). Pass `--json-dir <dir>` so verify can resolve the basenames LightRAG stores back to readable JSON files.
+
 ### `--precise` mode
 
 `--precise` does strict retrieval (cosine ≥ 0.5, naive, all matches) then synthesizes over only exact matches. The result set can be large — e.g. "indoor" returns 65 photos from a 477-doc corpus. Model choice matters:

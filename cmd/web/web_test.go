@@ -8,6 +8,7 @@ import (
 func TestResolveMode(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"naive", "naive"},
+		{"naive-verify", "naive-verify"}, // compound mode → --retrieve --mode naive --verify
 		{"local", "local"},
 		{"hybrid", "hybrid"},
 		{"", "naive"},        // empty falls back to default

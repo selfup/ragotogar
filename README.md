@@ -322,6 +322,7 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "anal
 | `--sources` | Synthesis + full list of all retrieved source files |
 | `--retrieve` | Retrieval only — strict matching (cosine ≥ 0.5), returns matched file list with no LLM synthesis. Honors `--mode` (default: `hybrid`). |
 | `--precise` | Strict retrieval (cosine ≥ 0.5) then synthesize over only exact matches. Honors `--mode`. Best with `SEARCH_MODEL` override for large result sets. See [`STRATEGIES.md`](STRATEGIES.md). |
+| `--verify` | Composes with `--retrieve`: runs an LLM yes/no relevance check on each candidate's `description` field (parallel via Ministral 3B), keeps only YES matches. Pair with `--json-dir <dir>` so the basenames LightRAG stores can be resolved back to the actual JSONs. |
 
 **Environment variables:**
 
@@ -377,13 +378,14 @@ Then open `http://localhost:8080`.
 
 **Mode toggle:**
 
-| Pill | Mode | Behavior |
-|------|------|----------|
-| `vector` | `naive` | Pure vector similarity. **Default and recommended** — wins on this corpus. |
-| `graph` | `local` | LLM extracts keywords from the query, then walks the graph from matched entities. Slower (~1–2s LLM call), often underperforms naive on small corpora where entity coverage is thin. |
-| `hybrid` | `hybrid` | local + global community summaries. Broadest coverage, usually similar to local for direct photo lookup. |
+| Pill | search.py invocation | Behavior |
+|------|----------------------|----------|
+| `vector` | `--retrieve --mode naive` | Pure vector similarity. **Default and recommended** — wins on this corpus. <500ms. |
+| `naive-verify` | `--retrieve --mode naive --verify --json-dir <dir>` | Vector retrieval + an LLM yes/no check on each candidate's `description` field. ~3–6s per query. Use when vector returns too many noisy hits and you want a stricter precision filter. |
+| `graph` | `--retrieve --mode local` | LLM extracts keywords from the query, then walks the graph from matched entities. ~1–2s. Often underperforms naive on small corpora where entity coverage is thin. |
+| `hybrid` | `--retrieve --mode hybrid` | local + global community summaries. Broadest coverage, usually similar to local for direct photo lookup. |
 
-All modes use `--retrieve` (cosine ≥ 0.5, no LLM synthesis). Clicking a pill auto-submits the form. Results that don't have a corresponding `.jpg` sidecar in the photo dir are silently skipped — re-run `cmd/cashier` if you upgrade an old output dir.
+All pills use `--retrieve` (cosine ≥ 0.5, no LLM synthesis). Clicking a pill auto-submits the form. The web server passes its `-dir` through as `--json-dir` so verify can resolve LightRAG's basename-only references back to readable JSON files. Results that don't have a corresponding `.jpg` sidecar in the photo dir are silently skipped — re-run `cmd/cashier` if you upgrade an old output dir.
 
 **Requirements:** A built LightRAG index (see [Photo Search](#photo-search--graphrag-tools)), photos rendered with `cmd/cashier` (so `.jpg` sidecars exist).
 
