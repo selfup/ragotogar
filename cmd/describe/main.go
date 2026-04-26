@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,17 +31,18 @@ var supportedExts = map[string]bool{
 var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 type config struct {
-	inputDir       string
-	inputFile      string // set when a single file is passed instead of a directory
-	outputDir      string
-	dryRun         bool
-	lmBase         string
-	model          string
-	resizePx       int
-	jpegQuality    int
-	maxRetries     int
-	retryDelay     time.Duration
-	previewWorkers int
+	inputDir         string
+	inputFile        string // set when a single file is passed instead of a directory
+	outputDir        string
+	dryRun           bool
+	lmBase           string
+	model            string
+	resizePx         int
+	jpegQuality      int
+	maxRetries       int
+	retryDelay       time.Duration
+	previewWorkers   int
+	inferenceWorkers int
 }
 
 // LM Studio chat completion request/response types.
@@ -82,20 +84,22 @@ type chatResponse struct {
 
 func main() {
 	cfg := config{
-		lmBase:         envOr("LM_STUDIO_BASE", "http://localhost:1234"),
-		model:          envOr("LM_MODEL", "qwen/qwen3-vl-8b"),
-		resizePx:       envOrInt("RESIZE_PX", 1024),
-		jpegQuality:    envOrInt("JPEG_QUALITY", 85),
-		maxRetries:     3,
-		retryDelay:     5 * time.Second,
-		previewWorkers: 4,
+		lmBase:           envOr("LM_STUDIO_BASE", "http://localhost:1234"),
+		model:            envOr("LM_MODEL", "qwen/qwen3-vl-8b"),
+		resizePx:         envOrInt("RESIZE_PX", 1024),
+		jpegQuality:      envOrInt("JPEG_QUALITY", 85),
+		maxRetries:       3,
+		retryDelay:       5 * time.Second,
+		previewWorkers:   4,
+		inferenceWorkers: 1,
 	}
 
 	flag.StringVar(&cfg.outputDir, "output", "", "Output directory for .txt files (default: <input_dir>/descriptions)")
 	flag.StringVar(&cfg.model, "model", cfg.model, "LM Studio model name")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "List files that would be processed without calling the LLM")
 	flag.IntVar(&cfg.maxRetries, "retries", cfg.maxRetries, "Max retry attempts per image on API failure")
-	flag.IntVar(&cfg.previewWorkers, "preview-workers", cfg.previewWorkers, "Parallel preview (resize/extract) workers; inference stays serial")
+	flag.IntVar(&cfg.previewWorkers, "preview-workers", cfg.previewWorkers, "Parallel preview (resize/extract) workers")
+	flag.IntVar(&cfg.inferenceWorkers, "inference-workers", cfg.inferenceWorkers, "Parallel LLM inference workers (default 1; bump to N to use LM Studio's --parallel N batching)")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -151,7 +155,8 @@ func run(cfg config) error {
 	fmt.Printf("Output: %s\n", cfg.outputDir)
 	fmt.Printf("Model:  %s @ %s\n", cfg.model, cfg.lmBase)
 	fmt.Printf("Retries: %d (delay %s)\n", cfg.maxRetries, cfg.retryDelay)
-	fmt.Printf("Preview workers: %d\n\n", cfg.previewWorkers)
+	fmt.Printf("Preview workers: %d\n", cfg.previewWorkers)
+	fmt.Printf("Inference workers: %d\n\n", cfg.inferenceWorkers)
 
 	if cfg.dryRun {
 		for _, f := range files {
@@ -215,9 +220,7 @@ func run(cfg config) error {
 	jobCh := make(chan int, len(jobs))
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for idx := range jobCh {
 				start := time.Now()
 				b64, err := makePreviewBase64(magickCmd, jobs[idx].file, cfg.resizePx, cfg.jpegQuality)
@@ -227,49 +230,70 @@ func run(cfg config) error {
 					err:      err,
 				}
 			}
-		}()
+		})
 	}
 	for i := range jobs {
 		jobCh <- i
 	}
 	close(jobCh)
 
-	var processed, errors int
-	for i, j := range jobs {
-		res := <-previews[i]
-		if res.err != nil {
-			fmt.Fprintf(os.Stderr, "  [%d/%d] %s\n    !! Preview failed: %v, skipping\n",
-				i+1, len(jobs), j.safeName, res.err)
-			errors++
-			continue
-		}
+	// Inference worker pool. Workers consume job indices, wait for the
+	// preview channel for that index, then call the LLM and write output.
+	// Logs include the completion ordinal (atomic) since workers finish out
+	// of order at inferenceWorkers > 1.
+	inferWorkers := max(cfg.inferenceWorkers, 1)
+	inferCh := make(chan int, len(jobs))
+	var processed, errors atomic.Int64
+	var done atomic.Int64
+	var inferWg sync.WaitGroup
+	for w := 0; w < inferWorkers; w++ {
+		inferWg.Add(1)
+		go func() {
+			defer inferWg.Done()
+			for idx := range inferCh {
+				j := jobs[idx]
+				res := <-previews[idx]
+				ord := done.Add(1)
+				if res.err != nil {
+					fmt.Fprintf(os.Stderr, "  [%d/%d] %s\n    !! Preview failed: %v, skipping\n",
+						ord, len(jobs), j.safeName, res.err)
+					errors.Add(1)
+					continue
+				}
 
-		inferenceStart := time.Now()
-		description, err := describeWithRetry(cfg, res.b64, exifToPromptString(j.exif))
-		inferenceElapsed := time.Since(inferenceStart)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  [%d/%d] %s\n    !! Vision API failed after %d attempts: %v\n",
-				i+1, len(jobs), j.safeName, cfg.maxRetries, err)
-			errors++
-			continue
-		}
+				inferenceStart := time.Now()
+				description, err := describeWithRetry(cfg, res.b64, exifToPromptString(j.exif))
+				inferenceElapsed := time.Since(inferenceStart)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  [%d/%d] %s\n    !! Vision API failed after %d attempts: %v\n",
+						ord, len(jobs), j.safeName, cfg.maxRetries, err)
+					errors.Add(1)
+					continue
+				}
 
-		fmt.Printf("  [%d/%d] %s (preview %s, inference %s)\n",
-			i+1, len(jobs), j.safeName,
-			res.duration.Round(time.Millisecond),
-			inferenceElapsed.Round(time.Millisecond))
+				fmt.Printf("  [%d/%d] %s (preview %s, inference %s)\n",
+					ord, len(jobs), j.safeName,
+					res.duration.Round(time.Millisecond),
+					inferenceElapsed.Round(time.Millisecond))
 
-		if err := writeOutput(j.txtOut, j.safeName, j.file, j.exif, description, res.duration, inferenceElapsed); err != nil {
-			fmt.Fprintf(os.Stderr, "    !! Write failed: %v\n", err)
-			errors++
-			continue
-		}
+				if err := writeOutput(j.txtOut, j.safeName, j.file, j.exif, description, res.duration, inferenceElapsed); err != nil {
+					fmt.Fprintf(os.Stderr, "    !! Write failed: %v\n", err)
+					errors.Add(1)
+					continue
+				}
 
-		processed++
+				processed.Add(1)
+			}
+		}()
 	}
+	for i := range jobs {
+		inferCh <- i
+	}
+	close(inferCh)
+	inferWg.Wait()
 	wg.Wait()
 
-	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed, errors, skipped)
+	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed.Load(), errors.Load(), skipped)
 	fmt.Printf("Output: %s\n", cfg.outputDir)
 	return nil
 }

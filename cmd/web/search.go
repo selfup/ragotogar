@@ -55,7 +55,7 @@ func search(query, mode, repoRoot, photoDir string) []result {
 func parseSearchOutput(out string) []string {
 	seen := make(map[string]bool)
 	var names []string
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		m := searchLineRE.FindStringSubmatch(line)
 		if m == nil {
 			continue

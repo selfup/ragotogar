@@ -116,6 +116,8 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 | `-model NAME` | LM Studio model name (default: `qwen/qwen3-vl-8b` or `LM_MODEL` env) |
 | `-dry-run` | List files without calling the LLM |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
+| `-preview-workers N` | Parallel ImageMagick/exiftool workers for preview generation (default: 4) |
+| `-inference-workers N` | Parallel LLM inference workers (default: 1). Bump to N to use LM Studio's `--parallel N` continuous batching. Vision inference is more memory-intensive than text — start at 2–4 and watch VRAM/error rate before going higher. |
 
 **Environment variables:**
 
