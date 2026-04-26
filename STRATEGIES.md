@@ -167,20 +167,20 @@ Loading **different** models simultaneously (Ministral for describe+index, devst
 
 ### Vision inference parallelism (`cmd/describe -inference-workers N`)
 
-Same memory-bandwidth-contention story as above, but at *intra-instance* parallelism rather than multi-instance. With `lms load --parallel N`, LM Studio can serve N concurrent requests against one model — but on Apple silicon all those slots share the same GPU/memory bandwidth, so individual request latency stretches as N grows.
+Same memory-bandwidth-contention story as above, but at *intra-instance* parallelism rather than multi-instance. With `lms load --parallel N`, LM Studio can serve N concurrent requests against one model — but on the M3 Ultra all those slots share the same GPU/memory bandwidth, so individual request latency stretches as N grows.
 
 **Heuristic for picking N**: `serial baseline × 1.2` is the per-worker latency ceiling. Once a worker takes more than ~20% over its serial-baseline time, bandwidth contention is dominating and additional workers regress aggregate throughput.
 
-**Validated on M5 Max with Ministral 3B (vision)**, baseline ~5s/photo serial:
+**Validated on M3 Ultra with Ministral 3B (vision)**, baseline ~3–4s/photo serial:
 
 | Workers | Per-worker latency | Effective per-photo | Speedup | Verdict |
 |---------|-------------------|---------------------|---------|---------|
-| 1 | 5s | 5s | 1.0× | baseline |
-| 2 | 5–7s | ~3s | **1.67×** | safe |
-| 3 | 5–10s (avg ~7.5s) | ~2.5s | **2.0×** | sweet spot |
-| 4 | 10–15s | ~3.1s | 1.6× | regression — bandwidth saturated |
+| 1 | 3s | 4s | 1.0× | baseline |
+| 2 | 5–7s | ~3s | **1.33×** | safe |
+| 3 | 5–10s (avg ~7.5s) | ~2.5s | **1.6×** | sweet spot |
+| 4 | 10–15s | ~3.1s | 1.29× | regression — bandwidth saturated |
 
-3 is the M5 Max optimum for vision inference. M3 Ultra likely scales further (more bandwidth headroom), but the same 1.2× per-worker rule applies — measure first photo's wall-clock, compare to serial baseline, stop adding workers once you cross the ceiling.
+3 is the M3 Ultra optimum for vision inference.
 
 This is **distinct from text-only LightRAG indexing** (which scales to `--parallel 8` cleanly, see "Context length trap" above). Vision prompts include the base64 image in context — much larger per-request memory footprint, hence earlier saturation.
 
