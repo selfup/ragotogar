@@ -16,8 +16,109 @@ from lightrag.utils import EmbeddingFunc
 
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+MONTHS = ["January", "February", "March", "April", "May", "June",
+         "July", "August", "September", "October", "November", "December"]
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_DIR = os.path.join(SCRIPT_DIR, ".rag_index")
+
+
+def humanize_exif_date(raw):
+    """'2024:04:21 16:27:54' → '21 April 2024 at 16:27:54' (or None on parse failure).
+
+    Mirrors cmd/cashier/photo.go formatDate so the human-readable form is
+    consistent between the rendered MD and the indexed/verified text.
+    """
+    if not raw:
+        return None
+    parts = raw.split()
+    date_parts = parts[0].split(":") if parts else []
+    if len(date_parts) != 3:
+        return None
+    try:
+        year, month, day = int(date_parts[0]), int(date_parts[1]), int(date_parts[2])
+    except ValueError:
+        return None
+    if not (1 <= month <= 12):
+        return None
+    base = f"{day} {MONTHS[month - 1]} {year}"
+    if len(parts) > 1:
+        return f"{base} at {parts[1]}"
+    return base
+
+
+def build_document(data):
+    """Build a single text document from a photo description JSON.
+
+    Used by both the indexer (to create chunks for embedding/extraction) and
+    the search verifier (to feed the LLM yes/no relevance check). Keeping a
+    single source means whatever was indexed is exactly what gets verified.
+    """
+    parts = []
+
+    # Photo identity
+    parts.append(f"Photo: {data['name']}")
+    parts.append(f"File: {data['file']}")
+
+    meta = data.get("metadata", {})
+
+    # Camera
+    if meta.get("make") or meta.get("model"):
+        camera = f"{meta.get('make', '')} {meta.get('model', '')}".strip()
+        parts.append(f"Camera: {camera}")
+
+    # Lens (lens_model preferred, lens_info as fallback)
+    if meta.get("lens_model"):
+        parts.append(f"Lens: {meta['lens_model']}")
+    elif meta.get("lens_info"):
+        parts.append(f"Lens: {meta['lens_info']}")
+
+    # Date — keep raw EXIF and add human-readable form for natural-language queries
+    if meta.get("date_time_original"):
+        raw = meta["date_time_original"]
+        parts.append(f"Date: {raw}")
+        human = humanize_exif_date(raw)
+        if human:
+            parts.append(f"Captured on {human}")
+
+    # Settings — comma-joined sentence covering aperture / shutter / ISO /
+    # focal length / 35mm equivalent / exposure mode / white balance.
+    settings = []
+    if meta.get("focal_length"):
+        settings.append(meta["focal_length"])
+    if meta.get("focal_length_in_35mm"):
+        settings.append(f"{meta['focal_length_in_35mm']} (35mm equivalent)")
+    if meta.get("f_number"):
+        settings.append(f"f/{meta['f_number']}")
+    if meta.get("exposure_time"):
+        settings.append(f"{meta['exposure_time']}s")
+    if meta.get("iso"):
+        settings.append(f"ISO {meta['iso']}")
+    if meta.get("exposure_mode"):
+        settings.append(f"{meta['exposure_mode']} exposure")
+    if meta.get("white_balance"):
+        settings.append(f"{meta['white_balance']} white balance")
+    if settings:
+        parts.append(f"Settings: {', '.join(settings)}")
+
+    # Flash
+    if meta.get("flash"):
+        parts.append(f"Flash: {meta['flash']}")
+
+    # Processing software (e.g. DxO PureRAW, Lightroom)
+    if meta.get("software"):
+        parts.append(f"Software: {meta['software']}")
+
+    # Photographer attribution
+    if meta.get("artist"):
+        parts.append(f"Photographer: {meta['artist']}")
+
+    # Visual description (the main content for graph extraction and embedding)
+    if data.get("description"):
+        parts.append("")
+        parts.append(data["description"])
+
+    return "\n".join(parts)
 
 LM_STUDIO_BASE = os.environ.get("LM_STUDIO_BASE", "http://localhost:1234")
 INDEX_MODEL = os.environ.get("INDEX_MODEL", "mistralai/ministral-3-3b")

@@ -24,7 +24,7 @@ import sys
 
 from lightrag import QueryParam
 
-from rag_common import INDEX_DIR, SEARCH_MODEL, create_rag, make_llm_func
+from rag_common import INDEX_DIR, SEARCH_MODEL, build_document, create_rag, make_llm_func
 
 
 def unique_files(data):
@@ -58,11 +58,13 @@ def print_sources(data):
         print(f"  [{i}] {fp}")
 
 
-def _read_description(json_path, json_dir=None):
-    """Read the `description` field from a photo JSON.
+def _read_indexable_text(json_path, json_dir=None):
+    """Read the same indexable representation that index_and_vectorize.py used.
 
-    LightRAG stores only basenames (see index_and_vectorize.py), so when the
-    indexed path doesn't resolve from cwd we fall back to <json_dir>/<basename>.
+    Verify must see the same text the indexer embedded so retrieval and
+    verification stay coherent (a query for "April" or "X100VI" or "f/2"
+    matches both layers or neither). LightRAG stores only basenames, so when
+    the indexed path doesn't resolve from cwd we fall back to <json_dir>/<basename>.
     Returns None if neither lookup succeeds.
     """
     paths_to_try = [json_path]
@@ -72,7 +74,7 @@ def _read_description(json_path, json_dir=None):
         try:
             with open(p, "r") as f:
                 data = json.load(f)
-            return data.get("description") or ""
+            return build_document(data)
         except FileNotFoundError:
             continue
         except Exception:
@@ -84,21 +86,21 @@ VERIFY_PROMPT = """Determine if a photo is relevant to a search query.
 
 Query: {query}
 
-Photo description:
-{description}
+Photo data (camera, settings, date, software, photographer, and visual description):
+{document}
 
-If the description mentions or shows what the query is about — even as a small,
-background, or partial element — answer YES. Only answer NO if the photo is
-clearly unrelated to the query.
+If the data mentions or shows what the query is about — even as a small,
+background, or partial element, or via metadata like camera/lens/date/settings —
+answer YES. Only answer NO if the photo is clearly unrelated to the query.
 
 Reply with exactly one word: YES or NO."""
 
 
-async def _verify_one(query, file_path, description, llm_func):
+async def _verify_one(query, file_path, document, llm_func):
     """Ask the LLM if a photo matches the query. Returns (file_path, verdict, raw_response)."""
-    if not description:
-        return file_path, False, "(no description)"
-    prompt = VERIFY_PROMPT.format(query=query, description=description[:2000])
+    if not document:
+        return file_path, False, "(no document)"
+    prompt = VERIFY_PROMPT.format(query=query, document=document[:3000])
     try:
         resp = await llm_func(prompt)
     except Exception as e:
@@ -109,12 +111,12 @@ async def _verify_one(query, file_path, description, llm_func):
 
 
 async def verify_filter(query, files, llm_func, json_dir=None):
-    """Run parallel LLM verification on each file's description, return only matches.
+    """Run parallel LLM verification on each candidate's indexed text, return only matches.
     Logs per-photo verdicts to stderr for debugging."""
-    descriptions = [_read_description(fp, json_dir) for fp in files]
+    documents = [_read_indexable_text(fp, json_dir) for fp in files]
     print(f"\n--- Verifying {len(files)} candidate(s) with LLM ---", file=sys.stderr)
     results = await asyncio.gather(*[
-        _verify_one(query, fp, desc, llm_func) for fp, desc in zip(files, descriptions)
+        _verify_one(query, fp, doc, llm_func) for fp, doc in zip(files, documents)
     ])
     kept = []
     for fp, verdict, raw in results:

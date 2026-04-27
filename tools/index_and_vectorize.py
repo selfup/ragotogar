@@ -22,51 +22,7 @@ import os
 import shutil
 from glob import glob
 
-from rag_common import INDEX_DIR, INDEX_MODEL, EMBED_MODEL, LM_STUDIO_BASE, create_rag
-
-
-def build_document(data):
-    """Build a single text document from a photo description JSON for indexing.
-
-    Combines metadata, structured fields, and full description into one
-    document so LightRAG can extract entities and relationships across
-    all the information.
-    """
-    parts = []
-
-    # Photo identity
-    parts.append(f"Photo: {data['name']}")
-    parts.append(f"File: {data['file']}")
-
-    # Camera metadata
-    meta = data.get("metadata", {})
-    if meta.get("make") or meta.get("model"):
-        camera = f"{meta.get('make', '')} {meta.get('model', '')}".strip()
-        parts.append(f"Camera: {camera}")
-    if meta.get("date_time_original"):
-        parts.append(f"Date: {meta['date_time_original']}")
-
-    settings = []
-    if meta.get("focal_length"):
-        settings.append(meta["focal_length"])
-    if meta.get("f_number"):
-        settings.append(f"f/{meta['f_number']}")
-    if meta.get("exposure_time"):
-        settings.append(meta["exposure_time"])
-    if meta.get("iso"):
-        settings.append(f"ISO {meta['iso']}")
-    if settings:
-        parts.append(f"Settings: {', '.join(settings)}")
-
-    if meta.get("flash"):
-        parts.append(f"Flash: {meta['flash']}")
-
-    # Full description (the main content for graph extraction)
-    if data.get("description"):
-        parts.append("")
-        parts.append(data["description"])
-
-    return "\n".join(parts)
+from rag_common import INDEX_DIR, INDEX_MODEL, EMBED_MODEL, LM_STUDIO_BASE, build_document, create_rag
 
 
 async def do_index(json_dir, reindex=False):
