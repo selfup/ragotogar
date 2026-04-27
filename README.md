@@ -227,7 +227,7 @@ go run ./cmd/cashier build input.md output.html
 
 **Output:** Each photo gets `.md`, `.html`, and `.jpg` files next to the input `.json`. The HTML embeds the photo as base64 (so it stays standalone) and includes structured sections: visual analysis (subject, setting, light, colors, composition), full EXIF metadata table, and a closing summary. The `.jpg` is a 1024px-wide resized sidecar used by `cmd/web` for thumbnail grids.
 
-**Requirements:** [ImageMagick](https://imagemagick.org/) (for embedding the photo into the HTML), Go 1.26+
+**Requirements:** [ImageMagick](https://imagemagick.org/) (for embedding the photo into the HTML), [exiftool](https://exiftool.org/) (only for RAW inputs — extracts the embedded preview JPEG so ImageMagick doesn't try to call darktable), Go 1.26+
 
 ## Photo Search — GraphRAG (`tools/`)
 

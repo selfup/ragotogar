@@ -112,7 +112,11 @@ func renderCode(b Block) string {
 }
 
 func embedImage(src string, width int) (string, error) {
-	path := strings.TrimPrefix(src, "file://")
+	path, cleanup, err := resolveImageSource(src)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("cashier_%d_%d.jpg", os.Getpid(), time.Now().UnixNano()))
 	defer os.Remove(tmp)
 	resize := fmt.Sprintf("%dx>", width)
