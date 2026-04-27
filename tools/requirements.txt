@@ -1,4 +1,0 @@
-lightrag-hku
-httpx
-numpy
-openai
