@@ -10,6 +10,7 @@ describe_test*
 describe_*
 tools/.venv
 tools/.rag_index
+tools/.sql_index
 tools/__pycache__
 .DS_Store
 ._*

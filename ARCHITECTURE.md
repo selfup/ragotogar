@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS exif (
     f_number              REAL,
     exposure_time_seconds REAL,                -- parsed from "1/250" → 0.004
     iso                   INTEGER,
+    exposure_compensation REAL,                -- parsed from "-0.67" → -0.67 (EV)
     exposure_mode         TEXT,
     metering_mode         TEXT,
     white_balance         TEXT,
@@ -284,6 +285,7 @@ sql_sync.py <json_dir> [--db PATH] [--reset]
 | `"f/2"` or `"2"` | `f_number REAL` | strip `f/`, parse float |
 | `"1/250"` | `exposure_time_seconds REAL` | parse `num/denom` → float |
 | `"3200"` | `iso INTEGER` | parse int |
+| `"-0.67"` / `"0"` / `"-3"` | `exposure_compensation REAL` | parse float; always present in observed dataset (X100VI firmware) |
 | `"2024:04:21 16:27:54"` | `date_taken TEXT (ISO 8601)` | parse → `2024-04-21T16:27:54`; also fill `date_taken_year`, `date_taken_month` |
 | `"50.123"` (string) | `gps_latitude REAL` | parse float |
 | Any field missing | column | NULL |
