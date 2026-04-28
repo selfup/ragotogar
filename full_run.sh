@@ -11,7 +11,10 @@ set -euo pipefail
 ./scripts/photo_describe.sh --preview-workers 8 --inference-workers 2 -output $DESCRIBE_DIR $PHOTO_DIR
 
 # -force re-renders everything
-go run ./cmd/cashier all -workers 24 $DESCRIBE_DIR 
+go run ./cmd/cashier all -workers 24 $DESCRIBE_DIR
+
+# sync EXIF + descriptions into the SQLite metadata index (FTS5 included)
+./tools/sql_sync.sh $DESCRIBE_DIR
 
 # --reindex runs through all data and re-populates the graph_rag
 ./tools/index_and_vectorize.sh $DESCRIBE_DIR

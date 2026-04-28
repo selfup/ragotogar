@@ -6,6 +6,7 @@ set -euo pipefail
 # Runs the full pipeline on a directory of photos:
 #   1. Describe all photos (EXIF + LLM) → JSON files in output_dir
 #   2. Convert all JSON → markdown + HTML via cashier
+#   3. Sync metadata + descriptions into the SQLite index
 #
 # Examples:
 #   ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
@@ -28,3 +29,7 @@ echo "==> Describing photos in $PHOTO_DIR → $OUT_DIR"
 echo ""
 echo "==> Converting JSON → md + html in $OUT_DIR"
 go run "$SCRIPT_DIR/../cmd/cashier" all "$OUT_DIR"
+
+echo ""
+echo "==> Syncing metadata to SQLite"
+"$SCRIPT_DIR/../tools/sql_sync.sh" "$OUT_DIR"
