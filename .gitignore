@@ -12,6 +12,7 @@ tools/.venv
 tools/.rag_index
 tools/.sql_index
 tools/__pycache__
+tools/.pytest_cache
 .DS_Store
 ._*
 
