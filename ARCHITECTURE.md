@@ -132,13 +132,14 @@ Each phase delivers value independently. No phase is gated on a later one, but t
 | Phase | Status | Delivers | Dependencies | Effort |
 |-------|--------|----------|--------------|--------|
 | **1. SQLite metadata index** | ✅ shipped (2026-04-28) | Fast structured filters; foundation for caching, sharding, deep analysis | none | small |
-| **2. SQL pre-filter in cmd/web search path** | not started | "SQL filter → vector → verify" pipeline end-to-end | Phase 1 | small |
+| **1.5. Unified SQL data model** | not started | One `library.db` containing inference / EXIF / descriptions / MD / HTML / thumbnails; originals + LightRAG stay on disk | Phase 1 | medium |
+| **2. SQL pre-filter in cmd/web search path** | not started | "SQL filter → vector → verify" pipeline end-to-end | Phase 1.5 | small |
 | **3. Verify-result cache in SQL** | not started | Repeat queries become free | Phase 1 | small |
 | **4. Camera-sharded LightRAG indexes + super-graph router** | not started | Bounded shards, parallel fan-out, incremental re-indexing | Phase 1 (for shard registry) | medium |
 | **5. Stable photo IDs + path-portability migration** | not started | Move/rename safe; dedup detection | Phase 1 | medium |
 | **6. Cross-shard analysis tooling (SQL aggregations)** | not started | "Most-used aperture in 2024", lens diversity reports, etc. | Phase 1 | small once SQL is in |
 
-Phase 1 done. Highest near-term leverage from here: Phase 2 (start using the SQL index in the search path).
+Phase 1 done. Phase 1.5 (unified SQL data model) goes next — it makes the rest of the rollout SQL-native and shrinks the operational surface to one file. Phase 2's pre-filter then composes cleanly on top.
 
 ---
 
@@ -383,16 +384,137 @@ Idempotent — safe to re-run.
 
 ---
 
+# Phase 1.5: Unified SQL data model — detailed spec
+
+## Status: not started
+
+## Goal
+
+Make SQLite the source of truth for all photo-derived data. Originals (RAF/JPEG) and the LightRAG index stay on disk for size and tooling reasons; everything else — describe inference output, EXIF, parsed fields, descriptions, cashier MD/HTML, thumbnail JPGs — lives in `library.db`.
+
+End state: a working library is one file. Move it between machines with `cp`. No `describe_*` dirs, no MD/HTML/JPG sidecars to keep in sync with photo identity.
+
+## Why now (before Phase 2)
+
+Phase 2 (SQL pre-filter in `cmd/web`) needs `cmd/web` to look up photos by name and serve their rendered HTML. Today that's a file-path lookup; tomorrow it should be a `SELECT`. Doing 1.5 first means Phase 2's plumbing is already SQL-native and we don't refactor it twice.
+
+## Non-goals
+
+- **Not** moving original photos into SQL (size; wrong tool — 30K × ~30MB ≈ 900GB)
+- **Not** migrating LightRAG's index (its own backend; orthogonal)
+- **Not** implementing stable photo IDs (Phase 5 — `photos.id` stays = `name` until then)
+
+## Schema delta from Phase 1
+
+```sql
+-- Cashier outputs
+CREATE TABLE rendered (
+    photo_id    TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    md          TEXT,                  -- cashier markdown
+    html        TEXT,                  -- cashier full HTML page
+    thumbnail   BLOB,                  -- 1024px JPG bytes (image/jpeg)
+    rendered_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- describe-only fields that don't fit photos / exif / descriptions
+CREATE TABLE inference (
+    photo_id     TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    raw_response TEXT,                 -- full LLM output before parse_fields
+    model        TEXT,                 -- e.g. qwen3-vl-8b
+    preview_ms   INTEGER,
+    inference_ms INTEGER,
+    described_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Slice 5 (cutover) drops the now-unused path columns from photos:
+-- ALTER TABLE photos DROP COLUMN md_path;
+-- ALTER TABLE photos DROP COLUMN html_path;
+-- ALTER TABLE photos DROP COLUMN jpg_path;
+-- ALTER TABLE photos DROP COLUMN json_path;
+```
+
+Phase 1's `photos` / `exif` / `descriptions` / `descriptions_fts` schemas are unchanged through slices 1–4. Slice 5 drops the path columns.
+
+## Slicing
+
+Five slices. Slices 1–4 are reversible (system runs in dual-write mode); slice 5 is the cutover.
+
+| Slice | Diff | Reversible? |
+|-------|------|-------------|
+| 1. Schema + migration tool | Adds `rendered`, `inference` tables. `tools/sql_migrate.py` walks existing path columns and ingests file bytes (MD/HTML as TEXT, JPG as BLOB) and JSON inference fields. Pytest coverage. | Yes — purely additive |
+| 2. `cmd/describe` writes to SQL | Add pure-Go SQLite driver (`modernc.org/sqlite`). After producing the photo struct, INSERT into photos + exif + descriptions + inference. Keep JSON write for now (dual-write). | Yes — JSONs still produced |
+| 3. `cmd/cashier` reads + writes SQL | `cashier photo` reads description from SQL by name, writes MD + thumbnail BLOB into `rendered`. `cashier build` reads MD from SQL, writes HTML into `rendered`. File output behind `-files` flag for transition. | Yes — `-files` keeps disk artifacts |
+| 4. `cmd/web` serves from SQL | `GET /<name>.html` → `SELECT html FROM rendered`. `GET /<name>.jpg` → BLOB stream with `Content-Type: image/jpeg`. Static-file serve retired. | Yes — old code can sit behind a flag during soak |
+| 5. Cutover | Drop JSON write from `cmd/describe`. Drop `-files` flag from cashier. Drop path columns from `photos`. Update README, `dir_photos.sh`, `full_run.sh` to reflect the single-file workflow. | No — point of no return |
+
+## Migration of existing data
+
+`tools/sql_migrate.py` (slice 1, one-shot — not pipeline-wired):
+
+```
+sql_migrate.py [--dry-run]
+
+  For each photos row:
+    • If md_path exists on disk: read, REPLACE INTO rendered.md
+    • If html_path exists:       read, REPLACE INTO rendered.html
+    • If jpg_path exists:        read bytes, REPLACE INTO rendered.thumbnail
+    • If json_path exists:       parse, REPLACE INTO inference
+                                 (preview_ms, inference_ms, model, raw inference text)
+
+  Idempotent. --dry-run validates without writing. Logs per-photo and
+  reports row counts at end.
+```
+
+Run once on the existing 182-row library and verify counts match. After cutover (slice 5) the migration tool stops being relevant and can be retired.
+
+## What `tools/sql_sync.py` becomes
+
+Inverts purpose. Today it walks JSONs → SQL; after slice 2 there are no JSONs to walk. Two options:
+
+a) **Retire** — slice 2 makes describe write direct, so sync has no inputs.
+b) **Repurpose as `tools/sql_export.py`** — dumps SQL rows back to JSON files for backup, diff, or git review.
+
+**Default**: rename to `sql_export.py` and run in the export direction. Keeps the diff/grep workflow available on demand. Trivial to retire later if unused.
+
+## Tests
+
+| Test | Covers |
+|------|--------|
+| `test_rendered_roundtrip` | INSERT + SELECT MD/HTML/thumbnail; bytes match |
+| `test_blob_large` | 500KB JPG BLOB round-trips without truncation |
+| `test_inference_table` | Types and round-trip for preview_ms / inference_ms / raw_response |
+| `test_migrate_idempotent` | Re-running `sql_migrate.py` produces stable rows |
+| `test_cascade_delete_through_rendered` | DELETE FROM photos cascades to rendered + inference |
+| Go-side: `cmd/describe` SQL writer | Temp DB; verify all four tables populated for a known struct |
+| Go-side: `cmd/cashier` SQL reader/writer | Render via SQL path, compare HTML byte-for-byte against file path |
+| Go-side: `cmd/web` BLOB serve | HTTP GET returns thumbnail bytes with `image/jpeg` |
+
+## Open questions
+
+1. **Go SQLite driver**: `modernc.org/sqlite` (pure-Go, transpiled — preferred) or `mattn/go-sqlite3` (cgo — faster but adds toolchain dep). Default modernc; revisit if benchmarks show pathological slowness.
+2. **Concurrent writes**: today only `sql_sync` writes. After 1.5, both `cmd/describe` and `cmd/cashier` write, possibly in parallel batches. SQLite WAL mode + `PRAGMA busy_timeout=5000` should cover this. Verify under cashier's 8-worker batch before slice 5.
+3. **BLOB streaming in cmd/web**: full-load is fine for 200KB thumbnails. Revisit only if originals ever land in SQL (not planned).
+4. **Backup workflow post-cutover**: document `cp library.db backup-$(date).db` in README. SQLite's atomic-on-checkpoint behavior makes this safe even with the server running; `.dump` is the bulletproof option.
+
+## Cost of failure
+
+Each slice 1–4 is independently revertible. Worst case after slice 4 with 1.5 not panning out: dual-write state (BLOBs in DB + files on disk), pipelines work either way. Drop the BLOBs and the migration tool, no harm done.
+
+Slice 5 is irreversible. Don't ship it until slices 1–4 have been running side-by-side through at least one full describe → cashier → index pass.
+
+---
+
 ## Future phase notes (sketches, not specs)
 
 These get fleshed out when their phase starts.
 
 ### Phase 2: SQL pre-filter in cmd/web
 
+Assumes Phase 1.5 — `cmd/web` already serves from `library.db`, no JSON/MD path lookups in the search path either.
+
 - `cmd/web` parses the query for structured tokens (camera names, year mentions, aperture-shaped substrings)
 - Looks up photo_ids matching those structured filters via SQL
-- Passes that file_path subset to `tools/search.sh --json-dir <dir>` as a hint
-- Or: search.py learns to accept a `--restrict-to <comma-separated-ids>` flag
+- Passes the candidate set to `search.py --restrict-to <names>` (search.py reads description text from SQL after 1.5, so name-based restriction is straightforward)
 
 Open: how to pass a candidate set to LightRAG cleanly. May need a wrapper that runs vector search itself instead of going through search.sh.
 
@@ -447,3 +569,4 @@ Track what got chosen and why as phases land.
 | 2026-04-28 | Always-upsert on every sync (no mtime freshness check) | 1 | Sub-second on 182 rows; revisit when sync time becomes noticeable |
 | 2026-04-28 | Orphan detection deferred — `--reset` is the escape hatch | 1 | Two-pass walk has cost without near-term value; users curate JSON dirs by hand today |
 | 2026-04-28 | All sidecar paths (`md_path`, `html_path`, `jpg_path`, `json_path`) stored as absolute | 1 | Mirrors the JSON's own `data.path` (already absolute); avoids cwd-dependent reads downstream |
+| 2026-04-28 | Add Phase 1.5: unify all photo-derived data into SQLite before Phase 2 | 1.5 | Sidecar files desync on path changes and Phase 2 needs SQL-native `cmd/web` lookups anyway. Unifying first removes the path-as-key fragility for derived artifacts and makes the working library a single `library.db` that's portable with `cp`. |
