@@ -132,7 +132,7 @@ Each phase delivers value independently. No phase is gated on a later one, but t
 | Phase | Status | Delivers | Dependencies | Effort |
 |-------|--------|----------|--------------|--------|
 | **1. SQLite metadata index** | ✅ shipped (2026-04-28) | Fast structured filters; foundation for caching, sharding, deep analysis | none | small |
-| **1.5. Unified SQL data model** | not started | One `library.db` containing inference / EXIF / descriptions / MD / HTML / thumbnails; originals + LightRAG stay on disk | Phase 1 | medium |
+| **1.5. Unified SQL data model** | not started | `library.db` = inference / EXIF / descriptions / thumbnails. `cmd/web` renders photo pages on-demand via Go template; cashier's photo pipeline retires. Originals + LightRAG stay on disk. | Phase 1 | medium |
 | **2. SQL pre-filter in cmd/web search path** | not started | "SQL filter → vector → verify" pipeline end-to-end | Phase 1.5 | small |
 | **3. Verify-result cache in SQL** | not started | Repeat queries become free | Phase 1 | small |
 | **4. Camera-sharded LightRAG indexes + super-graph router** | not started | Bounded shards, parallel fan-out, incremental re-indexing | Phase 1 (for shard registry) | medium |
@@ -390,30 +390,40 @@ Idempotent — safe to re-run.
 
 ## Goal
 
-Make SQLite the source of truth for all photo-derived data. Originals (RAF/JPEG) and the LightRAG index stay on disk for size and tooling reasons; everything else — describe inference output, EXIF, parsed fields, descriptions, cashier MD/HTML, thumbnail JPGs — lives in `library.db`.
+`library.db` becomes the source of truth for everything photo-derived. `cmd/web` renders photo pages on-demand from typed SQL columns via `html/template`; thumbnails stream as BLOBs from the same DB. Originals (RAF/JPEG) and the LightRAG index stay on disk.
 
-End state: a working library is one file. Move it between machines with `cp`. No `describe_*` dirs, no MD/HTML/JPG sidecars to keep in sync with photo identity.
+End state: a working library is one file plus the original photos. No `describe_*/*.json`, no cashier MD, no cashier HTML, no `.jpg` sidecars on disk. Cashier's photo pipeline retires; `cmd/describe` writes everything photo-derived (including the thumbnail BLOB) directly to `library.db`.
+
+## Why this shape (template-on-demand, not stored HTML)
+
+The first 1.5 sketch stored cashier's MD and HTML in SQL — that fixed path-fragility but kept the JSON → MD → HTML pipeline that exists for historical reasons (markdown was originally an editable intermediate). For photos, nothing edits MD between describe and render — it's a pure pipeline. Replacing it with a Go template that reads typed SQL columns:
+
+- Removes cashier's parse.go + render.go section system from the photo path
+- Eliminates two persistence layers (MD, HTML) — they never land anywhere
+- Lets the template change without re-rendering the corpus
+- Sits next to the existing `indexHTML` constant in `cmd/web/template.go`
+- Replaces base64-inlined JPGs with `<img src="/<name>.jpg">` against the BLOB endpoint — small HTML, browser caches images by URL
 
 ## Why now (before Phase 2)
 
-Phase 2 (SQL pre-filter in `cmd/web`) needs `cmd/web` to look up photos by name and serve their rendered HTML. Today that's a file-path lookup; tomorrow it should be a `SELECT`. Doing 1.5 first means Phase 2's plumbing is already SQL-native and we don't refactor it twice.
+Phase 2 needs `cmd/web` to look up photos by name and serve their pages from SQL. With this shape those pages are computed per request; no rendered artifact exists to fall stale.
 
 ## Non-goals
 
 - **Not** moving original photos into SQL (size; wrong tool — 30K × ~30MB ≈ 900GB)
 - **Not** migrating LightRAG's index (its own backend; orthogonal)
+- **Not** retiring cashier's general markdown/section rendering (used outside the photo path; separate decision in slice 4)
 - **Not** implementing stable photo IDs (Phase 5 — `photos.id` stays = `name` until then)
 
 ## Schema delta from Phase 1
 
 ```sql
--- Cashier outputs
-CREATE TABLE rendered (
-    photo_id    TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
-    md          TEXT,                  -- cashier markdown
-    html        TEXT,                  -- cashier full HTML page
-    thumbnail   BLOB,                  -- 1024px JPG bytes (image/jpeg)
-    rendered_at TEXT NOT NULL DEFAULT (datetime('now'))
+-- 1024px thumbnail BLOBs
+CREATE TABLE thumbnails (
+    photo_id   TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    bytes      BLOB NOT NULL,
+    width      INTEGER NOT NULL DEFAULT 1024,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- describe-only fields that don't fit photos / exif / descriptions
@@ -433,7 +443,46 @@ CREATE TABLE inference (
 -- ALTER TABLE photos DROP COLUMN json_path;
 ```
 
-Phase 1's `photos` / `exif` / `descriptions` / `descriptions_fts` schemas are unchanged through slices 1–4. Slice 5 drops the path columns.
+No `rendered` table. MD and HTML never persist anywhere.
+
+## Template
+
+Mirrors the existing `cmd/web/template.go` `indexHTML` constant — second constant `photoHTML` (or a separate `templates/photo.html.tmpl` if we want hot-reload in dev; either works). Sketch:
+
+```go
+const photoHTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{.Photo.Name}}</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <h1>{{.Photo.Name}}</h1>
+    <img src="/{{.Photo.Name}}.jpg" alt="{{.Description.Subject}}">
+  </header>
+  <section class="meta">
+    <dl>
+      {{if .Exif.CameraModel}}<dt>Camera</dt><dd>{{.Exif.CameraMake}} {{.Exif.CameraModel}}</dd>{{end}}
+      {{if .Exif.LensModel}}<dt>Lens</dt><dd>{{.Exif.LensModel}}</dd>{{end}}
+      {{if .Exif.DateTaken}}<dt>Captured</dt><dd>{{.Exif.DateTaken | humanDate}}</dd>{{end}}
+      ...
+    </dl>
+  </section>
+  <section class="description">
+    <h2>Subject</h2><p>{{.Description.Subject}}</p>
+    <h2>Setting</h2><p>{{.Description.Setting}}</p>
+    <h2>Light</h2><p>{{.Description.Light}}</p>
+    <h2>Colors</h2><p>{{.Description.Colors}}</p>
+    <h2>Composition</h2><p>{{.Description.Composition}}</p>
+    <h2>Description</h2><div>{{.Description.FullDescription | nl2br}}</div>
+  </section>
+</body>
+</html>`
+```
+
+Template funcs needed: `humanDate` (mirror of `humanize_exif_date` from `tools/rag_common.py`), `nl2br` (newline → `<br>` for the long description). Both are 5-line helpers in `cmd/web/template.go`.
 
 ## Slicing
 
@@ -441,11 +490,11 @@ Five slices. Slices 1–4 are reversible (system runs in dual-write mode); slice
 
 | Slice | Diff | Reversible? |
 |-------|------|-------------|
-| 1. Schema + migration tool | Adds `rendered`, `inference` tables. `tools/sql_migrate.py` walks existing path columns and ingests file bytes (MD/HTML as TEXT, JPG as BLOB) and JSON inference fields. Pytest coverage. | Yes — purely additive |
-| 2. `cmd/describe` writes to SQL | Add pure-Go SQLite driver (`modernc.org/sqlite`). After producing the photo struct, INSERT into photos + exif + descriptions + inference. Keep JSON write for now (dual-write). | Yes — JSONs still produced |
-| 3. `cmd/cashier` reads + writes SQL | `cashier photo` reads description from SQL by name, writes MD + thumbnail BLOB into `rendered`. `cashier build` reads MD from SQL, writes HTML into `rendered`. File output behind `-files` flag for transition. | Yes — `-files` keeps disk artifacts |
-| 4. `cmd/web` serves from SQL | `GET /<name>.html` → `SELECT html FROM rendered`. `GET /<name>.jpg` → BLOB stream with `Content-Type: image/jpeg`. Static-file serve retired. | Yes — old code can sit behind a flag during soak |
-| 5. Cutover | Drop JSON write from `cmd/describe`. Drop `-files` flag from cashier. Drop path columns from `photos`. Update README, `dir_photos.sh`, `full_run.sh` to reflect the single-file workflow. | No — point of no return |
+| 1. Schema + migration tool | Adds `thumbnails`, `inference` tables. `tools/sql_migrate.py` reads existing `jpg_path` files into BLOBs and `json_path` files into the inference table. Pytest. | Yes — purely additive |
+| 2. `cmd/describe` writes to SQL + thumbnail | Add `modernc.org/sqlite` (pure-Go) driver. After producing the photo struct, INSERT photos + exif + descriptions + inference. Lift `resolveImageSource` + magick from `cmd/cashier/thumb.go` into a shared helper; INSERT 1024px JPG bytes into `thumbnails`. Keep JSON + sidecar `.jpg` writes (dual-write). | Yes — JSONs and sidecar JPGs still produced |
+| 3. `cmd/web` photo template + BLOB serve | Add `photoHTML` constant and the `humanDate` / `nl2br` template funcs. Handler `GET /<name>` queries SQL, executes template. Handler `GET /<name>.jpg` streams the thumbnail BLOB with `Content-Type: image/jpeg`. Search results link to `/<name>` instead of cashier-rendered file paths. | Yes — old static-file links can sit behind a flag during soak |
+| 4. Retire cashier from photo pipeline | Remove `cashier all` from `full_run.sh`. Remove cashier step from `scripts/dir_photos.sh`. Update `scripts/photo.sh` (describe alone now produces everything). Verify `scripts/cashier.sh` has no remaining users; delete or leave for non-photo markdown. cashier source tree stays put. | Yes — cashier code remains intact |
+| 5. Cutover | Drop JSON write from `cmd/describe`. Drop sidecar `.jpg` write. Drop md_path / html_path / jpg_path / json_path columns from `photos`. Update README. | No — point of no return |
 
 ## Migration of existing data
 
@@ -455,52 +504,55 @@ Five slices. Slices 1–4 are reversible (system runs in dual-write mode); slice
 sql_migrate.py [--dry-run]
 
   For each photos row:
-    • If md_path exists on disk: read, REPLACE INTO rendered.md
-    • If html_path exists:       read, REPLACE INTO rendered.html
-    • If jpg_path exists:        read bytes, REPLACE INTO rendered.thumbnail
-    • If json_path exists:       parse, REPLACE INTO inference
-                                 (preview_ms, inference_ms, model, raw inference text)
+    • If jpg_path exists on disk:  read bytes, REPLACE INTO thumbnails
+    • If json_path exists:         parse, REPLACE INTO inference
+                                   (preview_ms, inference_ms, model, raw inference text)
 
-  Idempotent. --dry-run validates without writing. Logs per-photo and
-  reports row counts at end.
+  Idempotent. --dry-run validates without writing.
 ```
 
-Run once on the existing 182-row library and verify counts match. After cutover (slice 5) the migration tool stops being relevant and can be retired.
+No MD or HTML to read — they were always intermediates, never authoritative. Run once on the existing 182-row library; verify counts.
 
 ## What `tools/sql_sync.py` becomes
 
-Inverts purpose. Today it walks JSONs → SQL; after slice 2 there are no JSONs to walk. Two options:
+Inverts purpose. Today it walks JSONs → SQL; after slice 2 there are no JSONs to walk.
 
-a) **Retire** — slice 2 makes describe write direct, so sync has no inputs.
-b) **Repurpose as `tools/sql_export.py`** — dumps SQL rows back to JSON files for backup, diff, or git review.
+a) **Retire** — slice 2 makes describe write direct, sync has no inputs.
+b) **Repurpose as `tools/sql_export.py`** — dumps SQL rows to JSON files for backup, diff, or git review.
 
-**Default**: rename to `sql_export.py` and run in the export direction. Keeps the diff/grep workflow available on demand. Trivial to retire later if unused.
+**Default**: rename to `sql_export.py`. Keeps the diff/grep workflow available on demand.
+
+## Cashier's broader fate
+
+After slice 4 the photo path is dead. Cashier's general parse.go / render.go / html.go markdown rendering may still serve other content (e.g. essays). Decision deferred to slice 4 — answer "is anything outside the photo pipeline still calling cashier?" by grepping; retire entirely if not, otherwise leave the source tree in place.
 
 ## Tests
 
 | Test | Covers |
 |------|--------|
-| `test_rendered_roundtrip` | INSERT + SELECT MD/HTML/thumbnail; bytes match |
-| `test_blob_large` | 500KB JPG BLOB round-trips without truncation |
-| `test_inference_table` | Types and round-trip for preview_ms / inference_ms / raw_response |
+| `test_thumbnails_roundtrip` | INSERT + SELECT BLOB; bytes match; 500KB BLOB fine |
+| `test_inference_table` | Round-trip preview_ms / inference_ms / raw_response |
 | `test_migrate_idempotent` | Re-running `sql_migrate.py` produces stable rows |
-| `test_cascade_delete_through_rendered` | DELETE FROM photos cascades to rendered + inference |
+| `test_cascade_delete` | DELETE FROM photos cascades to thumbnails + inference |
 | Go-side: `cmd/describe` SQL writer | Temp DB; verify all four tables populated for a known struct |
-| Go-side: `cmd/cashier` SQL reader/writer | Render via SQL path, compare HTML byte-for-byte against file path |
-| Go-side: `cmd/web` BLOB serve | HTTP GET returns thumbnail bytes with `image/jpeg` |
+| Go-side: `cmd/describe` thumbnail generator | Generate 1024px JPG from a fixture; bytes round-trip via BLOB |
+| Go-side: `cmd/web` photo handler | HTTP GET `/<name>` renders template, contains expected text from fixture data |
+| Go-side: `cmd/web` BLOB serve | HTTP GET `/<name>.jpg` returns thumbnail bytes with `image/jpeg` |
+| Go-side: template snapshot | Render against fixture; compare HTML hash to a golden value |
 
 ## Open questions
 
 1. **Go SQLite driver**: `modernc.org/sqlite` (pure-Go, transpiled — preferred) or `mattn/go-sqlite3` (cgo — faster but adds toolchain dep). Default modernc; revisit if benchmarks show pathological slowness.
-2. **Concurrent writes**: today only `sql_sync` writes. After 1.5, both `cmd/describe` and `cmd/cashier` write, possibly in parallel batches. SQLite WAL mode + `PRAGMA busy_timeout=5000` should cover this. Verify under cashier's 8-worker batch before slice 5.
-3. **BLOB streaming in cmd/web**: full-load is fine for 200KB thumbnails. Revisit only if originals ever land in SQL (not planned).
-4. **Backup workflow post-cutover**: document `cp library.db backup-$(date).db` in README. SQLite's atomic-on-checkpoint behavior makes this safe even with the server running; `.dump` is the bulletproof option.
+2. **Thumbnail generator in describe**: keep ImageMagick (`magick` exec) plus `exiftool` for RAW preview, or switch to a Go-native lib (`disintegration/imaging`)? Pure-Go drops the magick dep, but RAW preview extraction still needs exiftool. Default: keep `magick + exiftool` for parity with current behavior; revisit only if shell-out friction surfaces.
+3. **Template hot-reload in dev**: `html/template` parses on each `cmd/web` start. For dev iteration, an optional `--dev` flag could reparse per request. Cheap to add when needed.
+4. **Concurrent writes**: WAL mode + `PRAGMA busy_timeout=5000`. Cashier's 8-worker batch is gone after slice 4, so the only concurrent writer is `cmd/describe` (currently serial across photos). Low contention.
+5. **Backup workflow post-cutover**: document `cp library.db backup-$(date).db` in README; `.dump` for the bulletproof option.
 
 ## Cost of failure
 
-Each slice 1–4 is independently revertible. Worst case after slice 4 with 1.5 not panning out: dual-write state (BLOBs in DB + files on disk), pipelines work either way. Drop the BLOBs and the migration tool, no harm done.
+Slices 1–4 are independently revertible. Worst case after slice 4: dual-write state (BLOBs in DB + sidecar files on disk), pipeline works either way. Drop the BLOBs, no harm done.
 
-Slice 5 is irreversible. Don't ship it until slices 1–4 have been running side-by-side through at least one full describe → cashier → index pass.
+Slice 5 is the cutover. Don't ship it until slices 1–4 have been running side-by-side through at least one full describe → web pass on a fresh corpus.
 
 ---
 
@@ -570,3 +622,4 @@ Track what got chosen and why as phases land.
 | 2026-04-28 | Orphan detection deferred — `--reset` is the escape hatch | 1 | Two-pass walk has cost without near-term value; users curate JSON dirs by hand today |
 | 2026-04-28 | All sidecar paths (`md_path`, `html_path`, `jpg_path`, `json_path`) stored as absolute | 1 | Mirrors the JSON's own `data.path` (already absolute); avoids cwd-dependent reads downstream |
 | 2026-04-28 | Add Phase 1.5: unify all photo-derived data into SQLite before Phase 2 | 1.5 | Sidecar files desync on path changes and Phase 2 needs SQL-native `cmd/web` lookups anyway. Unifying first removes the path-as-key fragility for derived artifacts and makes the working library a single `library.db` that's portable with `cp`. |
+| 2026-04-28 | Phase 1.5 renders photo pages from SQL via Go template, not stored MD/HTML | 1.5 | Cashier's MD → HTML is a pure pipeline — nothing edits between them — so persisting either layer is dead weight. A `photoHTML` template next to `cmd/web/template.go`'s existing `indexHTML` reads typed SQL columns directly; `<img src="/<name>.jpg">` against the BLOB endpoint replaces base64 inlining (smaller HTML, browser-cacheable). Cashier's photo pipeline retires; the parse/render section system stays in tree until verified unused outside photos. |
