@@ -45,9 +45,17 @@ func printUsage() {
 usage:
   cashier photo    <input.json> <output.md>
   cashier build    <input.md>  <output.html>
-  cashier photo-all [-workers N] <dir>
-  cashier build-all [-workers N] <dir>
-  cashier all       [-workers N] <dir>`)
+  cashier photo-all [-workers N] [-force] <dir>
+  cashier build-all [-workers N] [-force] <dir>
+  cashier all       [-workers N] [-force] <dir>
+
+batch commands skip files whose outputs already exist;
+pass -force to re-render everything.`)
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // ── styles.css loader ─────────────────────────────────────────────────────
@@ -168,6 +176,7 @@ func runBuildFile(mdPath string) error {
 func runBatch(args []string, ext string, process func(string) error, cmdName string) {
 	fs2 := flag.NewFlagSet(cmdName, flag.ExitOnError)
 	workers := fs2.Int("workers", 8, "parallel workers")
+	force := fs2.Bool("force", false, "re-render even if outputs already exist")
 	fs2.Parse(args)
 
 	dir := "."
@@ -175,22 +184,37 @@ func runBatch(args []string, ext string, process func(string) error, cmdName str
 		dir = fs2.Arg(0)
 	}
 
+	outExt := ".md"
+	if ext == ".md" {
+		outExt = ".html"
+	}
+
 	var files []string
+	var skipped int
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		if strings.HasSuffix(path, ext) {
-			files = append(files, path)
+		if !strings.HasSuffix(path, ext) {
+			return nil
 		}
+		if !*force && fileExists(strings.TrimSuffix(path, ext)+outExt) {
+			skipped++
+			return nil
+		}
+		files = append(files, path)
 		return nil
 	})
 
 	if len(files) == 0 {
-		fmt.Printf("no %s files found in %s\n", ext, dir)
+		if skipped > 0 {
+			fmt.Printf("nothing to do in %s — %d already rendered (use -force to re-render)\n", dir, skipped)
+		} else {
+			fmt.Printf("no %s files found in %s\n", ext, dir)
+		}
 		return
 	}
-	fmt.Printf("found %d %s file(s) in %s (workers: %d)\n\n", len(files), ext, dir, *workers)
+	fmt.Printf("found %d %s file(s) in %s (skipped %d, workers: %d)\n\n", len(files), ext, dir, skipped, *workers)
 
 	sem := make(chan struct{}, *workers)
 	var wg sync.WaitGroup
@@ -224,6 +248,7 @@ func runBatch(args []string, ext string, process func(string) error, cmdName str
 func runAll(args []string) {
 	fs2 := flag.NewFlagSet("all", flag.ExitOnError)
 	workers := fs2.Int("workers", 8, "parallel workers")
+	force := fs2.Bool("force", false, "re-render even if .md and .html already exist")
 	fs2.Parse(args)
 
 	dir := "."
@@ -232,21 +257,34 @@ func runAll(args []string) {
 	}
 
 	var files []string
+	var skipped int
 	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
-		if strings.HasSuffix(path, ".json") {
-			files = append(files, path)
+		if !strings.HasSuffix(path, ".json") {
+			return nil
 		}
+		if !*force {
+			stem := strings.TrimSuffix(path, ".json")
+			if fileExists(stem+".md") && fileExists(stem+".html") {
+				skipped++
+				return nil
+			}
+		}
+		files = append(files, path)
 		return nil
 	})
 
 	if len(files) == 0 {
-		fmt.Printf("no .json files found in %s\n", dir)
+		if skipped > 0 {
+			fmt.Printf("nothing to do in %s — %d already rendered (use -force to re-render)\n", dir, skipped)
+		} else {
+			fmt.Printf("no .json files found in %s\n", dir)
+		}
 		return
 	}
-	fmt.Printf("found %d .json file(s) in %s (workers: %d)\n\n", len(files), dir, *workers)
+	fmt.Printf("found %d .json file(s) in %s (skipped %d, workers: %d)\n\n", len(files), dir, skipped, *workers)
 
 	sem := make(chan struct{}, *workers)
 	var wg sync.WaitGroup
