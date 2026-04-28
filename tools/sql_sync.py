@@ -91,6 +91,30 @@ CREATE TABLE IF NOT EXISTS descriptions (
     composition       TEXT,
     full_description  TEXT
 );
+
+-- External-content FTS5 over the descriptions table. Porter stemming makes
+-- "tree" match "trees", "shadow" match "shadows", etc. unicode61 handles
+-- case-folding and diacritics. The triggers below keep FTS in sync.
+CREATE VIRTUAL TABLE IF NOT EXISTS descriptions_fts USING fts5(
+    subject, setting, light, colors, composition, full_description,
+    content=descriptions, content_rowid=rowid,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS descriptions_ai AFTER INSERT ON descriptions BEGIN
+    INSERT INTO descriptions_fts(rowid, subject, setting, light, colors, composition, full_description)
+    VALUES (new.rowid, new.subject, new.setting, new.light, new.colors, new.composition, new.full_description);
+END;
+CREATE TRIGGER IF NOT EXISTS descriptions_ad AFTER DELETE ON descriptions BEGIN
+    INSERT INTO descriptions_fts(descriptions_fts, rowid, subject, setting, light, colors, composition, full_description)
+    VALUES ('delete', old.rowid, old.subject, old.setting, old.light, old.colors, old.composition, old.full_description);
+END;
+CREATE TRIGGER IF NOT EXISTS descriptions_au AFTER UPDATE ON descriptions BEGIN
+    INSERT INTO descriptions_fts(descriptions_fts, rowid, subject, setting, light, colors, composition, full_description)
+    VALUES ('delete', old.rowid, old.subject, old.setting, old.light, old.colors, old.composition, old.full_description);
+    INSERT INTO descriptions_fts(rowid, subject, setting, light, colors, composition, full_description)
+    VALUES (new.rowid, new.subject, new.setting, new.light, new.colors, new.composition, new.full_description);
+END;
 """
 
 
@@ -188,6 +212,7 @@ def parse_exif_date(v):
 def init_schema(conn, reset=False):
     if reset:
         conn.executescript("""
+            DROP TABLE IF EXISTS descriptions_fts;
             DROP TABLE IF EXISTS descriptions;
             DROP TABLE IF EXISTS exif;
             DROP TABLE IF EXISTS photos;
