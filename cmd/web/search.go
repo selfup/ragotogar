@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -13,17 +14,17 @@ import (
 // matches "  [N] <path>" lines printed by tools/search.py print_sources()
 var searchLineRE = regexp.MustCompile(`^\s*\[(\d+)\]\s+(.+)$`)
 
-// search shells out to tools/search.sh and returns results that have a .jpg
-// sidecar in photoDir. Order is preserved from the search output (LightRAG
+// search shells out to tools/search.sh and returns results that exist in
+// the SQL library. Order is preserved from the search output (LightRAG
 // retrieval order — most relevant first).
 //
 // Mode "naive-verify" is a compound: --retrieve --mode naive --verify, which
 // runs an LLM yes/no check on each candidate and keeps only the YES matches.
-func search(query, mode, repoRoot, photoDir string) []result {
+// Verify pulls indexable text from SQL via tools/rag_common.fetch_photo_dict.
+func search(db *sql.DB, query, mode, repoRoot string) []result {
 	args := []string{"--retrieve"}
 	if mode == "naive-verify" {
-		// --json-dir lets verify resolve LightRAG basenames back to readable JSONs
-		args = append(args, "--mode", "naive", "--verify", "--json-dir", photoDir)
+		args = append(args, "--mode", "naive", "--verify")
 	} else {
 		args = append(args, "--mode", mode)
 	}
@@ -42,7 +43,7 @@ func search(query, mode, repoRoot, photoDir string) []result {
 	}
 	var results []result
 	for _, name := range parseSearchOutput(string(out)) {
-		if _, err := os.Stat(filepath.Join(photoDir, name+".jpg")); err != nil {
+		if !photoExists(db, name) {
 			continue
 		}
 		results = append(results, result{Name: name})

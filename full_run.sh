@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# example ENV: DESCRIBE_DIR=describe_test
-# example ENV: PHOTO_DIR=/Volumes/Regis/X100VI/JPEG/April17th2026
+# Full pipeline against a photo directory:
+#   1. Describe every image and write into tools/.sql_index/library.db
+#   2. Build the LightRAG knowledge graph from the SQL library
+#   3. Dedupe LightRAG's audit log
+#   4. Start the web server
+#
+# Example:
+#   PHOTO_DIR=/Volumes/T9/X100VI/JPEG/April21st2024 ./full_run.sh
 
-# example script: DESCRIBE_DIR=describe_test PHOTO_DIR=/Volumes/T9/X100VI/JPEG/April21st2024 ./full_run.sh
+LM_MODEL=mistralai/ministral-3-3b ./scripts/photo_describe.sh --preview-workers 8 --inference-workers 2 "$PHOTO_DIR"
 
-# example run:
+# --reindex rebuilds the LightRAG graph from scratch
+INDEX_MODEL=mistralai/ministral-3-3b  ./tools/index_and_vectorize.sh
 
-./scripts/photo_describe.sh --preview-workers 8 --inference-workers 2 -output $DESCRIBE_DIR $PHOTO_DIR
-
-# -force re-renders everything
-go run ./cmd/cashier all -workers 24 $DESCRIBE_DIR
-
-# sync EXIF + descriptions into the SQLite metadata index (FTS5 included)
-./tools/sql_sync.sh $DESCRIBE_DIR
-
-# --reindex runs through all data and re-populates the graph_rag
-./tools/index_and_vectorize.sh $DESCRIBE_DIR
-
-# dedupe all duplicate entries in lightrag
+# Dedupe LightRAG's kv_store_doc_status.json
 ./tools/prune_dup_status.sh --apply
 
-./scripts/web.sh -dir $DESCRIBE_DIR
+./scripts/web.sh

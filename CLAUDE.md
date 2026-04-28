@@ -16,3 +16,10 @@ This keeps the repo free of committed binaries and ensures all Go is run from so
 - Run scripts with `uv run --project <dir> python <script>`
 - Manage dependencies with `uv add` / `uv sync`
 - Dependencies are declared in `tools/pyproject.toml`
+
+## Git
+
+- **Never run `git push`, `git pull`, or `git fetch`** — the user controls when code moves between local and remote
+- **Never run destructive git commands** (`push --force`, `reset --hard`, `branch -D`, `clean -f`, `rebase`, etc.) under any circumstances
+- Only create commits when the user explicitly asks (`commit`, `commit and push`, etc.)
+- For any other git operation that mutates history or shared state, ask first

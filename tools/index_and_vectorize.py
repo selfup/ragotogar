@@ -1,47 +1,49 @@
 #!/usr/bin/env python3
 """
-Index photo description JSONs into a LightRAG knowledge graph.
+Index photo descriptions from the SQL library into a LightRAG knowledge graph.
 
-Extracts entities/relationships via LLM and embeds text chunks for vector
-search. Both steps happen in LightRAG's ainsert() call.
+Reads photos / exif / descriptions from tools/.sql_index/library.db (populated
+by cmd/describe) and feeds each row through build_document() into LightRAG.
+Both entity extraction and embedding happen inside ainsert().
 
 Usage:
-    python index_and_vectorize.py /path/to/description_jsons
-    python index_and_vectorize.py --reindex /path/to/description_jsons
+    python index_and_vectorize.py
+    python index_and_vectorize.py --reindex
+    python index_and_vectorize.py --db /path/to/other.db
 
 Environment:
     LM_STUDIO_BASE  (default: http://localhost:1234)
-    INDEX_MODEL     (default: devstral-small-2-2512) — LLM for entity extraction
+    INDEX_MODEL     (default: mistralai/ministral-3-3b)
     EMBED_MODEL     (default: text-embedding-nomic-embed-text-v1.5)
 """
 
 import argparse
 import asyncio
-import json
 import os
 import shutil
-from glob import glob
 
-from rag_common import INDEX_DIR, INDEX_MODEL, EMBED_MODEL, LM_STUDIO_BASE, build_document, create_rag
+from rag_common import (
+    INDEX_DIR, INDEX_MODEL, EMBED_MODEL, LM_STUDIO_BASE,
+    LIBRARY_DB, build_document, connect_library, create_rag,
+    fetch_photo_dict, iter_photo_names,
+)
 
 
-async def do_index(json_dir, reindex=False):
+async def do_index(db_path, reindex=False):
     if reindex and os.path.exists(INDEX_DIR):
         print(f"Clearing existing index at {INDEX_DIR}")
         shutil.rmtree(INDEX_DIR)
 
     os.makedirs(INDEX_DIR, exist_ok=True)
 
-    # Recursive glob so we pick up both flat layouts (descriptions/*.json) and
-    # the hybrid Ministral+devstral layout (descriptions/ministral/*.json,
-    # descriptions/devstral/*.json) when pointed at the parent directory.
-    # See STRATEGIES.md for the hybrid indexing strategy.
-    files = sorted(glob(os.path.join(json_dir, "**", "*.json"), recursive=True))
-    if not files:
-        print(f"No JSON files found in '{json_dir}'")
+    conn = connect_library(db_path)
+    names = list(iter_photo_names(conn))
+    if not names:
+        print(f"No photos in {db_path}. Run cmd/describe first.")
+        conn.close()
         return
 
-    print(f"Found {len(files)} description(s) in '{json_dir}'")
+    print(f"Found {len(names)} photo(s) in {db_path}")
     print(f"LLM:    {INDEX_MODEL} @ {LM_STUDIO_BASE}")
     print(f"Embed:  {EMBED_MODEL}")
     print(f"Index:  {INDEX_DIR}")
@@ -51,31 +53,29 @@ async def do_index(json_dir, reindex=False):
 
     try:
         docs = []
-        names = []
-        for i, path in enumerate(files):
-            name = os.path.basename(path)
-            print(f"  [{i + 1}/{len(files)}] {name}")
-
-            with open(path, "r") as f:
-                data = json.load(f)
-
+        for i, name in enumerate(names):
+            print(f"  [{i + 1}/{len(names)}] {name}")
+            data = fetch_photo_dict(conn, name)
+            if data is None:
+                print(f"    [skip] {name} disappeared between SELECT and fetch")
+                continue
             docs.append(build_document(data))
-            names.append(name)
 
         print(f"\nInserting {len(docs)} documents as batch...")
         await rag.ainsert(docs, file_paths=names)
 
-        print(f"\nDone. Indexed {len(files)} documents.")
+        print(f"\nDone. Indexed {len(docs)} documents.")
     finally:
+        conn.close()
         await rag.finalize_storages()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Index photo descriptions into LightRAG")
-    parser.add_argument("json_dir", help="Directory containing .json description files")
-    parser.add_argument("--reindex", action="store_true", help="Clear and rebuild the index")
+    parser = argparse.ArgumentParser(description="Index photo descriptions from the SQL library into LightRAG")
+    parser.add_argument("--db", default=LIBRARY_DB, help=f"SQLite library path (default: {LIBRARY_DB})")
+    parser.add_argument("--reindex", action="store_true", help="Clear and rebuild the LightRAG index")
     args = parser.parse_args()
-    asyncio.run(do_index(args.json_dir, reindex=args.reindex))
+    asyncio.run(do_index(args.db, reindex=args.reindex))
 
 
 if __name__ == "__main__":

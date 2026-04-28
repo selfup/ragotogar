@@ -15,6 +15,7 @@ tools/__pycache__
 tools/.pytest_cache
 .DS_Store
 ._*
+.claude
 
 descriptions
 mistralai

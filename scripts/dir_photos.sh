@@ -1,35 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: dir_photos.sh <photo_dir> [output_dir] [photo_describe flags...]
+# Usage: dir_photos.sh <photo_dir> [photo_describe flags...]
 #
-# Runs the full pipeline on a directory of photos:
-#   1. Describe all photos (EXIF + LLM) → JSON files in output_dir
-#   2. Convert all JSON → markdown + HTML via cashier
-#   3. Sync metadata + descriptions into the SQLite index
+# Describes every supported image in <photo_dir> and writes everything
+# (photo metadata, EXIF, parsed fields, full description, thumbnail BLOB)
+# directly into tools/.sql_index/library.db via cmd/describe.
+#
+# After this finishes, run ./tools/index_and_vectorize.sh to build the
+# LightRAG index and ./scripts/web.sh to browse the library.
 #
 # Examples:
 #   ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
-#   ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april
-#   ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april -model mistralai/ministral-3b
+#   ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 -model mistralai/devstral-small-2-2512
+#   ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 -force
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-PHOTO_DIR="${1:?Usage: dir_photos.sh <photo_dir> [output_dir] [photo_describe flags...]}"
+PHOTO_DIR="${1:?Usage: dir_photos.sh <photo_dir> [photo_describe flags...]}"
 shift
 
-OUT_DIR="${1:-describe_output}"
-[[ "$OUT_DIR" == -* ]] && OUT_DIR="describe_output" || shift
-
-mkdir -p "$OUT_DIR"
-
-echo "==> Describing photos in $PHOTO_DIR → $OUT_DIR"
-"$SCRIPT_DIR/photo_describe.sh" -output "$OUT_DIR" "$@" "$PHOTO_DIR"
-
-echo ""
-echo "==> Converting JSON → md + html in $OUT_DIR"
-go run "$SCRIPT_DIR/../cmd/cashier" all "$OUT_DIR"
-
-echo ""
-echo "==> Syncing metadata to SQLite"
-"$SCRIPT_DIR/../tools/sql_sync.sh" "$OUT_DIR"
+echo "==> Describing photos in $PHOTO_DIR"
+"$SCRIPT_DIR/photo_describe.sh" "$@" "$PHOTO_DIR"

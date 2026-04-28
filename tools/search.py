@@ -18,13 +18,15 @@ Environment:
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 
 from lightrag import QueryParam
 
-from rag_common import INDEX_DIR, SEARCH_MODEL, build_document, create_rag, make_llm_func
+from rag_common import (
+    INDEX_DIR, LIBRARY_DB, SEARCH_MODEL,
+    build_document, connect_library, create_rag, fetch_photo_dict, make_llm_func,
+)
 
 
 def unique_files(data):
@@ -58,28 +60,24 @@ def print_sources(data):
         print(f"  [{i}] {fp}")
 
 
-def _read_indexable_text(json_path, json_dir=None):
-    """Read the same indexable representation that index_and_vectorize.py used.
+def _name_from_indexed_path(path):
+    """LightRAG stores file basenames (with .json extension) as the
+    `file_path` reference. The photo's library name strips the extension."""
+    base = os.path.basename(path)
+    return base[:-5] if base.endswith(".json") else base
+
+
+def _read_indexable_text(name, conn):
+    """Reproduce the same indexable text build_document() produced for the
+    indexer, but pulled from the typed SQL columns instead of a JSON sidecar.
 
     Verify must see the same text the indexer embedded so retrieval and
     verification stay coherent (a query for "April" or "X100VI" or "f/2"
-    matches both layers or neither). LightRAG stores only basenames, so when
-    the indexed path doesn't resolve from cwd we fall back to <json_dir>/<basename>.
-    Returns None if neither lookup succeeds.
-    """
-    paths_to_try = [json_path]
-    if json_dir:
-        paths_to_try.append(os.path.join(json_dir, os.path.basename(json_path)))
-    for p in paths_to_try:
-        try:
-            with open(p, "r") as f:
-                data = json.load(f)
-            return build_document(data)
-        except FileNotFoundError:
-            continue
-        except Exception:
-            return None
-    return None
+    matches both layers or neither). Returns None if the photo isn't in SQL."""
+    data = fetch_photo_dict(conn, name)
+    if data is None:
+        return None
+    return build_document(data)
 
 
 VERIFY_PROMPT = """Determine if a photo is relevant to a search query.
@@ -110,10 +108,18 @@ async def _verify_one(query, file_path, document, llm_func):
     return file_path, verdict, resp.strip()
 
 
-async def verify_filter(query, files, llm_func, json_dir=None):
+async def verify_filter(query, files, llm_func, db_path=None):
     """Run parallel LLM verification on each candidate's indexed text, return only matches.
-    Logs per-photo verdicts to stderr for debugging."""
-    documents = [_read_indexable_text(fp, json_dir) for fp in files]
+    Logs per-photo verdicts to stderr for debugging.
+
+    `files` are LightRAG-stored references (basenames). We resolve each one to
+    its photo name and pull the indexable text from SQL."""
+    conn = connect_library(db_path)
+    try:
+        names = [_name_from_indexed_path(fp) for fp in files]
+        documents = [_read_indexable_text(n, conn) for n in names]
+    finally:
+        conn.close()
     print(f"\n--- Verifying {len(files)} candidate(s) with LLM ---", file=sys.stderr)
     results = await asyncio.gather(*[
         _verify_one(query, fp, doc, llm_func) for fp, doc in zip(files, documents)
@@ -133,7 +139,7 @@ def print_verified(query, kept, total):
         print(f"  [{i}] {fp}")
 
 
-async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, precise=False, verify=False, json_dir=None):
+async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, precise=False, verify=False, db_path=None):
     if not os.path.exists(INDEX_DIR):
         print("No index found. Run index_and_vectorize.py first.", file=sys.stderr)
         sys.exit(1)
@@ -151,7 +157,7 @@ async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, pre
             result = await rag.aquery_data(query_text, param=QueryParam(mode=mode, enable_rerank=False, chunk_top_k=strict_top_k))
             if verify:
                 files = unique_files(result.get("data", {}))
-                kept = await verify_filter(query_text, files, make_llm_func(SEARCH_MODEL), json_dir=json_dir)
+                kept = await verify_filter(query_text, files, make_llm_func(SEARCH_MODEL), db_path=db_path)
                 print_verified(query_text, kept, len(files))
             else:
                 print_sources(result.get("data", {}))
@@ -201,12 +207,12 @@ def main():
         help="With --retrieve: run an LLM yes/no check on each candidate's description, keep only YES matches",
     )
     parser.add_argument(
-        "--json-dir",
-        default=None,
-        help="Directory containing the photo .json files; used by --verify to resolve LightRAG basenames to readable paths",
+        "--db",
+        default=LIBRARY_DB,
+        help=f"SQLite library path used by --verify to look up indexable text (default: {LIBRARY_DB})",
     )
     args = parser.parse_args()
-    asyncio.run(do_query(args.text, mode=args.mode, sources=args.sources, retrieve=args.retrieve, precise=args.precise, verify=args.verify, json_dir=args.json_dir))
+    asyncio.run(do_query(args.text, mode=args.mode, sources=args.sources, retrieve=args.retrieve, precise=args.precise, verify=args.verify, db_path=args.db))
 
 
 if __name__ == "__main__":

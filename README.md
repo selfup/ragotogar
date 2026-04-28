@@ -23,24 +23,23 @@ Each step feeds the next:
 | Step | What | Script |
 |------|------|--------|
 | 1. **Organize** | Sort media into type folders (JPEG, RAW, MOV...) and date subfolders | `scripts/organize.sh` |
-| 2. **Describe** | Send each photo to a vision LLM, get structured JSON with EXIF + visual description | `scripts/photo_describe.sh` |
-| 3. **Render** | Convert JSON descriptions → markdown + standalone HTML + thumbnail JPEG | `scripts/dir_photos.sh` |
-| 4. **Index** | Extract entities/relationships into a knowledge graph and embed descriptions as vectors | `tools/index_and_vectorize.sh` |
-| 5. **Search** | Query the graph with natural language, get synthesized answers or file lists | `tools/search.sh` |
-| 6. **Browse** | Web landing page — search box + thumbnail grid linking to full photo pages | `scripts/web.sh` |
+| 2. **Describe** | Send each photo to a vision LLM, write photo + EXIF + parsed fields + 1024px thumbnail BLOB into `tools/.sql_index/library.db` | `scripts/photo_describe.sh` |
+| 3. **Index** | Read each photo from SQL and feed into a LightRAG knowledge graph (entity extraction + vector embedding) | `tools/index_and_vectorize.sh` |
+| 4. **Search** | Query the graph with natural language, get synthesized answers or file lists | `tools/search.sh` |
+| 5. **Browse** | Web server — search box + thumbnail grid; per-photo pages render on-demand from SQL | `scripts/web.sh` |
 
-Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. The typical full flow is 1 → 2 → 3 → 4 → 5 → 6.
+Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. The typical full flow is 1 → 2 → 3 → 4 → 5.
 
 ## Components
 
 | Component | Location | Description |
 |-----------|----------|-------------|
 | Go Media Organizer | `cmd/organize` | Parallel file organizer: sorts media into type/date folders, reunites sidecars. macOS-only. |
-| Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata → structured JSON |
-| Photo Renderer | `cmd/cashier` | JSON → markdown + self-contained HTML + thumbnail JPEG |
+| Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata + thumbnail JPG → SQLite library.db |
 | NAS Sync | `scripts/clone.sh` | rclone-based sync with month/year filtering and `--no-videos` |
-| GraphRAG Search | `tools/` | LightRAG knowledge graph for semantic and graph-based photo search |
-| Web Landing Page | `cmd/web` | Browser UI on top of search + render — search box + thumbnail grid linking to full photo pages |
+| GraphRAG Search | `tools/` | LightRAG knowledge graph (reads photos from SQL); semantic + graph search |
+| Web Server | `cmd/web` | Search UI + per-photo HTML pages rendered on-demand from SQL; thumbnail BLOBs streamed from SQL |
+| Cashier (markdown) | `cmd/cashier` | General-purpose markdown → HTML renderer with the cashier design system. Not in the photo pipeline; kept for ad-hoc use. |
 
 Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (`.files.env`) as the single source of truth for extension mappings.
 
@@ -88,21 +87,24 @@ Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutine
 
 ## Photo Describer (`cmd/describe`)
 
-Extracts EXIF metadata and generates LLM-powered visual descriptions of photos using LM Studio's vision API. Outputs structured JSON with both machine-parseable fields and a full-text description suitable for RAG indexing.
+Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual description via LM Studio's vision API. All output (typed EXIF columns, parsed `subject/setting/light/colors/composition` fields, full description, thumbnail BLOB, model + timing) writes directly to a single SQLite library at `tools/.sql_index/library.db`. The `photos` table is the source of truth — no JSON sidecars, no MD/HTML files.
 
 **Usage:**
 
 ```bash
 ./scripts/photo_describe.sh /path/to/photos
 
-# Custom output directory
-./scripts/photo_describe.sh -output ./descriptions /path/to/photos
+# Custom library path
+./scripts/photo_describe.sh -db /tmp/other.db /path/to/photos
 
 # Preview which files would be processed
 ./scripts/photo_describe.sh -dry-run /path/to/photos
 
-# Run a Ministral OCR pass for text-heavy scenes (see STRATEGIES.md)
-./scripts/photo_describe.sh -output ./descriptions/ministral-ocr -model mistralai/ministral-3-3b /path/to/photos
+# Re-describe photos already in the DB (UPSERTs over existing rows)
+./scripts/photo_describe.sh -force /path/to/photos
+
+# Use a different vision model
+./scripts/photo_describe.sh -model mistralai/ministral-3-3b /path/to/photos
 
 # More retry attempts for flaky models
 ./scripts/photo_describe.sh -retries 5 /path/to/photos
@@ -112,9 +114,10 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 
 | Flag | Description |
 |------|-------------|
-| `-output DIR` | Output directory for .json files (default: `<input_dir>/descriptions`) |
+| `-db PATH` | SQLite library path (default: `tools/.sql_index/library.db`, resolved from the repo root) |
+| `-force` | Re-describe photos already in the DB; UPSERTs across all five tables |
 | `-model NAME` | LM Studio model name (default: `qwen/qwen3-vl-8b` or `LM_MODEL` env) |
-| `-dry-run` | List files without calling the LLM |
+| `-dry-run` | List files without calling the LLM or touching the DB |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
 | `-preview-workers N` | Parallel ImageMagick/exiftool workers for preview generation (default: 4) |
 | `-inference-workers N` | Parallel LLM inference workers (default: 1). Bump to N to use LM Studio's `--parallel N` continuous batching. Vision inference is more memory-intensive than text — start at 2–4 and watch VRAM/error rate before going higher. |
@@ -125,125 +128,75 @@ Extracts EXIF metadata and generates LLM-powered visual descriptions of photos u
 |----------|---------|-------------|
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
 | `LM_MODEL` | `qwen/qwen3-vl-8b` | Vision model name (see `STRATEGIES.md` for model comparison) |
-| `RESIZE_PX` | `1024` | Longest edge resize for preview |
+| `RESIZE_PX` | `1024` | Longest edge resize for preview (also the thumbnail BLOB size) |
 | `JPEG_QUALITY` | `85` | JPEG quality for resized preview |
 
-**Output format:**
+**Library schema:**
 
-Each photo produces a JSON file named `<date>_<camera>_<filename>.json`:
+`cmd/describe` is the schema authority — it applies `CREATE TABLE IF NOT EXISTS` on every run, so the DB is created on first invocation and migrated forward on subsequent ones. Five tables, all keyed on `photos.id` (currently equal to `name` until Phase 5 stable IDs):
 
-```json
-{
-  "name": "20250928_X100VI_DSCF1516",
-  "file": "DSCF1516.JPG",
-  "path": "/path/to/DSCF1516.JPG",
-  "preview_ms": 180,
-  "preview": "180ms",
-  "inference_ms": 24251,
-  "inference": "24.252s",
-  "metadata": {
-    "file_name": "DSCF1516.JPG",
-    "date_time_original": "2025:09:28 16:38:17",
-    "make": "FUJIFILM",
-    "model": "X100VI",
-    "focal_length": "23.0 mm",
-    "f_number": "2",
-    "exposure_time": "1/38",
-    "iso": "3200",
-    "..."
-  },
-  "fields": {
-    "subject": "A bed covered in a paisley duvet...",
-    "setting": "A bedroom with beige walls...",
-    "light": "Dim, warm, from window on left...",
-    "colors": "Rust orange, muted blue, cream...",
-    "composition": "Low angle, shallow depth of field..."
-  },
-  "description": "**Subject:** A bed covered in..."
-}
-```
+| Table | Holds |
+|-------|-------|
+| `photos` | `id`, `name`, `file_path` (original on disk), `file_basename`, timestamps |
+| `exif` | Typed columns from EXIF: `camera_make`, `camera_model`, `lens_model`, `date_taken` (ISO 8601 + decomposed year/month), `focal_length_mm`, `f_number`, `exposure_time_seconds`, `iso`, `exposure_compensation`, `gps_latitude/longitude`, etc. |
+| `descriptions` | Parsed `subject / setting / light / colors / composition` plus `full_description` (the raw LLM output) |
+| `descriptions_fts` | FTS5 virtual table over `descriptions` with `porter unicode61` tokenization. Triggers keep it in sync. |
+| `thumbnails` | 1024px JPG bytes as a BLOB. Generated from the same magick output sent to the vision model — no second resize. |
+| `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
 
-- `fields` — structured data for direct filtering/querying
-- `description` — full text for LightRAG or similar RAG indexing
-- `metadata` — EXIF data parsed via `exiftool -json`
-- Output filenames include date + camera model to avoid collisions across cameras
+The `photos.id` column is reserved for the Phase 5 stable hash; it equals `name` today. Photo filenames include date + camera model (`20250928_X100VI_DSCF1516`) to avoid collisions across cameras.
 
 **Key details:**
 
 - RAW files (RAF, ARW, NEF, etc.) use the embedded JPEG preview via `exiftool -b -PreviewImage`, avoiding the need for darktable or rawtherapee
 - Non-RAW files are resized to 1024px previews via ImageMagick (configurable)
+- The same JPG bytes are base64-encoded for the LLM and stored as the thumbnail BLOB — single magick pass
 - Skips `._` AppleDouble files and `.DS_Store`
 - Exponential backoff with jitter on API failures
 - Unique session ID per request to prevent LM Studio KV cache reuse
 - Strips `<think>` blocks from reasoning models; detects when model exhausts tokens on reasoning with no content
-- Skips already-processed files (re-run safe)
+- Skip-exists checks `SELECT 1 FROM photos WHERE name = ?` (use `-force` to re-describe)
+- All five tables get UPSERTed inside one transaction per photo
 - **Requirements:** [exiftool](https://exiftool.org/), [ImageMagick](https://imagemagick.org/), LM Studio running with a vision model loaded
 
-## Photo Renderer (`cmd/cashier`)
-
-Converts photo description JSON files into styled, self-contained HTML pages. Takes the output of `cmd/describe` and produces one `.md` and one `.html` per photo — all styles are inlined, no external dependencies at view time.
-
-**Full directory pipeline (describe + render):**
+**Ad-hoc SQL:**
 
 ```bash
-# Describe all photos in a directory and render to HTML in one command
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
-
-# Custom output directory
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april
-
-# With photo_describe flags (model, retries, etc.)
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april -model mistralai/ministral-3b
+./tools/sql_query.sh "SELECT camera_model, COUNT(*) FROM exif GROUP BY camera_model"
+./tools/sql_query.sh -f /path/to/query.sql
 ```
 
-**Render only (JSON already exists):**
+**Backfill:** if you have an existing library populated by an earlier pipeline (no `thumbnails` / `inference` rows), `./tools/bootstrap_thumbs_inference.sh` re-derives both from `photos.file_path` (magick) and any matching `describe_*/<name>.json` sidecars on disk.
+
+## Cashier (`cmd/cashier`)
+
+A general-purpose markdown → HTML renderer that ships the cashier design system (warm-paper editorial style; see `styles.css`). Used to live in the photo pipeline producing per-photo `.md` / `.html` / `.jpg` sidecars; that role is now in `cmd/web` (per-photo pages render on-demand from SQL via Go template, sharing the same `styles.css`).
+
+The cashier source tree stays in place for ad-hoc markdown rendering — essays, single-page posts, anything that benefits from the section system (`hero`, `dual-pillars`, `built`, `prose`, etc.). Invocation is unchanged:
 
 ```bash
-# Single photo: JSON → md + html, then open
-./scripts/photo.sh describe_april/20260417_X100VI_DSCF1781.json \
-                   describe_april/20260417_X100VI_DSCF1781.md \
-                   describe_april/20260417_X100VI_DSCF1781.html
-
-# Batch: all JSON → md + html, 8 workers
-go run ./cmd/cashier all describe_april
-
-# Or as separate passes:
-go run ./cmd/cashier photo-all describe_april   # JSON → md
-go run ./cmd/cashier build-all describe_april   # md → html
+./scripts/cashier.sh photo input.json output.md
+./scripts/cashier.sh build input.md output.html
+./scripts/cashier.sh all <dir>
 ```
 
-**Single file:**
-
-```bash
-go run ./cmd/cashier photo input.json output.md
-go run ./cmd/cashier build input.md output.html
-```
-
-**Options:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-workers N` | `8` | Parallel workers for batch commands |
-
-**Output:** Each photo gets `.md`, `.html`, and `.jpg` files next to the input `.json`. The HTML embeds the photo as base64 (so it stays standalone) and includes structured sections: visual analysis (subject, setting, light, colors, composition), full EXIF metadata table, and a closing summary. The `.jpg` is a 1024px-wide resized sidecar used by `cmd/web` for thumbnail grids.
-
-**Requirements:** [ImageMagick](https://imagemagick.org/) (for embedding the photo into the HTML), [exiftool](https://exiftool.org/) (only for RAW inputs — extracts the embedded preview JPEG so ImageMagick doesn't try to call darktable), Go 1.26+
+The photo `.jpg` sidecar `cmd/cashier` produces is no longer used by `cmd/web` — thumbnails come out of the `thumbnails` BLOB in `library.db`.
 
 ## Photo Search — GraphRAG (`tools/`)
 
-Indexes photo description JSONs into a knowledge graph using [LightRAG](https://github.com/HKUDS/LightRAG), enabling semantic and graph-based search across your photo library. Uses LM Studio for both LLM (entity/relationship extraction) and embeddings.
+Indexes photo descriptions from `library.db` into a knowledge graph using [LightRAG](https://github.com/HKUDS/LightRAG), enabling semantic and graph-based search across your photo library. Uses LM Studio for both LLM (entity/relationship extraction) and embeddings.
 
 Split into three modules with separate concerns:
 
-- **`rag_common.py`** — shared config (models, index dir), LLM/embedding functions, RAG initialization
-- **`index_and_vectorize.py`** — entity extraction + vector embedding via `ainsert()`
-- **`search.py`** — query-only, searches the built index
+- **`rag_common.py`** — shared config (models, paths), LLM/embedding functions, RAG initialization, SQL helpers (`connect_library`, `fetch_photo_dict`, `iter_photo_names`)
+- **`index_and_vectorize.py`** — reads photos from SQL, runs entity extraction + vector embedding via `ainsert()`
+- **`search.py`** — query-only; verify mode pulls indexable text from SQL too, so retrieval and verification stay coherent
 
 **How it works:**
 
-1. Each photo's description text is chunked and sent to the LLM for entity extraction (objects, rooms, cameras, settings, colors, etc.)
-2. Extracted entities and relationships are stored in a knowledge graph (NetworkX + GraphML)
-3. Description text is also embedded via a local embedding model for vector search
+1. `index_and_vectorize.py` iterates `SELECT name FROM photos`, reshapes each row's typed columns into the dict `build_document()` expects, and feeds the resulting text into LightRAG
+2. The LLM extracts entities (objects, rooms, cameras, settings, colors, etc.) into a knowledge graph (NetworkX + GraphML)
+3. The same text is embedded via a local embedding model for vector search
 4. Queries combine vector similarity with graph traversal for comprehensive results
 
 **Setup:**
@@ -276,11 +229,14 @@ lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 **Usage:**
 
 ```bash
-# Index photo descriptions
-./tools/index_and_vectorize.sh /path/to/description_jsons
+# Index every photo currently in library.db
+./tools/index_and_vectorize.sh
 
 # Re-index (clear existing graph and rebuild)
-./tools/index_and_vectorize.sh --reindex /path/to/description_jsons
+./tools/index_and_vectorize.sh --reindex
+
+# Override library path
+./tools/index_and_vectorize.sh --db /tmp/other.db
 
 # Query (hybrid mode — combines local graph + global summaries)
 ./tools/search.sh "bedroom photos with warm light"
@@ -324,7 +280,7 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "anal
 | `--sources` | Synthesis + full list of all retrieved source files |
 | `--retrieve` | Retrieval only — strict matching (cosine ≥ 0.5), returns matched file list with no LLM synthesis. Honors `--mode` (default: `hybrid`). |
 | `--precise` | Strict retrieval (cosine ≥ 0.5) then synthesize over only exact matches. Honors `--mode`. Best with `SEARCH_MODEL` override for large result sets. See [`STRATEGIES.md`](STRATEGIES.md). |
-| `--verify` | Composes with `--retrieve`: runs an LLM yes/no relevance check on each candidate's `description` field (parallel via Ministral 3B), keeps only YES matches. Pair with `--json-dir <dir>` so the basenames LightRAG stores can be resolved back to the actual JSONs. |
+| `--verify` | Composes with `--retrieve`: runs an LLM yes/no relevance check on each candidate, keeps only YES matches. Pulls the same indexable text from `library.db` that the indexer used, so retrieval and verification stay coherent. Override the library path with `--db <path>` if needed. |
 
 **Environment variables:**
 
@@ -344,22 +300,22 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "anal
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
 - Three-slot model architecture: Qwen3-VL 8B for description (vision); Ministral 3B GGUF for index entity extraction and query synthesis; devstral 24B GGUF for multi-document synthesis override. See [`STRATEGIES.md`](STRATEGIES.md) for the five-model comparison and sizing evidence.
 - LLM calls use `max_tokens: -1` to let LM Studio use the full context window
-- `index_and_vectorize.py` globs `**/*.json` recursively, so pointing it at a parent `descriptions/` directory picks up subdirectories automatically (e.g. `descriptions/ministral-ocr/*.json` alongside the main descriptions — LightRAG entity-merge deduplicates across both)
+- `index_and_vectorize.py` reads every photo from `library.db` via a JOIN across photos / exif / descriptions; new photos picked up on the next run
 - All documents are batched into a single `ainsert()` call so LightRAG processes chunks in parallel across 8 concurrent LLM workers
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
-- Index is stored in `tools/.rag_index/` (gitignored)
-- **Requirements:** Python 3.10+, LM Studio with an LLM and embedding model loaded
+- LightRAG index is stored in `tools/.rag_index/` (gitignored), separate from the SQL library at `tools/.sql_index/library.db`
+- **Requirements:** Python 3.10+, LM Studio with an LLM and embedding model loaded, a populated `library.db` (run `cmd/describe` first)
 
-## Web Landing Page (`cmd/web`)
+## Web Server (`cmd/web`)
 
-Browser UI sitting on top of the search + render pipeline. Type a query, get a grid of matching photo thumbnails; click a thumbnail to open the full standalone HTML photo page.
+Browser UI sitting on top of `library.db`. Type a query, get a grid of matching photo thumbnails; click a thumbnail to open the full per-photo page rendered on-demand from SQL via Go's `html/template`. Thumbnails stream from the `thumbnails` BLOB column.
 
 **Usage:**
 
 ```bash
-./scripts/web.sh                       # default: :8080, dir=describe_output
-./scripts/web.sh -dir descriptions     # different photo dir
-./scripts/web.sh -addr :9000           # different port
+./scripts/web.sh                          # default: :8080, library at tools/.sql_index/library.db
+./scripts/web.sh -db /tmp/other.db        # different library
+./scripts/web.sh -addr :9000              # different port
 ```
 
 Then open `http://localhost:8080`.
@@ -369,27 +325,31 @@ Then open `http://localhost:8080`.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-addr` | `:8080` | Listen address |
-| `-dir` | `describe_output` | Directory of cashier outputs (.json/.md/.html/.jpg) |
-| `-repo` | `.` | Repo root (where `tools/search.sh` lives) |
+| `-db` | `tools/.sql_index/library.db` | SQLite library path |
+| `-repo` | `.` | Repo root (where `tools/search.sh` and `styles.css` live) |
 
-**How it works:**
+**Routes:**
 
-1. `GET /` — search box + a three-pill mode toggle (vector / graph / hybrid) + result grid
-2. `GET /?q=<query>&mode=<mode>` — shells out to `./tools/search.sh --retrieve --mode <mode> "<query>"`, parses the file list, renders thumbnails for results that have a `.jpg` sidecar in `-dir`
-3. `GET /photos/...` — static file server over `-dir`; serves `<name>.jpg` for thumbs and `<name>.html` for the full post
+| Route | Behavior |
+|-------|----------|
+| `GET /` | Search box + a four-pill mode toggle + result grid |
+| `GET /?q=<query>&mode=<mode>` | Shells out to `./tools/search.sh --retrieve --mode <mode> "<query>"`, parses the file list, validates each name against `photos.name`, renders thumbnails |
+| `GET /photos/<name>` | HTML page rendered from a Go template against the photos / exif / descriptions / inference tables. Uses the cashier design system (hero / dual-pillars / built photo-meta sections). |
+| `GET /photos/<name>.jpg` | Streams the thumbnail BLOB from `thumbnails.bytes` with `Content-Type: image/jpeg` and `Cache-Control: max-age=86400` |
+| `GET /styles.css` | Serves the cashier design system from the repo root |
 
 **Mode toggle:**
 
 | Pill | search.py invocation | Behavior |
 |------|----------------------|----------|
 | `vector` | `--retrieve --mode naive` | Pure vector similarity. **Default and recommended** — wins on this corpus. <500ms. |
-| `naive-verify` | `--retrieve --mode naive --verify --json-dir <dir>` | Vector retrieval + an LLM yes/no check on each candidate's `description` field. ~3–6s per query. Use when vector returns too many noisy hits and you want a stricter precision filter. |
+| `naive-verify` | `--retrieve --mode naive --verify` | Vector retrieval + an LLM yes/no check on each candidate (text pulled from SQL). ~3–6s per query. Use when vector returns too many noisy hits and you want a stricter precision filter. |
 | `graph` | `--retrieve --mode local` | LLM extracts keywords from the query, then walks the graph from matched entities. ~1–2s. Often underperforms naive on small corpora where entity coverage is thin. |
 | `hybrid` | `--retrieve --mode hybrid` | local + global community summaries. Broadest coverage, usually similar to local for direct photo lookup. |
 
-All pills use `--retrieve` (cosine ≥ 0.5, no LLM synthesis). Clicking a pill auto-submits the form. The web server passes its `-dir` through as `--json-dir` so verify can resolve LightRAG's basename-only references back to readable JSON files. Results that don't have a corresponding `.jpg` sidecar in the photo dir are silently skipped — re-run `cmd/cashier` if you upgrade an old output dir.
+All pills use `--retrieve` (cosine ≥ 0.5, no LLM synthesis). Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when LightRAG indexed a basename that's since been deleted from the library).
 
-**Requirements:** A built LightRAG index (see [Photo Search](#photo-search--graphrag-tools)), photos rendered with `cmd/cashier` (so `.jpg` sidecars exist).
+**Requirements:** A built LightRAG index (see [Photo Search](#photo-search--graphrag-tools)) and a populated `library.db` (run `cmd/describe` first).
 
 ## Tests
 
@@ -402,11 +362,13 @@ Run the full test suite (all Go and bash tests):
 Or run individually:
 
 ```bash
-# Go tests — sub-modules
-cd cmd/organize && go test -v ./...
+# Go tests — sub-modules (each has its own go.mod)
+cd cmd/organize  && go test -v ./...
+cd cmd/describe  && go test -v ./...   # parsers, schema, insert roundtrip, FTS, cascade
 
-# Go tests — root module (cmd/cashier)
+# Go tests — root module (cmd/cashier and cmd/web)
 go test -v ./cmd/cashier/...
+go test -v ./cmd/web/...               # template render, BLOB stream, search-output parse, helpers
 
 # Individual bash test scripts
 ./scripts/clone_test.sh
@@ -416,7 +378,7 @@ go test -v ./cmd/cashier/...
 ./scripts/sync_to_nas_test.sh
 ```
 
-`test.sh` auto-discovers all `cmd/*/go.mod` Go sub-modules, the root module (`cmd/cashier`), and all `scripts/*_test.sh` bash tests.
+`test.sh` auto-discovers all `cmd/*/go.mod` Go sub-modules, the root module (`cmd/cashier`, `cmd/web`), and all `scripts/*_test.sh` bash tests.
 
 **Go organizer test details:**
 
@@ -478,46 +440,34 @@ Convenience wrapper that runs the Go media organizer. Passes all arguments throu
 
 ### `scripts/dir_photos.sh` — Full Directory Pipeline
 
-Runs the complete pipeline on a directory of photos: describe → render.
+Describes every photo in a directory; everything (EXIF, parsed fields, full description, thumbnail BLOB, model + timing) lands in `tools/.sql_index/library.db`. Run `./tools/index_and_vectorize.sh` afterward to build the LightRAG graph and `./scripts/web.sh` to browse.
 
 ```bash
 ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april
-./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 describe_april -model mistralai/ministral-3b
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 -model mistralai/ministral-3-3b
+./scripts/dir_photos.sh ~/X100VI/JPEG/April2026 -force   # re-describe everything
 ```
 
-Arguments: `<photo_dir> [output_dir] [photo_describe flags...]`. Output directory defaults to `describe_output`.
+Arguments: `<photo_dir> [photo_describe flags...]`. All `photo_describe.sh` flags pass through (`-db`, `-force`, `-model`, `-dry-run`, `-retries`, `-preview-workers`, `-inference-workers`).
 
-### `scripts/photo.sh` — Single Photo Render
+### `scripts/cashier.sh` — Markdown Renderer Wrapper
 
-Converts a single description JSON to markdown and HTML, then opens the result.
-
-```bash
-./scripts/photo.sh describe_output/20260417_X100VI_DSCF1781.json \
-                   describe_output/20260417_X100VI_DSCF1781.md \
-                   describe_output/20260417_X100VI_DSCF1781.html
-```
-
-### `scripts/cashier.sh` — Photo Renderer Wrapper
-
-Convenience wrapper around `go run ./cmd/cashier`. Passes all arguments through.
+Convenience wrapper around `go run ./cmd/cashier`. Not part of the photo pipeline — see [Cashier](#cashier-cmdcashier).
 
 ```bash
 ./scripts/cashier.sh photo input.json output.md
 ./scripts/cashier.sh build input.md output.html
-./scripts/cashier.sh all describe_output/
-./scripts/cashier.sh photo-all describe_output/
-./scripts/cashier.sh build-all describe_output/
+./scripts/cashier.sh all <dir>
 ```
 
-### `scripts/web.sh` — Web Landing Page
+### `scripts/web.sh` — Web Server
 
-Runs the Go landing page server. Defaults to `:8080` and serves `describe_output/`. See the [Web Landing Page](#web-landing-page-cmdweb) section for details.
+Runs `cmd/web` with the repo root passed in for `tools/search.sh` and `styles.css` resolution. Defaults to `:8080` and the canonical library at `tools/.sql_index/library.db`.
 
 ```bash
-./scripts/web.sh                       # default
-./scripts/web.sh -dir descriptions     # different photo dir
-./scripts/web.sh -addr :9000           # different port
+./scripts/web.sh                          # default
+./scripts/web.sh -db /tmp/other.db        # different library
+./scripts/web.sh -addr :9000              # different port
 ```
 
 ### `scripts/batch_photo_describe.sh` — Describe Across Matching Subdirectories
@@ -526,10 +476,13 @@ Wraps `photo_describe.sh` so a basename prefix expands to every sibling director
 
 ```bash
 # Describe every directory under /Volumes/T9/X100VI/JPEG matching "March*"
-./scripts/batch_photo_describe.sh -output describe_test /Volumes/T9/X100VI/JPEG/March
+./scripts/batch_photo_describe.sh /Volumes/T9/X100VI/JPEG/March
+
+# Custom library path applies to every matched directory
+./scripts/batch_photo_describe.sh -db /tmp/march.db /Volumes/T9/X100VI/JPEG/March
 ```
 
-All `photo_describe.sh` flags (`-output`, `-model`, `-dry-run`, `-retries`) pass through. The last positional argument must be `<parent>/<prefix>`.
+All `photo_describe.sh` flags (`-db`, `-force`, `-model`, `-dry-run`, `-retries`) pass through. The last positional argument must be `<parent>/<prefix>`.
 
 ### `scripts/clone.sh` — NAS Sync (rclone)
 

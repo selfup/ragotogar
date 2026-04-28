@@ -1,40 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Wrapper around cmd/describe — extracts EXIF + generates LLM descriptions
-# for photos in a directory via LM Studio.
+# Wrapper around cmd/describe — extracts EXIF, generates a 1024px preview,
+# calls the LM Studio vision model, and writes the photo + EXIF + parsed
+# fields + thumbnail BLOB into tools/.sql_index/library.db.
 #
 # Usage:
 #   ./scripts/photo_describe.sh /path/to/photos
 #
-#   # Custom output directory (relative paths resolved before cd-ing into Go module)
-#   ./scripts/photo_describe.sh -output describe_test /Volumes/T9/X100VI/JPEG/March21st2026
+#   # Override the library DB path
+#   ./scripts/photo_describe.sh -db /tmp/other.db /path/to/photos
 #
-#   # Preview what would be processed
-#   ./scripts/photo_describe.sh -dry-run /path/to/photos
+#   # Re-describe photos already in the DB
+#   ./scripts/photo_describe.sh -force /path/to/photos
 #
-#   # Use a specific LM Studio model (e.g. a second loaded instance)
+#   # Use a specific LM Studio model
 #   ./scripts/photo_describe.sh -model mistralai/devstral-small-2-2512:2 /path/to/photos
 #
-#   # Bump retry attempts for flaky models
-#   ./scripts/photo_describe.sh -retries 5 /path/to/photos
-#
-# Flags: -output DIR, -model NAME, -dry-run, -retries N
+# Flags: -db PATH, -force, -model NAME, -dry-run, -retries N,
+#        -preview-workers N, -inference-workers N
 # Env:   LM_STUDIO_BASE, LM_MODEL, RESIZE_PX, JPEG_QUALITY
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DESCRIBE_DIR="$SCRIPT_DIR/../cmd/describe"
 
-# Resolve relative paths before cd-ing into the Go module directory.
+# Resolve relative -db paths before cd-ing into the Go module so users can
+# pass a path relative to the caller's cwd.
 args=()
-next_is_output=false
+next_is_db=false
 for arg in "$@"; do
-  if $next_is_output; then
-    # Make -output path absolute relative to the caller's working directory
+  if $next_is_db; then
     [[ "$arg" != /* ]] && arg="$PWD/$arg"
-    next_is_output=false
-  elif [[ "$arg" == "-output" ]]; then
-    next_is_output=true
+    next_is_db=false
+  elif [[ "$arg" == "-db" ]]; then
+    next_is_db=true
   fi
   args+=("$arg")
 done

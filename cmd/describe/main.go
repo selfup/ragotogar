@@ -33,7 +33,8 @@ var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 type config struct {
 	inputDir         string
 	inputFile        string // set when a single file is passed instead of a directory
-	outputDir        string
+	dbPath           string
+	force            bool
 	dryRun           bool
 	lmBase           string
 	model            string
@@ -94,7 +95,8 @@ func main() {
 		inferenceWorkers: 1,
 	}
 
-	flag.StringVar(&cfg.outputDir, "output", "", "Output directory for .txt files (default: <input_dir>/descriptions)")
+	flag.StringVar(&cfg.dbPath, "db", defaultDBPath(), "SQLite library path")
+	flag.BoolVar(&cfg.force, "force", false, "Re-describe photos already in the DB (UPSERT on the photos.name conflict)")
 	flag.StringVar(&cfg.model, "model", cfg.model, "LM Studio model name")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "List files that would be processed without calling the LLM")
 	flag.IntVar(&cfg.maxRetries, "retries", cfg.maxRetries, "Max retry attempts per image on API failure")
@@ -118,10 +120,6 @@ func main() {
 	} else {
 		cfg.inputFile = input
 		cfg.inputDir = filepath.Dir(input)
-	}
-
-	if cfg.outputDir == "" {
-		cfg.outputDir = filepath.Join(cfg.inputDir, "descriptions")
 	}
 
 	if err := checkDeps(); err != nil {
@@ -152,8 +150,8 @@ func run(cfg config) error {
 	}
 
 	fmt.Printf("Found %d image(s) in '%s'\n", len(files), cfg.inputDir)
-	fmt.Printf("Output: %s\n", cfg.outputDir)
-	fmt.Printf("Model:  %s @ %s\n", cfg.model, cfg.lmBase)
+	fmt.Printf("Library: %s\n", cfg.dbPath)
+	fmt.Printf("Model:   %s @ %s\n", cfg.model, cfg.lmBase)
 	fmt.Printf("Retries: %d (delay %s)\n", cfg.maxRetries, cfg.retryDelay)
 	fmt.Printf("Preview workers: %d\n", cfg.previewWorkers)
 	fmt.Printf("Inference workers: %d\n\n", cfg.inferenceWorkers)
@@ -166,8 +164,15 @@ func run(cfg config) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(cfg.outputDir, 0755); err != nil {
-		return fmt.Errorf("create output dir: %w", err)
+	db, err := openDB(cfg.dbPath)
+	if err != nil {
+		return fmt.Errorf("open library: %w", err)
+	}
+	defer db.Close()
+
+	existing, err := listExistingNames(db)
+	if err != nil {
+		return fmt.Errorf("list existing: %w", err)
 	}
 
 	magickCmd := findMagick()
@@ -176,33 +181,31 @@ func run(cfg config) error {
 		file     string
 		exif     exifData
 		safeName string
-		txtOut   string
 	}
 	type previewResult struct {
-		b64      string
+		bytes    []byte
 		duration time.Duration
 		err      error
 	}
 
 	// Build job list up front, applying skip-exists serially so we don't
-	// spawn preview workers for files we won't process.
+	// spawn preview workers for photos we won't process.
 	var jobs []job
 	var skipped int
 	for _, file := range files {
 		exif := extractEXIF(file)
 		safeName := safeOutputName(cfg.inputDir, file, exif)
-		txtOut := filepath.Join(cfg.outputDir, safeName+".json")
-		if _, err := os.Stat(txtOut); err == nil {
-			fmt.Printf("  [skip] %s (already exists)\n", safeName)
+		if !cfg.force && existing[safeName] {
+			fmt.Printf("  [skip] %s (already in DB)\n", safeName)
 			skipped++
 			continue
 		}
-		jobs = append(jobs, job{file: file, exif: exif, safeName: safeName, txtOut: txtOut})
+		jobs = append(jobs, job{file: file, exif: exif, safeName: safeName})
 	}
 
 	if len(jobs) == 0 {
 		fmt.Printf("\nDone. Processed: 0, Errors: 0, Skipped: %d\n", skipped)
-		fmt.Printf("Output: %s\n", cfg.outputDir)
+		fmt.Printf("Library: %s\n", cfg.dbPath)
 		return nil
 	}
 
@@ -223,9 +226,9 @@ func run(cfg config) error {
 		wg.Go(func() {
 			for idx := range jobCh {
 				start := time.Now()
-				b64, err := makePreviewBase64(magickCmd, jobs[idx].file, cfg.resizePx, cfg.jpegQuality)
+				bytes, err := makePreviewBytes(magickCmd, jobs[idx].file, cfg.resizePx, cfg.jpegQuality)
 				previews[idx] <- previewResult{
-					b64:      b64,
+					bytes:    bytes,
 					duration: time.Since(start),
 					err:      err,
 				}
@@ -261,8 +264,9 @@ func run(cfg config) error {
 					continue
 				}
 
+				b64 := base64.StdEncoding.EncodeToString(res.bytes)
 				inferenceStart := time.Now()
-				description, err := describeWithRetry(cfg, res.b64, exifToPromptString(j.exif))
+				description, err := describeWithRetry(cfg, b64, exifToPromptString(j.exif))
 				inferenceElapsed := time.Since(inferenceStart)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "  [%d/%d] %s\n    !! Vision API failed after %d attempts: %v\n",
@@ -276,8 +280,13 @@ func run(cfg config) error {
 					res.duration.Round(time.Millisecond),
 					inferenceElapsed.Round(time.Millisecond))
 
-				if err := writeOutput(j.txtOut, j.safeName, j.file, j.exif, description, res.duration, inferenceElapsed); err != nil {
-					fmt.Fprintf(os.Stderr, "    !! Write failed: %v\n", err)
+				fields := parseDescriptionFields(description)
+				if err := insertPhoto(
+					db, j.safeName, j.file, j.exif, description, fields,
+					res.bytes, cfg.model,
+					res.duration.Milliseconds(), inferenceElapsed.Milliseconds(),
+				); err != nil {
+					fmt.Fprintf(os.Stderr, "    !! DB write failed: %v\n", err)
 					errors.Add(1)
 					continue
 				}
@@ -294,7 +303,7 @@ func run(cfg config) error {
 	wg.Wait()
 
 	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed.Load(), errors.Load(), skipped)
-	fmt.Printf("Output: %s\n", cfg.outputDir)
+	fmt.Printf("Library: %s\n", cfg.dbPath)
 	return nil
 }
 
@@ -626,27 +635,28 @@ var rawExts = map[string]bool{
 	"orf": true, "rw2": true, "pef": true,
 }
 
-func makePreviewBase64(magickCmd, file string, resizePx, quality int) (string, error) {
+// makePreviewBytes returns the resized JPEG bytes used both for the LLM
+// (base64-encoded by the caller) and as the thumbnail BLOB.
+func makePreviewBytes(magickCmd, file string, resizePx, quality int) ([]byte, error) {
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(file), "."))
 
 	// For RAW files, try extracting the embedded JPEG preview first.
 	// Most cameras embed a full-size JPEG — this avoids needing darktable/rawtherapee.
 	if rawExts[ext] {
-		if b64, err := extractEmbeddedPreview(magickCmd, file, resizePx, quality); err == nil {
-			return b64, nil
+		if b, err := extractEmbeddedPreviewBytes(magickCmd, file, resizePx, quality); err == nil {
+			return b, nil
 		}
 	}
 
-	return magickConvert(magickCmd, file, resizePx, quality)
+	return magickConvertBytes(magickCmd, file, resizePx, quality)
 }
 
-// extractEmbeddedPreview pulls the embedded JPEG from a RAW file via exiftool,
-// then resizes it with ImageMagick.
-func extractEmbeddedPreview(magickCmd, file string, resizePx, quality int) (string, error) {
-	// Extract embedded preview to a temp file
+// extractEmbeddedPreviewBytes pulls the embedded JPEG from a RAW file via
+// exiftool, then resizes it with ImageMagick. Returns the resized JPEG bytes.
+func extractEmbeddedPreviewBytes(magickCmd, file string, resizePx, quality int) ([]byte, error) {
 	tmp, err := os.CreateTemp("", "describe-embedded-*.jpg")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
@@ -655,21 +665,20 @@ func extractEmbeddedPreview(magickCmd, file string, resizePx, quality int) (stri
 	cmd := exec.Command("exiftool", "-b", "-PreviewImage", file)
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
-		return "", fmt.Errorf("no embedded preview found")
+		return nil, fmt.Errorf("no embedded preview found")
 	}
 
 	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
-		return "", err
+		return nil, err
 	}
 
-	// Resize the extracted JPEG
-	return magickConvert(magickCmd, tmpPath, resizePx, quality)
+	return magickConvertBytes(magickCmd, tmpPath, resizePx, quality)
 }
 
-func magickConvert(magickCmd, file string, resizePx, quality int) (string, error) {
+func magickConvertBytes(magickCmd, file string, resizePx, quality int) ([]byte, error) {
 	tmp, err := os.CreateTemp("", "describe-preview-*.jpg")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
@@ -683,14 +692,10 @@ func magickConvert(magickCmd, file string, resizePx, quality int) (string, error
 		tmpPath,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("%s: %s", err, out)
+		return nil, fmt.Errorf("%s: %s", err, out)
 	}
 
-	data, err := os.ReadFile(tmpPath)
-	if err != nil {
-		return "", err
-	}
-	return base64.StdEncoding.EncodeToString(data), nil
+	return os.ReadFile(tmpPath)
 }
 
 type descriptionFields struct {
@@ -699,19 +704,6 @@ type descriptionFields struct {
 	Light       string `json:"light"`
 	Colors      string `json:"colors"`
 	Composition string `json:"composition"`
-}
-
-type photoDescription struct {
-	Name        string            `json:"name"`
-	File        string            `json:"file"`
-	Path        string            `json:"path"`
-	PreviewMs   int64             `json:"preview_ms"`
-	Preview     string            `json:"preview"`
-	InferenceMs int64             `json:"inference_ms"`
-	Inference   string            `json:"inference"`
-	Metadata    exifData          `json:"metadata"`
-	Fields      descriptionFields `json:"fields"`
-	Description string            `json:"description"`
 }
 
 // parseDescriptionFields extracts structured sections from the model output.
@@ -788,26 +780,6 @@ func parseDescriptionFields(description string) descriptionFields {
 	flush()
 
 	return fields
-}
-
-func writeOutput(path, safeName, srcFile string, exif exifData, description string, preview, inference time.Duration) error {
-	out := photoDescription{
-		Name:        safeName,
-		File:        filepath.Base(srcFile),
-		Path:        srcFile,
-		PreviewMs:   preview.Milliseconds(),
-		Preview:     preview.Round(time.Millisecond).String(),
-		InferenceMs: inference.Milliseconds(),
-		Inference:   inference.Round(time.Millisecond).String(),
-		Metadata:    exif,
-		Fields:      parseDescriptionFields(description),
-		Description: description,
-	}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal json: %w", err)
-	}
-	return os.WriteFile(path, data, 0644)
 }
 
 func checkDeps() error {
