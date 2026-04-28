@@ -129,20 +129,40 @@ SQLite has FTS5, which gives keyword search on descriptions for free. Could comp
 
 Each phase delivers value independently. No phase is gated on a later one, but they compose.
 
-| Phase | Delivers | Dependencies | Effort |
-|-------|----------|--------------|--------|
-| **1. SQLite metadata index** | Fast structured filters; foundation for caching, sharding, deep analysis | none | small |
-| **2. SQL pre-filter in cmd/web search path** | "SQL filter → vector → verify" pipeline end-to-end | Phase 1 | small |
-| **3. Verify-result cache in SQL** | Repeat queries become free | Phase 1 | small |
-| **4. Camera-sharded LightRAG indexes + super-graph router** | Bounded shards, parallel fan-out, incremental re-indexing | Phase 1 (for shard registry) | medium |
-| **5. Stable photo IDs + path-portability migration** | Move/rename safe; dedup detection | Phase 1 | medium |
-| **6. Cross-shard analysis tooling (SQL aggregations)** | "Most-used aperture in 2024", lens diversity reports, etc. | Phase 1 | small once SQL is in |
+| Phase | Status | Delivers | Dependencies | Effort |
+|-------|--------|----------|--------------|--------|
+| **1. SQLite metadata index** | ✅ shipped (2026-04-28) | Fast structured filters; foundation for caching, sharding, deep analysis | none | small |
+| **2. SQL pre-filter in cmd/web search path** | not started | "SQL filter → vector → verify" pipeline end-to-end | Phase 1 | small |
+| **3. Verify-result cache in SQL** | not started | Repeat queries become free | Phase 1 | small |
+| **4. Camera-sharded LightRAG indexes + super-graph router** | not started | Bounded shards, parallel fan-out, incremental re-indexing | Phase 1 (for shard registry) | medium |
+| **5. Stable photo IDs + path-portability migration** | not started | Move/rename safe; dedup detection | Phase 1 | medium |
+| **6. Cross-shard analysis tooling (SQL aggregations)** | not started | "Most-used aperture in 2024", lens diversity reports, etc. | Phase 1 | small once SQL is in |
 
-Highest near-term leverage: Phase 1. Everything else builds on top.
+Phase 1 done. Highest near-term leverage from here: Phase 2 (start using the SQL index in the search path).
 
 ---
 
 # Phase 1: SQLite metadata index — detailed spec
+
+## Status: ✅ shipped (2026-04-28)
+
+Landed across 4 commits, sliced to keep each diff small and reviewable:
+
+| Commit | Slice |
+|--------|-------|
+| `dd2ff9d` | Schema (photos / exif / descriptions) + JSON parser + idempotent UPSERT-driven `tools/sql_sync.py` + `--reset` |
+| `535e52a` | FTS5 virtual table over descriptions with porter+unicode61 stemming, plus AI/AD/AU triggers (idempotent on re-sync) |
+| `e26ec80` | 15-test pytest suite covering parsers, schema, sync, FTS, cascade-delete, missing-fields robustness; `tools/test.sh` runner |
+| `8e2b3a0` | `tools/sql_query.sh` ad-hoc helper + wired `sql_sync.sh` into `scripts/dir_photos.sh` and `full_run.sh` after the cashier step |
+
+Verified end-to-end against `describe_test/` (182 X100VI photos): all parsers correct, FTS porter stemming (`tree` ↔ `trees`) works, `NEAR(a b, N)` and boolean queries work, re-syncs stay idempotent at exactly N rows per table.
+
+What's in the schema beyond the original spec: `exposure_compensation REAL` (always present in the X100VI corpus, useful for filters).
+
+What was deferred to later slices/phases:
+- mtime-vs-`updated_at` freshness short-circuit on resync — currently always-upsert, fast enough at 182 rows
+- orphan detection when a JSON disappears from disk — `--reset` is the escape hatch
+- Phase 2 search integration
 
 ## Goal
 
@@ -353,13 +373,13 @@ For users with existing describe_* dirs:
 
 Idempotent — safe to re-run.
 
-## Open questions to resolve before code goes in
+## Open questions — resolved
 
-1. **Dependencies**: Python's stdlib `sqlite3` is enough for everything Phase 1 needs (no ORM required). Stick with stdlib? Or add `sqlmodel` / `sqlalchemy` for schema management ergonomics? **Default**: stdlib for now; revisit if multi-table joins in Python get clunky.
-2. **Migration framework**: just a `schema_version` table with handwritten migrations, or pull in `alembic`? **Default**: handwritten; scope is small.
-3. **Where to put it in the repo**: `tools/sql_sync.py` next to existing scripts? Or a new `cmd/sqlsync` Go program? **Default**: Python in `tools/` to stay consistent with index_and_vectorize and keep the SQL ecosystem (sqlite3, parsing libs) cohesive in one language. CLAUDE.md's "always use uv" applies.
-4. **What happens when a JSON is deleted from disk**: sync currently only adds/updates. Should `--reset` be the only way to clear stale rows, or should sync detect orphans? **Default**: orphan detection requires walking the dir twice and is mostly cosmetic — defer until needed; `--reset` is the escape hatch.
-5. **Concurrent writes**: SQLite supports one writer at a time. If sync_sql runs while indexing is also writing somewhere, do we need locking? Phase 1 has no other SQL writers, so this is a non-issue until Phase 3.
+1. **Dependencies**: stdlib `sqlite3` only. `pytest` added as a dev dep for the test suite. No ORM. ✅
+2. **Migration framework**: handwritten — `schema_version` row inserted via `INSERT OR IGNORE`. Slice-1 → slice-2 upgrade was handled by `IF NOT EXISTS` + the AFTER UPDATE trigger backfilling FTS on next sync. ✅
+3. **Where to put it**: `tools/sql_sync.py` (Python, next to existing tools, runs via `uv run --project tools`). ✅
+4. **JSON deletion → orphan rows**: deferred. `--reset` is the escape hatch; orphan detection waits until needed. ✅ (deferred by design)
+5. **Concurrent writes**: non-issue in Phase 1 — only `sql_sync` writes. Re-evaluate when Phase 3 introduces the verify cache.
 
 ---
 
@@ -422,4 +442,8 @@ Track what got chosen and why as phases land.
 
 | Date | Decision | Phase | Rationale |
 |------|----------|-------|-----------|
-| _(populate as decisions are made)_ | | | |
+| 2026-04-28 | Add `exposure_compensation REAL` to the `exif` schema | 1 | Always present in the X100VI corpus and useful for filtering ("under-exposed shots", "EV-biased frames") |
+| 2026-04-28 | FTS5 tokenizer = `porter unicode61` | 1 | Porter stemming makes `tree` match `trees`, `shadow` match `shadows`; unicode61 handles case folding and diacritics |
+| 2026-04-28 | Always-upsert on every sync (no mtime freshness check) | 1 | Sub-second on 182 rows; revisit when sync time becomes noticeable |
+| 2026-04-28 | Orphan detection deferred — `--reset` is the escape hatch | 1 | Two-pass walk has cost without near-term value; users curate JSON dirs by hand today |
+| 2026-04-28 | All sidecar paths (`md_path`, `html_path`, `jpg_path`, `json_path`) stored as absolute | 1 | Mirrors the JSON's own `data.path` (already absolute); avoids cwd-dependent reads downstream |
