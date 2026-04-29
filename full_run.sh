@@ -11,14 +11,29 @@ set -euo pipefail
 #   ./full_run.sh /path/to/photos
 #   ./full_run.sh /path/to/photos1 /path/to/photos2 /path/to/photos3
 #   ./full_run.sh /Volumes/T9/X100VI/JPEG/March          # prefix — expands to March*
+#   ./full_run.sh /Volumes/T9/X100VI/JPEG/*              # shell glob — every subdir
 #   ./full_run.sh --rebuild /path1 /path2                # rebuild flag is positional-agnostic
 #   PHOTO_DIR=/path/to/photos ./full_run.sh              # legacy single-dir env still works
 #
 # Each positional argument is one of:
-#   - A directory  → used as-is
-#   - A parent/prefix path (e.g. /Volumes/T9/X100VI/JPEG/March) → expands to every
-#     sibling under /Volumes/T9/X100VI/JPEG whose name starts with "March"
-#     (mirrors scripts/batch_photo_describe.sh)
+#   - A directory  → used as-is. cmd/describe recursively walks up to 3 levels
+#     deep (see cmd/describe/main.go collectFiles), so passing a parent dir like
+#     .../JPEG processes every date-subfolder's photos in ONE describe run.
+#   - A parent/prefix path (e.g. .../JPEG/March) → expands to every sibling
+#     under .../JPEG whose name starts with "March", and runs ONE describe
+#     pass per matched subdirectory (mirrors scripts/batch_photo_describe.sh).
+#     Per-subdir runs give separable logs and per-folder failure recovery; the
+#     parent-dir form is one giant log but identical end-state in the DB.
+#
+# Key distinction:
+#   .../JPEG          → real dir (used as-is) → one describe run, all months
+#   .../JPEG/March    → not a dir → prefix expansion → one run per March*
+#   .../JPEG/*        → shell-expanded by bash → one run per subdir of JPEG
+#                       (use this when you want per-subdir logs but every month)
+#
+# If a path is both a real directory AND you wanted prefix-style expansion,
+# the real-directory branch wins. Use a trailing wildcard or list explicit
+# paths to force the per-subdir form.
 #
 # --rebuild re-describes photos already in the DB (-force on cmd/describe),
 # re-classifies (-reclassify on cmd/classify), AND truncates+rebuilds the
