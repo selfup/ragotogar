@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/lib/pq"
 )
 
 // Photo is the typed view used for both BuildDocument (indexing input) and
@@ -39,6 +41,23 @@ type Photo struct {
 	Vantage         string
 	GroundTruth     string
 	FullDescription string
+
+	// Typed enum fields produced by cmd/classify. Empty/nil when the photo
+	// hasn't been classified yet. Arrays are nil rather than [] when absent.
+	POVContainer       string
+	POVAltitude        string
+	POVAngle           string
+	SubjectAltitude    string
+	SubjectCategory    []string
+	SubjectDistance    string
+	SubjectCount       string
+	AnimalCount        string
+	SceneTimeOfDay     string
+	SceneIndoorOutdoor string
+	SceneWeather       string
+	Framing            []string
+	Motion             string
+	ColorPalette       string
 }
 
 // LoadPhoto fetches a photo by name and returns it fully populated. Returns
@@ -46,12 +65,18 @@ type Photo struct {
 func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	var p Photo
 	var (
-		make_, model, lensModel, lensInfo                                       sql.NullString
-		dateTaken, exposureMode, whiteBalance, flash, software, artist          sql.NullString
-		subject, setting, light, colors, composition, vantage, gt, fullDesc     sql.NullString
-		focalMM, focal35, fnum, shutter, ec                                     sql.NullFloat64
-		iso                                                                     sql.NullInt64
-		fileBasename                                                            sql.NullString
+		make_, model, lensModel, lensInfo                                   sql.NullString
+		dateTaken, exposureMode, whiteBalance, flash, software, artist      sql.NullString
+		subject, setting, light, colors, composition, vantage, gt, fullDesc sql.NullString
+		focalMM, focal35, fnum, shutter, ec                                 sql.NullFloat64
+		iso                                                                 sql.NullInt64
+		fileBasename                                                        sql.NullString
+		// classified columns — all nullable (LEFT JOIN may not match)
+		povContainer, povAltitude, povAngle                          sql.NullString
+		subjectAltitude, subjectDistance, subjectCount, animalCount  sql.NullString
+		sceneTimeOfDay, sceneIndoorOutdoor, sceneWeather             sql.NullString
+		motion, colorPalette                                         sql.NullString
+		subjectCategory, framing                                     []string
 	)
 	err := db.QueryRow(`
 		SELECT p.name, p.file_basename,
@@ -60,10 +85,16 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		       e.f_number, e.exposure_time_seconds, e.iso, e.exposure_compensation,
 		       e.exposure_mode, e.white_balance, e.flash, e.software, e.artist,
 		       d.subject, d.setting, d.light, d.colors, d.composition,
-		       d.vantage, d.ground_truth, d.full_description
+		       d.vantage, d.ground_truth, d.full_description,
+		       c.pov_container, c.pov_altitude, c.pov_angle,
+		       c.subject_altitude, c.subject_category, c.subject_distance,
+		       c.subject_count, c.animal_count,
+		       c.scene_time_of_day, c.scene_indoor_outdoor, c.scene_weather,
+		       c.framing, c.motion, c.color_palette
 		FROM photos p
 		LEFT JOIN exif e         ON p.id = e.photo_id
 		LEFT JOIN descriptions d ON p.id = d.photo_id
+		LEFT JOIN classified c   ON p.id = c.photo_id
 		WHERE p.name = $1
 	`, name).Scan(
 		&p.Name, &fileBasename,
@@ -72,6 +103,11 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		&fnum, &shutter, &iso, &ec,
 		&exposureMode, &whiteBalance, &flash, &software, &artist,
 		&subject, &setting, &light, &colors, &composition, &vantage, &gt, &fullDesc,
+		&povContainer, &povAltitude, &povAngle,
+		&subjectAltitude, pq.Array(&subjectCategory), &subjectDistance,
+		&subjectCount, &animalCount,
+		&sceneTimeOfDay, &sceneIndoorOutdoor, &sceneWeather,
+		pq.Array(&framing), &motion, &colorPalette,
 	)
 	if err != nil {
 		return nil, err
@@ -120,6 +156,21 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	p.Vantage = vantage.String
 	p.GroundTruth = gt.String
 	p.FullDescription = fullDesc.String
+
+	p.POVContainer = povContainer.String
+	p.POVAltitude = povAltitude.String
+	p.POVAngle = povAngle.String
+	p.SubjectAltitude = subjectAltitude.String
+	p.SubjectCategory = subjectCategory
+	p.SubjectDistance = subjectDistance.String
+	p.SubjectCount = subjectCount.String
+	p.AnimalCount = animalCount.String
+	p.SceneTimeOfDay = sceneTimeOfDay.String
+	p.SceneIndoorOutdoor = sceneIndoorOutdoor.String
+	p.SceneWeather = sceneWeather.String
+	p.Framing = framing
+	p.Motion = motion.String
+	p.ColorPalette = colorPalette.String
 
 	return &p, nil
 }

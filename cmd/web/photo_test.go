@@ -46,6 +46,17 @@ CREATE TABLE inference (
     photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
     raw_response TEXT, model TEXT, preview_ms INTEGER, inference_ms INTEGER
 );
+CREATE TABLE classified (
+    photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    pov_container TEXT, pov_altitude TEXT, pov_angle TEXT,
+    subject_altitude TEXT, subject_category TEXT[], subject_distance TEXT,
+    subject_count TEXT, animal_count TEXT,
+    scene_time_of_day TEXT, scene_indoor_outdoor TEXT, scene_weather TEXT,
+    framing TEXT[], motion TEXT, color_palette TEXT,
+    classified_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    classifier_model TEXT NOT NULL,
+    extras JSONB
+);
 `
 
 func adminDSN(t *testing.T) string {

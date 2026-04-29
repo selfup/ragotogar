@@ -120,6 +120,41 @@ func BuildDocument(p *Photo) string {
 		w("Ground truth: " + p.GroundTruth)
 	}
 
+	// Typed classification (from cmd/classify) — canonical enum names give
+	// the vector layer a cleaner signal than prose alone. Skipped fields
+	// stay out of the doc so unclassified photos look exactly like before.
+	if pov := joinNonEmpty([]string{p.POVContainer, p.POVAltitude, p.POVAngle}, ", "); pov != "" {
+		w("Camera vantage: " + pov)
+	}
+	if len(p.SubjectCategory) > 0 {
+		w("Subject category: " + strings.Join(p.SubjectCategory, ", "))
+	}
+	if p.SubjectAltitude != "" {
+		w("Subject altitude: " + p.SubjectAltitude)
+	}
+	if p.SubjectDistance != "" {
+		w("Subject distance: " + p.SubjectDistance)
+	}
+	if counts := joinNonEmpty(
+		[]string{prefixed("people=", p.SubjectCount), prefixed("animals=", p.AnimalCount)}, ", ",
+	); counts != "" {
+		w("Counts: " + counts)
+	}
+	if scene := joinNonEmpty(
+		[]string{p.SceneTimeOfDay, p.SceneIndoorOutdoor, p.SceneWeather}, ", ",
+	); scene != "" {
+		w("Scene: " + scene)
+	}
+	if p.Motion != "" {
+		w("Motion: " + p.Motion)
+	}
+	if p.ColorPalette != "" {
+		w("Color palette: " + p.ColorPalette)
+	}
+	if len(p.Framing) > 0 {
+		w("Framing: " + strings.Join(p.Framing, ", "))
+	}
+
 	if p.FullDescription != "" {
 		w("")
 		w(p.FullDescription)
@@ -127,6 +162,28 @@ func BuildDocument(p *Photo) string {
 
 	// Trailing newline trimmed — matches the Python "\n".join behavior.
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// joinNonEmpty filters out empty entries before joining with sep. Used by
+// BuildDocument to render compact lines like "Camera vantage: from_plane,
+// ground" when only some of the components are populated.
+func joinNonEmpty(parts []string, sep string) string {
+	var nonEmpty []string
+	for _, p := range parts {
+		if p != "" {
+			nonEmpty = append(nonEmpty, p)
+		}
+	}
+	return strings.Join(nonEmpty, sep)
+}
+
+// prefixed returns "" if v is empty, "<prefix><v>" otherwise — keeps the
+// counts line above readable.
+func prefixed(prefix, v string) string {
+	if v == "" {
+		return ""
+	}
+	return prefix + v
 }
 
 // shutterFractionSeconds renders shutter speed for the document body using

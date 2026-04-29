@@ -76,6 +76,71 @@ func TestBuildDocumentFullPhoto(t *testing.T) {
 	}
 }
 
+func TestBuildDocumentTypedClassification(t *testing.T) {
+	// Photo classified by cmd/classify — the typed enum fields should
+	// surface as canonical text in the document for vector embedding.
+	p := &Photo{
+		Name:               "typed",
+		FileBasename:       "x.JPG",
+		POVContainer:       "from_plane",
+		POVAltitude:        "ground",
+		POVAngle:           "looking_down",
+		SubjectAltitude:    "on_ground",
+		SubjectCategory:    []string{"architecture", "landscape"},
+		SubjectDistance:    "wide",
+		SubjectCount:       "0",
+		AnimalCount:        "0",
+		SceneTimeOfDay:     "day",
+		SceneIndoorOutdoor: "outdoor",
+		SceneWeather:       "clear",
+		Framing:            []string{"through_window"},
+		Motion:             "static",
+		ColorPalette:       "cool",
+	}
+	doc := BuildDocument(p)
+	for _, want := range []string{
+		"Camera vantage: from_plane, ground, looking_down",
+		"Subject category: architecture, landscape",
+		"Subject altitude: on_ground",
+		"Subject distance: wide",
+		"Counts: people=0, animals=0",
+		"Scene: day, outdoor, clear",
+		"Motion: static",
+		"Color palette: cool",
+		"Framing: through_window",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("BuildDocument missing %q\n--- doc ---\n%s\n", want, doc)
+		}
+	}
+}
+
+func TestBuildDocumentTypedClassificationPartial(t *testing.T) {
+	// Only some fields populated — the others should not produce empty
+	// or mis-rendered lines.
+	p := &Photo{
+		Name:         "partial",
+		FileBasename: "x.JPG",
+		POVContainer: "handheld",
+		// POVAltitude + POVAngle unset → "Camera vantage: handheld" only
+		Motion: "static",
+	}
+	doc := BuildDocument(p)
+	if !strings.Contains(doc, "Camera vantage: handheld\n") {
+		t.Errorf("missing camera vantage with single value: %q", doc)
+	}
+	if strings.Contains(doc, "Camera vantage: handheld,") {
+		t.Errorf("trailing comma in vantage: %q", doc)
+	}
+	if !strings.Contains(doc, "Motion: static") {
+		t.Errorf("missing motion: %q", doc)
+	}
+	// no Counts line should appear when both counts are absent
+	if strings.Contains(doc, "Counts:") {
+		t.Errorf("Counts line should be omitted when both empty: %q", doc)
+	}
+}
+
 func TestBuildDocumentMinimal(t *testing.T) {
 	p := &Photo{
 		Name:         "min",
