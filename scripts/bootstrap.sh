@@ -58,11 +58,19 @@ psql -d "$DB_NAME" -c 'CREATE EXTENSION IF NOT EXISTS vector' >/dev/null
 EXT_VER=$(psql -d "$DB_NAME" -tAc "SELECT extversion FROM pg_extension WHERE extname='vector'")
 echo "  pgvector $EXT_VER loaded into $DB_NAME"
 
-echo "==> library schema (cmd/describe -init-only)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+echo "==> go mod tidy (root + sub-modules)"
+(cd "$REPO_ROOT"             && go mod tidy)
+(cd "$REPO_ROOT/cmd/describe" && go mod tidy)
+(cd "$REPO_ROOT/cmd/organize" && go mod tidy)
+
+echo "==> library schema (cmd/describe -init-only)"
 LIBRARY_DSN="postgres:///$DB_NAME" \
-    bash -c "cd '$SCRIPT_DIR/../cmd/describe' && go run . -init-only"
+    bash -c "cd '$REPO_ROOT/cmd/describe' && go run . -init-only"
 
 echo
 echo "Library DSN: postgres:///$DB_NAME"
-echo "Next:        ./scripts/dir_photos.sh /path/to/photos"
+echo "Next:        PHOTO_DIR=/path/to/photos ./full_run.sh"
+echo "             (runs describe → classify → index → web)"

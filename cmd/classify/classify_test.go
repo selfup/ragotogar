@@ -107,6 +107,63 @@ func TestParseResponse(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "scalar emitted as number — coerce",
+			raw:  `{"animal_count": 0, "subject_count": 2}`,
+			check: func(t *testing.T, c Classification) {
+				if c.AnimalCount == nil || *c.AnimalCount != "0" {
+					t.Errorf("animal_count: got %v, want '0'", c.AnimalCount)
+				}
+				if c.SubjectCount == nil || *c.SubjectCount != "2" {
+					t.Errorf("subject_count: got %v, want '2'", c.SubjectCount)
+				}
+			},
+		},
+		{
+			name: "scalar emitted as single-element array — take first",
+			raw:  `{"color_palette": ["cool"], "motion": ["static"]}`,
+			check: func(t *testing.T, c Classification) {
+				if c.ColorPalette == nil || *c.ColorPalette != "cool" {
+					t.Errorf("color_palette: got %v, want 'cool'", c.ColorPalette)
+				}
+				if c.Motion == nil || *c.Motion != "static" {
+					t.Errorf("motion: got %v, want 'static'", c.Motion)
+				}
+			},
+		},
+		{
+			name: "array field emitted as bare string — wrap",
+			raw:  `{"subject_category": "person", "framing": "through_window"}`,
+			check: func(t *testing.T, c Classification) {
+				if !reflect.DeepEqual(c.SubjectCategory, []string{"person"}) {
+					t.Errorf("subject_category: got %v", c.SubjectCategory)
+				}
+				if !reflect.DeepEqual(c.Framing, []string{"through_window"}) {
+					t.Errorf("framing: got %v", c.Framing)
+				}
+			},
+		},
+		{
+			name: "explicit null fields stay nil",
+			raw:  `{"motion": null, "subject_category": null}`,
+			check: func(t *testing.T, c Classification) {
+				if c.Motion != nil {
+					t.Errorf("motion: got %v, want nil", c.Motion)
+				}
+				if c.SubjectCategory != nil {
+					t.Errorf("subject_category: got %v, want nil", c.SubjectCategory)
+				}
+			},
+		},
+		{
+			name: "empty array yields nil",
+			raw:  `{"subject_category": []}`,
+			check: func(t *testing.T, c Classification) {
+				if c.SubjectCategory != nil {
+					t.Errorf("empty array should yield nil, got %v", c.SubjectCategory)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {

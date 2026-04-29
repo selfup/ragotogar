@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -85,20 +86,92 @@ Respond with a single JSON object — keys are the field names above, values are
 	return b.String()
 }
 
-// ParseResponse extracts the JSON object from a raw LLM response. Tolerates
-// leading/trailing prose and ```json``` code fences by slicing from the first
-// '{' to the matching last '}'. Returns an error if the slice doesn't decode
-// as valid JSON.
+// ParseResponse extracts the JSON object from a raw LLM response and decodes
+// it leniently. Tolerates: leading/trailing prose, ```json``` code fences,
+// scalar fields returned as numbers (animal_count: 0), and scalar fields
+// returned as single-element arrays (color_palette: ["cool"]). The 3B
+// classifier model emits these shapes a few percent of the time on long
+// schemas — too noisy to drop the row, too easy to coerce here.
 func ParseResponse(raw string) (Classification, error) {
 	body := extractJSONObject(raw)
 	if body == "" {
 		return Classification{}, fmt.Errorf("no JSON object found in response: %s", truncate(raw, 200))
 	}
-	var c Classification
-	if err := json.Unmarshal([]byte(body), &c); err != nil {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
 		return Classification{}, fmt.Errorf("decode classification JSON: %w (body: %s)", err, truncate(body, 200))
 	}
-	return c, nil
+	return Classification{
+		POVContainer:       coerceString(m["pov_container"]),
+		POVAltitude:        coerceString(m["pov_altitude"]),
+		POVAngle:           coerceString(m["pov_angle"]),
+		SubjectAltitude:    coerceString(m["subject_altitude"]),
+		SubjectCategory:    coerceStringSlice(m["subject_category"]),
+		SubjectDistance:    coerceString(m["subject_distance"]),
+		SubjectCount:       coerceString(m["subject_count"]),
+		AnimalCount:        coerceString(m["animal_count"]),
+		SceneTimeOfDay:     coerceString(m["scene_time_of_day"]),
+		SceneIndoorOutdoor: coerceString(m["scene_indoor_outdoor"]),
+		SceneWeather:       coerceString(m["scene_weather"]),
+		Framing:            coerceStringSlice(m["framing"]),
+		Motion:             coerceString(m["motion"]),
+		ColorPalette:       coerceString(m["color_palette"]),
+	}, nil
+}
+
+// coerceString accepts a JSON value (string, number, bool, single-element
+// array, or null) and returns a *string. Non-coercible types yield nil.
+// Used so a model-emitted "animal_count": 0 or "color_palette": ["cool"]
+// don't sink the whole row.
+func coerceString(v any) *string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case string:
+		s := t
+		return &s
+	case float64:
+		// JSON numbers decode to float64. Render integers without trailing
+		// ".0" so "0" stays "0" not "0.0" — matters for the count enums.
+		s := strconv.FormatFloat(t, 'f', -1, 64)
+		return &s
+	case bool:
+		s := strconv.FormatBool(t)
+		return &s
+	case []any:
+		if len(t) == 0 {
+			return nil
+		}
+		// take first element — same coercion recursively
+		return coerceString(t[0])
+	}
+	return nil
+}
+
+// coerceStringSlice accepts a JSON value and returns []string. Tolerates a
+// bare string (wrap in 1-element slice), an array of strings (use as-is),
+// or an array of mixed types (skip non-strings).
+func coerceStringSlice(v any) []string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case string:
+		if t == "" {
+			return nil
+		}
+		return []string{t}
+	case []any:
+		var out []string
+		for _, item := range t {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // extractJSONObject finds the substring from the first '{' to the matching
