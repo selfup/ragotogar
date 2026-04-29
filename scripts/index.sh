@@ -6,7 +6,7 @@
 #   ./scripts/index.sh -reindex                  # TRUNCATE chunks, re-embed all
 #   ./scripts/index.sh -dsn postgres:///other    # different library
 #
-# Env: LIBRARY_DSN, LM_STUDIO_BASE, EMBED_MODEL
+# Env: LIBRARY_DSN, EMBED_ENDPOINT (or legacy LM_STUDIO_BASE), EMBED_MODEL
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

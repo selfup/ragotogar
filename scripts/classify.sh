@@ -7,7 +7,7 @@
 #   ./scripts/classify.sh -workers 4             # tune parallelism (default 8)
 #   ./scripts/classify.sh -dsn postgres:///alt   # different library
 #
-# Env: LIBRARY_DSN, LM_STUDIO_BASE, CLASSIFY_MODEL
+# Env: LIBRARY_DSN, TEXT_ENDPOINT (or legacy LM_STUDIO_BASE), CLASSIFY_MODEL
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

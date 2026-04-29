@@ -76,7 +76,7 @@ func run(dsn string, reclassify bool, workers int) error {
 
 	model := library.ClassifyModel()
 	fmt.Printf("Classifying %d photo(s) in %s\n", len(todo), dsn)
-	fmt.Printf("Model: %s @ %s\n", model, library.LMStudioBase())
+	fmt.Printf("Model: %s @ %s\n", model, library.TextEndpoint())
 	fmt.Printf("Workers: %d\n\n", workers)
 
 	if workers < 1 {

@@ -139,8 +139,11 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LIBRARY_DSN` | `postgres:///ragotogar` | Postgres connection string (shared by all components) |
-| `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
+| `VISION_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the vision model. Set to a cloud provider when you outgrow local LM Studio. |
+| `LM_STUDIO_BASE` | `http://localhost:1234` | Legacy single-endpoint fallback used when none of `VISION_ENDPOINT` / `TEXT_ENDPOINT` / `EMBED_ENDPOINT` is set |
 | `LM_MODEL` | `qwen/qwen3-vl-8b` | Vision model name (see `STRATEGIES.md` for model comparison) |
+| `CLASSIFY_MODEL` | `mistralai/ministral-3-3b` | Text model for the inline `-classify` flag (only used when `-classify` is passed) |
+| `TEXT_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the classifier text model when `-classify` is on |
 | `RESIZE_PX` | `1024` | Longest edge resize for preview (also the thumbnail BLOB size) |
 | `JPEG_QUALITY` | `85` | JPEG quality for resized preview |
 
@@ -270,7 +273,9 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./scripts/search.sh -retrieve -ve
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LIBRARY_DSN` | `postgres:///ragotogar` | Postgres connection string |
-| `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
+| `TEXT_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the verify-pass text model |
+| `EMBED_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the embedding model |
+| `LM_STUDIO_BASE` | `http://localhost:1234` | Legacy single-endpoint fallback when neither of the above is set |
 | `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for the verify pass |
 | `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | 768-dim embedding model — changing it requires re-indexing |
 

@@ -101,7 +101,7 @@ func run(dsn string, reindex bool) error {
 	skipped := len(allNames) - len(todo)
 
 	fmt.Printf("Found %d photo(s) in %s (skipping %d already indexed)\n", len(allNames), dsn, skipped)
-	fmt.Printf("Embed: %s @ %s\n\n", library.EmbedModel(), library.LMStudioBase())
+	fmt.Printf("Embed: %s @ %s\n\n", library.EmbedModel(), library.EmbedEndpoint())
 
 	totalChunks := 0
 	for i, name := range todo {

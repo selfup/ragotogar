@@ -20,7 +20,9 @@ set -euo pipefail
 #
 # Flags: -dsn DSN, -force, -model NAME, -dry-run, -retries N,
 #        -preview-workers N, -inference-workers N
-# Env:   LIBRARY_DSN, LM_STUDIO_BASE, LM_MODEL, RESIZE_PX, JPEG_QUALITY
+# Env:   LIBRARY_DSN, VISION_ENDPOINT (or legacy LM_STUDIO_BASE), LM_MODEL,
+#        CLASSIFY_MODEL (when -classify), TEXT_ENDPOINT (when -classify),
+#        RESIZE_PX, JPEG_QUALITY
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DESCRIBE_DIR="$SCRIPT_DIR/../cmd/describe"

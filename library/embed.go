@@ -1,14 +1,10 @@
 package library
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"time"
 )
 
 // EmbedDim is the embedding dimension produced by nomic-embed-text-v1.5
@@ -17,6 +13,11 @@ import (
 const EmbedDim = 768
 
 // LMStudioBase reads LM_STUDIO_BASE with the canonical localhost default.
+//
+// Deprecated: prefer VisionEndpoint / TextEndpoint / EmbedEndpoint, which
+// fall back to LM_STUDIO_BASE but allow per-stage overrides for cloud
+// deployments where each model lives behind a different URL. Kept for
+// display strings in cmd/index, cmd/classify that print the active host.
 func LMStudioBase() string {
 	if v := os.Getenv("LM_STUDIO_BASE"); v != "" {
 		return v
@@ -66,9 +67,13 @@ type embedResponse struct {
 	} `json:"error"`
 }
 
-// EmbedTexts batches an OpenAI-shaped embedding request to LM Studio.
-// Returns one float32 slice per input, each of length EmbedDim. Empty
-// input yields an empty slice without hitting the network.
+// EmbedTexts batches an OpenAI-shaped embedding request to the configured
+// embed endpoint (EMBED_ENDPOINT → LM_STUDIO_BASE → localhost). Returns one
+// float32 slice per input, each of length EmbedDim. Empty input yields an
+// empty slice without hitting the network.
+//
+// Retries up to 5 times with exponential backoff on network errors, 429,
+// and 5xx — same policy as LLMComplete via the shared postJSONWithRetry.
 func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -77,27 +82,14 @@ func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		LMStudioBase()+"/v1/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer lm-studio")
 
-	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := client.Do(req)
+	raw, err := postJSONWithRetry(ctx,
+		EmbedEndpoint()+"/v1/embeddings",
+		body,
+		map[string]string{"Authorization": "Bearer lm-studio"},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("embed request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read embed response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embed HTTP %d: %s", resp.StatusCode, truncate(string(raw), 200))
 	}
 
 	var out embedResponse
@@ -105,7 +97,7 @@ func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 		return nil, fmt.Errorf("decode embed response: %w", err)
 	}
 	if out.Error != nil {
-		return nil, fmt.Errorf("LM Studio embed: %s", out.Error.Message)
+		return nil, fmt.Errorf("embed API error: %s", out.Error.Message)
 	}
 	if len(out.Data) != len(texts) {
 		return nil, fmt.Errorf("embed returned %d vectors for %d inputs", len(out.Data), len(texts))

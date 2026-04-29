@@ -7,7 +7,8 @@
 #   ./scripts/search.sh -retrieve -verify "April photos with trees"
 #   ./scripts/search.sh -dsn postgres:///other "indoor scenes"
 #
-# Env: LIBRARY_DSN, LM_STUDIO_BASE, SEARCH_MODEL, EMBED_MODEL
+# Env: LIBRARY_DSN, TEXT_ENDPOINT + EMBED_ENDPOINT (or legacy LM_STUDIO_BASE),
+#      SEARCH_MODEL, EMBED_MODEL
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

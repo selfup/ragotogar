@@ -91,7 +91,7 @@ type chatResponse struct {
 
 func main() {
 	cfg := config{
-		lmBase:           envOr("LM_STUDIO_BASE", "http://localhost:1234"),
+		lmBase:           library.VisionEndpoint(), // VISION_ENDPOINT > LM_STUDIO_BASE > localhost
 		model:            envOr("LM_MODEL", "qwen/qwen3-vl-8b"),
 		resizePx:         envOrInt("RESIZE_PX", 1024),
 		jpegQuality:      envOrInt("JPEG_QUALITY", 85),
