@@ -67,6 +67,11 @@ const indexHTML = `<!doctype html>
       text-align: right;
     }
     .status { color: var(--mute); font-size: 0.875rem; margin: 1rem 0; }
+    .status .latency {
+      margin-left: 0.5rem; opacity: 0.7;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+    }
     .grid {
       display: grid; gap: 1rem;
       grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -132,8 +137,11 @@ const indexHTML = `<!doctype html>
   {{if .Q}}
     <div class="status">
       {{if .Results}}{{len .Results}} match{{if ne (len .Results) 1}}es{{end}} for "{{.Q}}"
-      {{else}}no matches for "{{.Q}}" — try different words or broader concepts
+      {{else}}no matches for "{{.Q}}"
       {{end}}
+      {{if .Total}}<span class="latency">(out of {{.Total}} image{{if ne .Total 1}}s{{end}})</span>{{end}}
+      {{if .Latency}}<span class="latency">({{.Latency}})</span>{{end}}
+      {{if not .Results}} — try different words or broader concepts{{end}}
     </div>
   {{end}}
 

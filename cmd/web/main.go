@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -26,7 +27,27 @@ type pageData struct {
 	Mode             string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify"
 	CosineThreshold  string // formatted for the slider's value attribute
 	FTSThresholdRel  string
+	Latency          string // formatted "234 ms" / "1.2 s"; empty when no search ran
+	Total            int    // total photos in library; 0 = don't show
 	Results          []result
+}
+
+// countPhotos returns the total photo count for the status-line denominator.
+// Errors are swallowed — the count is purely informational and a missing
+// total just hides the "(out of N images)" suffix.
+func countPhotos(db *sql.DB) int {
+	var n int
+	_ = db.QueryRow("SELECT COUNT(*) FROM photos").Scan(&n)
+	return n
+}
+
+// formatLatency renders a search duration for the status line. Sub-second
+// gets ms (more readable than "0.234s"); ≥ 1s gets one decimal.
+func formatLatency(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%d ms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.1f s", d.Seconds())
 }
 
 // Q is the trimmed query string. Wrapping it as a named type (vs. plain
@@ -123,8 +144,13 @@ func main() {
 		ftsRel := parseThreshold(r.URL.Query().Get("fts"), library.FTSRelativeThreshold)
 
 		var results []result
+		var latency string
+		var total int
 		if q != "" {
-			results = search(db, q, mode, cosine, ftsRel)
+			r, d := search(db, q, mode, cosine, ftsRel)
+			results = r
+			latency = formatLatency(d)
+			total = countPhotos(db)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := indexTmpl.Execute(w, pageData{
@@ -132,6 +158,8 @@ func main() {
 			Mode:             mode,
 			CosineThreshold:  fmt.Sprintf("%.2f", cosine),
 			FTSThresholdRel:  fmt.Sprintf("%.2f", ftsRel),
+			Latency:          latency,
+			Total:            total,
 			Results:          results,
 		}); err != nil {
 			log.Printf("template: %v", err)

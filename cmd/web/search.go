@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"ragotogar/internal/library"
 )
@@ -24,7 +25,8 @@ import (
 // ?cosine= and ?fts=). Both default to library.CosineThreshold /
 // library.FTSRelativeThreshold when the caller passes the package
 // defaults.
-func search(db *sql.DB, query, mode string, cosine, ftsRel float64) []result {
+func search(db *sql.DB, query, mode string, cosine, ftsRel float64) ([]result, time.Duration) {
+	start := time.Now()
 	ctx := context.Background()
 	searcher := library.NewSearcher(db)
 
@@ -49,7 +51,7 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) []result {
 	}
 	if err != nil {
 		log.Printf("search %q (mode=%s): %v", query, mode, err)
-		return nil
+		return nil, time.Since(start)
 	}
 
 	verify := mode == "naive-verify" || mode == "fts-vector-verify"
@@ -60,7 +62,7 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) []result {
 		verdicts, err := searcher.VerifyFilter(ctx, query, candidates)
 		if err != nil {
 			log.Printf("verify %q: %v", query, err)
-			return nil
+			return nil, time.Since(start)
 		}
 		library.LogVerdicts(os.Stderr, verdicts)
 		names = library.KeptNames(verdicts)
@@ -75,5 +77,5 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) []result {
 	for _, name := range names {
 		results = append(results, result{Name: name})
 	}
-	return results
+	return results, time.Since(start)
 }
