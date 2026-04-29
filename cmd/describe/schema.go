@@ -19,6 +19,11 @@ package main
 // v4 adds descriptions.vantage and descriptions.ground_truth — prose fields
 // describing the camera POV and visible counts. Both feed the generated fts
 // column so keyword search hits "from a balcony" / "two people" queries.
+//
+// v5 adds the classified table — typed enum fields produced by cmd/classify
+// from the description prose. Lets queries like "from a plane on the ground"
+// become exact predicates (pov_container='from_plane' AND pov_altitude='ground')
+// instead of fuzzy text matches.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -111,6 +116,47 @@ CREATE TABLE IF NOT EXISTS inference (
     inference_ms INTEGER,
     described_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- v5: typed enum fields produced from description prose by cmd/classify.
+-- Scalar columns get btree indexes for cheap WHERE filters; array columns
+-- (subject_category, framing) get GIN for "contains" queries. classifier_model
+-- records which LLM produced the row so re-classifying with a stronger model
+-- is identifiable. extras JSONB is the forward-compat escape hatch for new
+-- enums that haven't been promoted to columns yet.
+CREATE TABLE IF NOT EXISTS classified (
+    photo_id              TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    pov_container         TEXT,
+    pov_altitude          TEXT,
+    pov_angle             TEXT,
+    subject_altitude      TEXT,
+    subject_category      TEXT[],
+    subject_distance      TEXT,
+    subject_count         TEXT,
+    animal_count          TEXT,
+    scene_time_of_day     TEXT,
+    scene_indoor_outdoor  TEXT,
+    scene_weather         TEXT,
+    framing               TEXT[],
+    motion                TEXT,
+    color_palette         TEXT,
+    classified_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    classifier_model      TEXT NOT NULL,
+    extras                JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_classified_pov_container  ON classified(pov_container);
+CREATE INDEX IF NOT EXISTS idx_classified_pov_altitude   ON classified(pov_altitude);
+CREATE INDEX IF NOT EXISTS idx_classified_pov_angle      ON classified(pov_angle);
+CREATE INDEX IF NOT EXISTS idx_classified_subject_alt    ON classified(subject_altitude);
+CREATE INDEX IF NOT EXISTS idx_classified_subject_dist   ON classified(subject_distance);
+CREATE INDEX IF NOT EXISTS idx_classified_subject_count  ON classified(subject_count);
+CREATE INDEX IF NOT EXISTS idx_classified_animal_count   ON classified(animal_count);
+CREATE INDEX IF NOT EXISTS idx_classified_time_of_day    ON classified(scene_time_of_day);
+CREATE INDEX IF NOT EXISTS idx_classified_indoor         ON classified(scene_indoor_outdoor);
+CREATE INDEX IF NOT EXISTS idx_classified_weather        ON classified(scene_weather);
+CREATE INDEX IF NOT EXISTS idx_classified_motion         ON classified(motion);
+CREATE INDEX IF NOT EXISTS idx_classified_palette        ON classified(color_palette);
+CREATE INDEX IF NOT EXISTS idx_classified_subject_cat    ON classified USING gin(subject_category);
+CREATE INDEX IF NOT EXISTS idx_classified_framing        ON classified USING gin(framing);
 
 -- Vector chunks table: one row per chunk per photo. nomic-embed-text-v1.5
 -- output dim is 768. HNSW index for similarity (vector_cosine_ops matches

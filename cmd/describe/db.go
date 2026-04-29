@@ -9,7 +9,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const schemaVersion = 4 // v4: descriptions gains vantage + ground_truth (rich POV/count fields)
+const schemaVersion = 5 // v5: classified table — typed enum fields from cmd/classify
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.

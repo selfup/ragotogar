@@ -41,6 +41,17 @@ func SearchModel() string {
 	return "mistralai/ministral-3-3b"
 }
 
+// ClassifyModel reads CLASSIFY_MODEL with the ministral default — used by
+// cmd/classify to map description prose into typed enum fields. Sharing the
+// 3B with the verify pass means LM Studio keeps a single text model loaded
+// alongside the vision describer.
+func ClassifyModel() string {
+	if v := os.Getenv("CLASSIFY_MODEL"); v != "" {
+		return v
+	}
+	return "mistralai/ministral-3-3b"
+}
+
 type embedRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
