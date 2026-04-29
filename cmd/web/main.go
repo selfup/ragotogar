@@ -62,8 +62,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid -repo: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(absRepo, "tools", "search.sh")); err != nil {
-		log.Fatalf("search.sh not found under %s/tools: %v", absRepo, err)
+	if _, err := os.Stat(filepath.Join(absRepo, "scripts", "search.sh")); err != nil {
+		log.Fatalf("search.sh not found under %s/scripts: %v", absRepo, err)
 	}
 
 	db, err := sql.Open("pgx", *dsn)

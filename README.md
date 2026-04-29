@@ -14,8 +14,7 @@ A collection of utility shell scripts and Go programs to: organize, normalize, d
 - **[ImageMagick](https://imagemagick.org/)** — image resizing for LLM previews (`brew install imagemagick`)
 - **[rclone](https://rclone.org/)** — NAS sync (`brew install rclone`)
 - **Postgres 18 + pgvector** — `./scripts/bootstrap.sh` installs both via Homebrew, starts the cluster, creates the library DB, and loads the vector extension. Re-run any time; idempotent.
-- **Go 1.26+** — all pipeline tools are pure Go (`go run`, no build step)
-- **Python 3.10+** + **[uv](https://docs.astral.sh/uv/)** — for the indexer and search (`brew install uv`)
+- **Go 1.26+** — entire pipeline is pure Go (`go run`, no build step). No Python.
 
 ## Quick start
 
@@ -35,8 +34,8 @@ Each step feeds the next:
 |------|------|--------|
 | 1. **Organize** | Sort media into type folders (JPEG, RAW, MOV...) and date subfolders | `scripts/organize.sh` |
 | 2. **Describe** | Send each photo to a vision LLM, write photo + EXIF + parsed fields + 1024px thumbnail BLOB into Postgres | `scripts/photo_describe.sh` |
-| 3. **Index** | Read each photo from Postgres, chunk + embed via LM Studio, INSERT into the `chunks` table (pgvector) | `tools/index_and_vectorize.sh` |
-| 4. **Search** | pgvector cosine similarity (`ORDER BY embedding <=> $1`); optional LLM verify pass | `tools/search.sh` |
+| 3. **Index** | Read each photo from Postgres, chunk + embed via LM Studio, INSERT into the `chunks` table (pgvector) | `scripts/index.sh` |
+| 4. **Search** | pgvector cosine similarity (`ORDER BY embedding <=> $1`); optional LLM verify pass | `scripts/search.sh` |
 | 5. **Browse** | Web server — search box + thumbnail grid; per-photo pages render on-demand from SQL | `scripts/web.sh` |
 
 Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. The typical full flow is 1 → 2 → 3 → 4 → 5.
@@ -48,8 +47,8 @@ Steps are independent — you can run search without ever organizing, or describ
 | Go Media Organizer | `cmd/organize` | Parallel file organizer: sorts media into type/date folders, reunites sidecars. macOS-only. |
 | Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata + thumbnail JPG → Postgres |
 | NAS Sync | `scripts/clone.sh` | rclone-based sync with month/year filtering and `--no-videos` |
-| Vector Indexer | `tools/index_and_vectorize.py` | Chunks + embeds each photo's description, INSERTs into pgvector chunks table |
-| Vector Search | `tools/search.py` | pgvector cosine similarity over chunks; optional LLM verify pass |
+| Vector Indexer | `cmd/index` | Chunks + embeds each photo's description, INSERTs into pgvector chunks table |
+| Vector Search | `cmd/search` | pgvector cosine similarity over chunks; optional LLM verify pass |
 | Web Server | `cmd/web` | Search UI + per-photo HTML pages rendered on-demand from SQL; thumbnail BLOBs streamed from SQL |
 | Cashier (markdown) | `cmd/cashier` | General-purpose markdown → HTML renderer with the cashier design system. Not in the photo pipeline; kept for ad-hoc use. |
 
@@ -156,10 +155,10 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 | `descriptions` | Parsed `subject / setting / light / colors / composition`, `full_description` (the raw LLM output), and a generated `fts tsvector` column (English stemmer) for keyword recall |
 | `thumbnails` | 1024px JPG bytes as a `BYTEA` BLOB. Generated from the same magick output sent to the vision model — no second resize. |
 | `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
-| `chunks` | One row per chunk per photo. `text TEXT` + `embedding vector(768)` (nomic-embed-text-v1.5). HNSW index on `embedding vector_cosine_ops`. Owned by the indexer (`tools/index_and_vectorize`). |
+| `chunks` | One row per chunk per photo. `text TEXT` + `embedding vector(768)` (nomic-embed-text-v1.5). HNSW index on `embedding vector_cosine_ops`. Owned by the indexer (`cmd/index`). |
 | `schema_version` | Single-row marker for migrations |
 
-`cmd/describe` itself never touches `chunks` — that's the indexer's table. Re-describing a photo overwrites its photos / exif / descriptions / inference / thumbnails rows but leaves chunks alone; re-running `./tools/index_and_vectorize.sh` regenerates chunks from the fresh description.
+`cmd/describe` itself never touches `chunks` — that's the indexer's table. Re-describing a photo overwrites its photos / exif / descriptions / inference / thumbnails rows but leaves chunks alone; re-running `./scripts/index.sh` regenerates chunks from the fresh description.
 
 **Key details:**
 
@@ -195,43 +194,37 @@ The cashier source tree stays in place for ad-hoc markdown rendering — essays,
 
 The photo `.jpg` sidecar `cmd/cashier` produces is no longer used by `cmd/web` — thumbnails come out of the `thumbnails` BLOB in Postgres.
 
-## Photo Search — pgvector (`tools/`)
+## Photo Search — pgvector (`cmd/index`, `cmd/search`)
 
 Indexes photo descriptions from the Postgres library into the `chunks` table (pgvector vector(768) + HNSW index). Search is a single SQL query: `ORDER BY embedding <=> $1 LIMIT k`. Uses LM Studio for embeddings and (optionally) for the LLM verify pass.
 
-Split into three modules with separate concerns:
+Two Go binaries plus a shared `internal/library` package:
 
-- **`rag_common.py`** — Postgres connection (`connect_library` returns an asyncpg conn with `register_vector`), photo dict helper, document builder, simple character-window chunker, embedding client
-- **`index_and_vectorize.py`** — reads photos from SQL, chunks each `build_document()` output, embeds via LM Studio, INSERTs into the `chunks` table. Idempotent: skips photos that already have chunks unless `--reindex` is passed.
-- **`search.py`** — query-only; embeds the query, runs `SELECT ... ORDER BY embedding <=> $1 LIMIT k`, optionally pipes candidates through an LLM verify pass
+- **`internal/library`** — `Photo` struct + `LoadPhoto` (pgx), `BuildDocument` (the indexable text — same Go function used by both indexer and verifier), `Chunk` (character-window splitter), `EmbedTexts` and `LLMComplete` (LM Studio HTTP)
+- **`cmd/index`** — reads photos from SQL, chunks each `BuildDocument` output, embeds via LM Studio, INSERTs into `chunks`. Idempotent: skips photos that already have chunks unless `-reindex` is passed.
+- **`cmd/search`** — embeds the query, runs the cosine SELECT, optionally pipes candidates through the LLM verify pass (8-way goroutine pool)
 
 **How it works:**
 
-1. `index_and_vectorize.py` iterates `SELECT name FROM photos`, calls `build_document()` per row, splits the result into ~6KB chunks, embeds each chunk via LM Studio, INSERTs `(photo_id, idx, text, embedding)` rows
-2. Search embeds the query string the same way, then aggregates per-photo via `SELECT name, MAX(1 - (embedding <=> $1)) AS similarity FROM chunks JOIN photos ... GROUP BY name ORDER BY similarity DESC LIMIT k`
-3. Optional `--verify` runs the LLM yes/no relevance check on each candidate's `build_document()` text — same text the indexer embedded, so retrieval and verification stay coherent
-
-**Setup:**
-
-```bash
-./tools/setup.sh              # uv sync — installs dependencies
-```
+1. `cmd/index` iterates `SELECT name FROM photos`, calls `BuildDocument` per row, splits the result into ~6KB chunks, embeds each chunk via LM Studio, INSERTs `(photo_id, idx, text, embedding)` rows
+2. Search embeds the query the same way, then aggregates per-photo via `SELECT name, MAX(1 - (embedding <=> $1)) AS similarity FROM chunks JOIN photos ... GROUP BY name ORDER BY similarity DESC LIMIT k`
+3. Optional `-verify` runs an LLM yes/no relevance check on each candidate's `BuildDocument` text — same text the indexer embedded, so retrieval and verification stay coherent
 
 **Prerequisites — models loaded in LM Studio:**
 
-Default setup uses Qwen3-VL 8B for vision description and Ministral 3B for indexing and search, plus the embedding model. See [`STRATEGIES.md`](STRATEGIES.md) for the model comparison and sizing rationale.
+Default setup uses Qwen3-VL 8B for vision description plus the embedding model. The verify pass uses Ministral 3B by default — bump to a stronger model via `SEARCH_MODEL` for finer-grained subject judgment.
 
 ```bash
-# Vision description model (best accuracy, 6.6s/photo)
+# Vision description model
 lms load qwen/qwen3-vl-8b
-
-# Indexing and search LLM (fast, GGUF with parallel batching)
-lms load mistralai/ministral-3-3b --context-length 65536 --parallel 8
 
 # Embedding model for vector search (768-dim)
 lms load text-embedding-nomic-embed-text-v1.5
 
-# Optional: 24B model for the LLM verify pass (--verify with -retrieve)
+# Default verify model (small + fast)
+lms load mistralai/ministral-3-3b --context-length 32000 --parallel 8
+
+# Optional: 24B for higher-precision verify
 lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 ```
 
@@ -239,38 +232,38 @@ lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 
 ```bash
 # Index every photo currently in the library
-./tools/index_and_vectorize.sh
+./scripts/index.sh
 
 # Re-index (TRUNCATE chunks then re-embed all photos)
-./tools/index_and_vectorize.sh --reindex
+./scripts/index.sh -reindex
 
 # Override library DSN
-./tools/index_and_vectorize.sh --dsn postgres:///other_db
+./scripts/index.sh -dsn postgres:///other_db
 
 # Query — pure vector similarity, top 30 by default
-./tools/search.sh "bedroom photos with warm light"
+./scripts/search.sh "bedroom photos with warm light"
 
-# Retrieval only — same vector query, more results, no LLM synthesis
-./tools/search.sh --retrieve "shallow depth of field"
+# Retrieval only — top-500, cosine ≥ 0.5, no LLM synthesis
+./scripts/search.sh -retrieve "shallow depth of field"
 
-# Strict retrieval — cosine ≥ 0.5
-./tools/search.sh --precise "indoor scenes with warm light"
+# Strict retrieval — alias for -retrieve
+./scripts/search.sh -precise "indoor scenes with warm light"
 
 # Verify: vector retrieval + LLM yes/no check per candidate, keep only YES
-./tools/search.sh --retrieve --verify "April photos with trees"
+./scripts/search.sh -retrieve -verify "April photos with trees"
 
 # Use a different model for the verify pass
-SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --retrieve --verify "..."
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./scripts/search.sh -retrieve -verify "..."
 ```
 
-**Output flags** (mutually exclusive):
+**Output flags:**
 
 | Flag | Description |
 |------|-------------|
 | *(default)* | Top-30 vector retrieval, no LLM |
-| `--retrieve` | Top-500 vector retrieval, no LLM (used by cmd/web; output parses cleanly via the `[N] name` regex) |
-| `--precise` | Top-500 retrieval filtered to cosine ≥ 0.5 |
-| `--verify` | Composes with `--retrieve`/`--precise`: runs an LLM yes/no relevance check on each candidate's `build_document()` text, keeps only YES matches |
+| `-retrieve` | Top-500 vector retrieval, cosine ≥ 0.5, no LLM (used by cmd/web; output parses cleanly via the `[N] name` regex) |
+| `-precise` | Same as `-retrieve` (kept for parity with the old Python tool's `--precise`) |
+| `-verify` | Composes with `-retrieve`/`-precise`: runs an LLM yes/no relevance check on each candidate's `BuildDocument` text in an 8-way goroutine pool, keeps only YES matches |
 
 **Environment variables:**
 
@@ -286,10 +279,10 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --retrieve --ve
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — vector captures "X100VI", "f/2", "ISO 3200" alongside visual phrases like "bedroom" and "paisley duvet"
 - Chunking is a simple character-window splitter (~6KB per chunk with 400-byte overlap). Most photo descriptions fit in a single chunk; only long-form descriptions spill over.
 - HNSW index on `embedding vector_cosine_ops` — cosine is the metric, `<=>` is the distance operator
-- Re-indexing is incremental by default (skips photos that already have any chunks); use `--reindex` to TRUNCATE and rebuild
+- Re-indexing is incremental by default (skips photos that already have any chunks); use `-reindex` to TRUNCATE and rebuild
 - Per-photo similarity = `MAX(1 - (embedding <=> $1))` over the photo's chunks (best chunk wins) so the same photo doesn't appear multiple times in results
 - Embedding model must be `nomic-embed-text-v1.5` (768-dim); changing it requires re-indexing
-- **Requirements:** Postgres + pgvector (`./scripts/bootstrap.sh`), Python 3.10+, LM Studio with an embedding model loaded, a populated library (run `cmd/describe` first)
+- **Requirements:** Postgres + pgvector (`./scripts/bootstrap.sh`), LM Studio with an embedding model loaded, a populated library (run `cmd/describe` first)
 
 ## Web Server (`cmd/web`)
 
@@ -311,26 +304,26 @@ Then open `http://localhost:8080`.
 |------|---------|-------------|
 | `-addr` | `:8080` | Listen address |
 | `-dsn` | `postgres:///ragotogar` | Postgres library DSN (overrides `LIBRARY_DSN` env) |
-| `-repo` | `.` | Repo root (where `tools/search.sh` and `styles.css` live) |
+| `-repo` | `.` | Repo root (where `scripts/search.sh` and `styles.css` live) |
 
 **Routes:**
 
 | Route | Behavior |
 |-------|----------|
 | `GET /` | Search box + a four-pill mode toggle + result grid |
-| `GET /?q=<query>&mode=<mode>` | Shells out to `./tools/search.sh --retrieve --mode <mode> "<query>"`, parses the file list, validates each name against `photos.name`, renders thumbnails |
+| `GET /?q=<query>&mode=<mode>` | Shells out to `./scripts/search.sh -retrieve [-verify] "<query>"`, parses the file list, validates each name against `photos.name`, renders thumbnails |
 | `GET /photos/<name>` | HTML page rendered from a Go template against the photos / exif / descriptions / inference tables. Uses the cashier design system (hero / dual-pillars / built photo-meta sections). |
 | `GET /photos/<name>.jpg` | Streams the thumbnail BLOB from `thumbnails.bytes` with `Content-Type: image/jpeg` and `Cache-Control: max-age=86400` |
 | `GET /styles.css` | Serves the cashier design system from the repo root |
 
 **Mode toggle:**
 
-| Pill | search.py invocation | Behavior |
-|------|----------------------|----------|
-| `vector` | `--retrieve --mode naive` | Pure vector similarity. **Default and recommended** — wins on this corpus. <500ms. |
-| `naive-verify` | `--retrieve --mode naive --verify` | Vector retrieval + an LLM yes/no check on each candidate (text pulled from SQL). ~3–6s per query. Use when vector returns too many noisy hits and you want a stricter precision filter. |
-| `graph` | `--retrieve --mode local` | LLM extracts keywords from the query, then walks the graph from matched entities. ~1–2s. Often underperforms naive on small corpora where entity coverage is thin. |
-| `hybrid` | `--retrieve --mode hybrid` | local + global community summaries. Broadest coverage, usually similar to local for direct photo lookup. |
+| Pill | cmd/search invocation | Behavior |
+|------|------------------------|----------|
+| `vector` | `-retrieve` | Pure vector similarity (cosine ≥ 0.5, top 500). **Default and recommended** — sub-second on small corpora. |
+| `naive-verify` | `-retrieve -verify` | Vector retrieval + an LLM yes/no check on each candidate (text pulled from SQL). ~1–6s per query. Use for tighter precision when "red truck" returns too much red and too much truck-shaped. |
+| `graph` | `-retrieve` | (legacy LightRAG concept; no graph backend after Phase 2 — same as vector) |
+| `hybrid` | `-retrieve` | (legacy LightRAG concept; same as vector) |
 
 All pills use `--retrieve` (vector retrieval, no LLM synthesis). Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when chunks reference a basename that's since been deleted from the library).
 
@@ -434,7 +427,7 @@ LIBRARY_DB_NAME=alt ./scripts/bootstrap.sh   # different DB name
 
 ### `scripts/dir_photos.sh` — Full Directory Pipeline
 
-Describes every photo in a directory; everything (EXIF, parsed fields, full description, thumbnail BLOB, model + timing) lands in the Postgres library. Run `./tools/index_and_vectorize.sh` afterward to embed the descriptions into pgvector and `./scripts/web.sh` to browse.
+Describes every photo in a directory; everything (EXIF, parsed fields, full description, thumbnail BLOB, model + timing) lands in the Postgres library. Run `./scripts/index.sh` afterward to embed the descriptions into pgvector and `./scripts/web.sh` to browse.
 
 ```bash
 ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
@@ -456,7 +449,7 @@ Convenience wrapper around `go run ./cmd/cashier`. Not part of the photo pipelin
 
 ### `scripts/web.sh` — Web Server
 
-Runs `cmd/web` with the repo root passed in for `tools/search.sh` and `styles.css` resolution. Defaults to `:8080` and the canonical library at `postgres:///ragotogar`.
+Runs `cmd/web` with the repo root passed in for `scripts/search.sh` and `styles.css` resolution. Defaults to `:8080` and the canonical library at `postgres:///ragotogar`.
 
 ```bash
 ./scripts/web.sh                          # default

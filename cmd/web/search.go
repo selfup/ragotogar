@@ -14,23 +14,21 @@ import (
 // matches "  [N] <path>" lines printed by tools/search.py print_sources()
 var searchLineRE = regexp.MustCompile(`^\s*\[(\d+)\]\s+(.+)$`)
 
-// search shells out to tools/search.sh and returns results that exist in
-// the SQL library. Order is preserved from the search output (LightRAG
-// retrieval order — most relevant first).
+// search shells out to scripts/search.sh (cmd/search) and returns results
+// that exist in the SQL library. Order is preserved from the search output
+// (vector retrieval order, highest similarity first).
 //
-// Mode "naive-verify" is a compound: --retrieve --mode naive --verify, which
-// runs an LLM yes/no check on each candidate and keeps only the YES matches.
-// Verify pulls indexable text from SQL via tools/rag_common.fetch_photo_dict.
+// Mode "naive-verify" composes -retrieve -verify so an LLM yes/no check
+// runs on each candidate; only YES matches survive. Other modes map to
+// plain -retrieve since pgvector doesn't have graph/hybrid concepts.
 func search(db *sql.DB, query, mode, repoRoot string) []result {
-	args := []string{"--retrieve"}
+	args := []string{"-retrieve"}
 	if mode == "naive-verify" {
-		args = append(args, "--mode", "naive", "--verify")
-	} else {
-		args = append(args, "--mode", mode)
+		args = append(args, "-verify")
 	}
 	args = append(args, query)
 
-	cmd := exec.Command("./tools/search.sh", args...)
+	cmd := exec.Command("./scripts/search.sh", args...)
 	cmd.Dir = repoRoot
 	// Pass stderr through to the server's terminal so progress/debug output
 	// from search.py (e.g. per-photo verify verdicts) is visible.

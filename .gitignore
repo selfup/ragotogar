@@ -3,16 +3,18 @@ cmd/describe/describe
 cmd/organize/organize
 cmd/cashier/cashier
 cmd/web/web
+cmd/index/index
+cmd/search/search
 
 .test_log.txt
 .env
 describe_test*
 describe_*
-tools/.venv
+# Legacy local-only state from the SQLite + LightRAG era. Postgres replaces
+# both; these dirs aren't read by anything anymore but may still exist on
+# machines that ran the old pipeline. Safe to `rm -rf` whenever.
 tools/.rag_index
 tools/.sql_index
-tools/__pycache__
-tools/.pytest_cache
 .DS_Store
 ._*
 .claude

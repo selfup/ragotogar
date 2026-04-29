@@ -15,7 +15,7 @@ brew services start postgresql@18
 
 LM_MODEL=mistralai/ministral-3-3b ./scripts/photo_describe.sh --preview-workers 8 --inference-workers 2 "$PHOTO_DIR"
 
-# Embed descriptions → chunks (pgvector). Add --reindex to rebuild from scratch.
-./tools/index_and_vectorize.sh
+# Embed descriptions → chunks (pgvector). Add -reindex to rebuild from scratch.
+./scripts/index.sh
 
 ./scripts/web.sh

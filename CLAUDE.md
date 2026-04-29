@@ -10,13 +10,6 @@
 
 This keeps the repo free of committed binaries and ensures all Go is run from source.
 
-## Python
-
-- Always use `uv` — never `pip`, `python -m venv`, or `python` directly
-- Run scripts with `uv run --project <dir> python <script>`
-- Manage dependencies with `uv add` / `uv sync`
-- Dependencies are declared in `tools/pyproject.toml`
-
 ## Git
 
 - **Never run `git push`, `git pull`, or `git fetch`** — the user controls when code moves between local and remote
