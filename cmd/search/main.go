@@ -25,9 +25,12 @@ import (
 func main() {
 	var (
 		dsn      = flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
-		retrieve = flag.Bool("retrieve", false, "Top-500 vector retrieval, cosine ≥ 0.5, no LLM synthesis")
-		precise  = flag.Bool("precise", false, "Strict retrieval (cosine ≥ 0.5); alias for -retrieve")
-		verify   = flag.Bool("verify", false, "With -retrieve/-precise: run an LLM yes/no check per candidate, keep only YES")
+		retrieve = flag.Bool("retrieve", false, "Top-500 vector retrieval, no LLM synthesis")
+		precise  = flag.Bool("precise", false, "Strict retrieval; alias for -retrieve")
+		hybrid   = flag.Bool("hybrid", false, "Vector retrieval + Postgres FTS, fused via Reciprocal Rank Fusion")
+		verify   = flag.Bool("verify", false, "With -retrieve/-precise/-hybrid: run an LLM yes/no check per candidate, keep only YES")
+		cosine   = flag.Float64("cosine", library.CosineThreshold, "Vector cosine cutoff (0..1). Applied in -retrieve/-precise/-hybrid modes.")
+		fts      = flag.Float64("fts", library.FTSRelativeThreshold, "FTS adaptive threshold ratio (0..1). 0 = no FTS filter; 1 = only the top-ranked FTS match.")
 	)
 	// argparse-style suppressed flag for backward compat with old call sites.
 	mode := flag.String("mode", "", "ignored (kept for compatibility with the old Python tool's --mode)")
@@ -42,13 +45,13 @@ func main() {
 	}
 	query := flag.Arg(0)
 
-	if err := run(*dsn, query, *retrieve, *precise, *verify); err != nil {
+	if err := run(*dsn, query, *retrieve, *precise, *hybrid, *verify, *cosine, *fts); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(dsn, query string, retrieve, precise, verify bool) error {
+func run(dsn, query string, retrieve, precise, hybrid, verify bool, cosine, fts float64) error {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
@@ -66,21 +69,30 @@ func run(dsn, query string, retrieve, precise, verify bool) error {
 		return fmt.Errorf("no chunks in library — run cmd/index first")
 	}
 
-	opts := library.SearchOptions{TopK: library.DefaultTopK}
-	if retrieve || precise {
+	opts := library.SearchOptions{TopK: library.DefaultTopK, FTSThresholdRel: fts}
+	if retrieve || precise || hybrid {
 		opts.TopK = library.StrictTopK
-		t := library.CosineThreshold
+		t := cosine
 		opts.Threshold = &t
 	}
 
 	ctx := context.Background()
 	searcher := library.NewSearcher(db)
-	results, err := searcher.Search(ctx, query, opts)
-	if err != nil {
-		return err
+
+	var (
+		results []library.Result
+		err2    error
+	)
+	if hybrid {
+		results, err2 = searcher.SearchHybrid(ctx, query, opts)
+	} else {
+		results, err2 = searcher.Search(ctx, query, opts)
+	}
+	if err2 != nil {
+		return err2
 	}
 
-	if verify && (retrieve || precise) {
+	if verify && (retrieve || precise || hybrid) {
 		fmt.Fprintf(os.Stderr, "\n--- Verifying %d candidate(s) with LLM ---\n", len(results))
 		verdicts, err := searcher.VerifyFilter(ctx, query, results)
 		if err != nil {

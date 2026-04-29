@@ -3,14 +3,18 @@ package main
 import (
 	"database/sql"
 	"flag"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"ragotogar/internal/library"
 )
 
 type result struct {
@@ -18,28 +22,57 @@ type result struct {
 }
 
 type pageData struct {
-	Q       string
-	Mode    string // "naive" | "local" | "hybrid"
-	Results []result
+	Q                Q
+	Mode             string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify"
+	CosineThreshold  string // formatted for the slider's value attribute
+	FTSThresholdRel  string
+	Results          []result
 }
 
-// validModes mirrors search.py's --mode choices, minus "global" (synthesis-only).
-// "naive-verify" is a cmd/web-specific compound mode → search.py --retrieve
-// --mode naive --verify (LLM filters each candidate).
+// Q is the trimmed query string. Wrapping it as a named type (vs. plain
+// string) keeps the template binding readable since pageData has several
+// string fields that mean different things.
+type Q string
+
+// parseThreshold reads a 0..1 float URL param and falls back to the default
+// when missing or malformed. Clamps into [0, 1] so URL fiddling can't push
+// the cosine cutoff into nonsense territory (negative, 5x, etc.).
+func parseThreshold(raw string, fallback float64) float64 {
+	if raw == "" {
+		return fallback
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback
+	}
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// validModes — four pills the UI exposes.
+//   naive             : pure vector cosine, cosine ≥ 0.5
+//   naive-verify      : vector + LLM yes/no verify
+//   fts-vector        : vector ∪ FTS via Reciprocal Rank Fusion
+//   fts-vector-verify : RRF fusion + LLM yes/no verify
 var validModes = map[string]bool{
-	"naive":        true,
-	"naive-verify": true,
-	"local":        true,
-	"hybrid":       true,
+	"naive":             true,
+	"naive-verify":      true,
+	"fts-vector":        true,
+	"fts-vector-verify": true,
 }
 
 func resolveMode(m string) string {
 	if validModes[m] {
 		return m
 	}
-	// naive (pure vector similarity) is the validated default — graph modes
-	// underperform on small corpora where entity coverage is thin.
-	// See STRATEGIES.md "Why naive mode is better for retrieval".
+	// Pure vector is the validated default. Unknown modes (including the
+	// retired "local" / "hybrid" LightRAG names) fall back here so old
+	// bookmarks don't 404.
 	return "naive"
 }
 
@@ -86,12 +119,21 @@ func main() {
 		}
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
 		mode := resolveMode(r.URL.Query().Get("mode"))
+		cosine := parseThreshold(r.URL.Query().Get("cosine"), library.CosineThreshold)
+		ftsRel := parseThreshold(r.URL.Query().Get("fts"), library.FTSRelativeThreshold)
+
 		var results []result
 		if q != "" {
-			results = search(db, q, mode)
+			results = search(db, q, mode, cosine, ftsRel)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := indexTmpl.Execute(w, pageData{Q: q, Mode: mode, Results: results}); err != nil {
+		if err := indexTmpl.Execute(w, pageData{
+			Q:                Q(q),
+			Mode:             mode,
+			CosineThreshold:  fmt.Sprintf("%.2f", cosine),
+			FTSThresholdRel:  fmt.Sprintf("%.2f", ftsRel),
+			Results:          results,
+		}); err != nil {
 			log.Printf("template: %v", err)
 		}
 	})

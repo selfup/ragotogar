@@ -50,6 +50,22 @@ const indexHTML = `<!doctype html>
     .modes label.active,
     .modes label:has(input:checked) { background: #222; color: var(--fg); }
     .modes .desc { color: var(--mute); font-size: 0.75rem; margin-left: 0.75rem; align-self: center; }
+    .sliders {
+      display: flex; gap: 1.5rem; flex-wrap: wrap;
+      font-size: 0.8rem; color: var(--mute);
+      margin-bottom: 0.75rem;
+    }
+    .sliders label {
+      display: inline-flex; align-items: center; gap: 0.5rem; min-width: 14rem;
+    }
+    .sliders input[type="range"] {
+      flex: 1; accent-color: var(--fg); cursor: pointer; max-width: 12rem;
+    }
+    .sliders output {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--fg); font-variant-numeric: tabular-nums; min-width: 2.5rem;
+      text-align: right;
+    }
     .status { color: var(--mute); font-size: 0.875rem; margin: 1rem 0; }
     .grid {
       display: grid; gap: 1rem;
@@ -72,17 +88,36 @@ const indexHTML = `<!doctype html>
     <h1><a href="/">ragotogar</a></h1>
     <form method="GET" action="/">
       <div class="modes" title="Retrieval mode">
-        <label class="{{if eq .Mode "naive"}}active{{end}}" title="Pure vector similarity. Fast, broad recall.">
+        <label class="{{if eq .Mode "naive"}}active{{end}}" title="Pure vector cosine similarity. Sub-second; broad semantic recall.">
           <input type="radio" name="mode" value="naive" {{if eq .Mode "naive"}}checked{{end}} onchange="this.form.submit()">vector
         </label>
-        <label class="{{if eq .Mode "naive-verify"}}active{{end}}" title="Vector retrieval, then LLM yes/no check on each candidate. Slower (~3–6s) but higher precision.">
-          <input type="radio" name="mode" value="naive-verify" {{if eq .Mode "naive-verify"}}checked{{end}} onchange="this.form.submit()">naive-verify
+        <label class="{{if eq .Mode "naive-verify"}}active{{end}}" title="Vector retrieval, then LLM yes/no check on each candidate. Higher precision; ~1–6s.">
+          <input type="radio" name="mode" value="naive-verify" {{if eq .Mode "naive-verify"}}checked{{end}} onchange="this.form.submit()">vector+verify
         </label>
-        <label class="{{if eq .Mode "local"}}active{{end}}" title="LLM extracts keywords, then walks the graph. Often underperforms naive on small corpora.">
-          <input type="radio" name="mode" value="local" {{if eq .Mode "local"}}checked{{end}} onchange="this.form.submit()">graph
+        <label class="{{if eq .Mode "fts-vector"}}active{{end}}" title="Vector + Postgres full-text search, fused via Reciprocal Rank Fusion. Catches literal-text matches vector misses.">
+          <input type="radio" name="mode" value="fts-vector" {{if eq .Mode "fts-vector"}}checked{{end}} onchange="this.form.submit()">FTS+vector
         </label>
-        <label class="{{if eq .Mode "hybrid"}}active{{end}}" title="Local + global. Broadest coverage.">
-          <input type="radio" name="mode" value="hybrid" {{if eq .Mode "hybrid"}}checked{{end}} onchange="this.form.submit()">hybrid
+        <label class="{{if eq .Mode "fts-vector-verify"}}active{{end}}" title="Vector ∪ FTS fused via RRF, then LLM yes/no per candidate. Tightest precision; slowest.">
+          <input type="radio" name="mode" value="fts-vector-verify" {{if eq .Mode "fts-vector-verify"}}checked{{end}} onchange="this.form.submit()">FTS+vector+verify
+        </label>
+      </div>
+      <div class="sliders" title="Tune the precision/recall floor for each retrieval arm. Default cosine 0.50, FTS ratio 0.30.">
+        <label>
+          <span>cosine ≥</span>
+          <input type="range" name="cosine" min="0" max="1" step="0.05"
+            value="{{.CosineThreshold}}"
+            oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(2)"
+            onchange="this.form.submit()">
+          <output>{{.CosineThreshold}}</output>
+        </label>
+        <label title="Adaptive FTS floor as a fraction of the top ts_rank in the result set. 0 = no filter, 1 = only the strongest match.">
+          <span>fts ≥</span>
+          <input type="range" name="fts" min="0" max="1" step="0.05"
+            value="{{.FTSThresholdRel}}"
+            oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(2)"
+            onchange="this.form.submit()">
+          <output>{{.FTSThresholdRel}}</output>
+          <span>× max</span>
         </label>
       </div>
       <div style="display: flex; gap: 0.5rem;">
