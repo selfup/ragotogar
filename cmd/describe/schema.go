@@ -1,19 +1,24 @@
 package main
 
 // schemaSQL is applied on every cmd/describe run via CREATE TABLE IF NOT
-// EXISTS — idempotent on existing libraries, creates a fresh one if missing.
+// EXISTS — idempotent on existing libraries, creates the schema fresh on
+// an empty Postgres database.
 //
-// cmd/describe is the only schema authority. cmd/web and the Python tools
-// open the DB read-only (or with simple INSERTs that don't touch DDL).
+// cmd/describe is the schema authority. cmd/web and the Python tools open
+// the DB read-only (or with simple INSERTs that don't touch DDL).
 //
-// Phase 1.5 collapsed-slice schema. Photos table is the post-cutover shape:
-// no md_path / html_path / jpg_path / json_path columns — derived artifacts
-// live in `rendered`-equivalent tables (`thumbnails`) or are templated on
-// demand.
+// Phase 2 schema: Postgres + pgvector. The chunks table is new (vector(768)
+// + HNSW). descriptions.fts is a generated tsvector replacing FTS5. Path
+// columns (md_path/html_path/jpg_path/json_path) are gone (Phase 1.5
+// cutover landed those as no-ops). Requires the `vector` extension —
+// caller bootstraps the database via:
+//
+//   createdb ragotogar
+//   psql ragotogar -c 'CREATE EXTENSION vector'
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
+    applied_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS photos (
@@ -21,8 +26,8 @@ CREATE TABLE IF NOT EXISTS photos (
     name          TEXT NOT NULL UNIQUE,
     file_path     TEXT,
     file_basename TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_photos_name ON photos(name);
 
@@ -35,20 +40,20 @@ CREATE TABLE IF NOT EXISTS exif (
     date_taken            TEXT,
     date_taken_year       INTEGER,
     date_taken_month      INTEGER,
-    focal_length_mm       REAL,
-    focal_length_35mm     REAL,
-    f_number              REAL,
-    exposure_time_seconds REAL,
+    focal_length_mm       DOUBLE PRECISION,
+    focal_length_35mm     DOUBLE PRECISION,
+    f_number              DOUBLE PRECISION,
+    exposure_time_seconds DOUBLE PRECISION,
     iso                   INTEGER,
-    exposure_compensation REAL,
+    exposure_compensation DOUBLE PRECISION,
     exposure_mode         TEXT,
     metering_mode         TEXT,
     white_balance         TEXT,
     flash                 TEXT,
     image_width           INTEGER,
     image_height          INTEGER,
-    gps_latitude          REAL,
-    gps_longitude         REAL,
+    gps_latitude          DOUBLE PRECISION,
+    gps_longitude         DOUBLE PRECISION,
     artist                TEXT,
     software              TEXT
 );
@@ -61,6 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_exif_aperture   ON exif(f_number);
 CREATE INDEX IF NOT EXISTS idx_exif_focal      ON exif(focal_length_mm);
 CREATE INDEX IF NOT EXISTS idx_exif_artist     ON exif(artist);
 
+-- Generated tsvector replaces SQLite FTS5 — same recall, native to the JOINs
+-- the search path uses. Indexed for keyword queries via @@.
 CREATE TABLE IF NOT EXISTS descriptions (
     photo_id          TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
     subject           TEXT,
@@ -68,35 +75,24 @@ CREATE TABLE IF NOT EXISTS descriptions (
     light             TEXT,
     colors            TEXT,
     composition       TEXT,
-    full_description  TEXT
+    full_description  TEXT,
+    fts               tsvector GENERATED ALWAYS AS (
+                        to_tsvector('english',
+                          coalesce(subject,'')          || ' ' ||
+                          coalesce(setting,'')          || ' ' ||
+                          coalesce(light,'')            || ' ' ||
+                          coalesce(colors,'')           || ' ' ||
+                          coalesce(composition,'')      || ' ' ||
+                          coalesce(full_description,''))
+                      ) STORED
 );
-
-CREATE VIRTUAL TABLE IF NOT EXISTS descriptions_fts USING fts5(
-    subject, setting, light, colors, composition, full_description,
-    content=descriptions, content_rowid=rowid,
-    tokenize='porter unicode61'
-);
-
-CREATE TRIGGER IF NOT EXISTS descriptions_ai AFTER INSERT ON descriptions BEGIN
-    INSERT INTO descriptions_fts(rowid, subject, setting, light, colors, composition, full_description)
-    VALUES (new.rowid, new.subject, new.setting, new.light, new.colors, new.composition, new.full_description);
-END;
-CREATE TRIGGER IF NOT EXISTS descriptions_ad AFTER DELETE ON descriptions BEGIN
-    INSERT INTO descriptions_fts(descriptions_fts, rowid, subject, setting, light, colors, composition, full_description)
-    VALUES ('delete', old.rowid, old.subject, old.setting, old.light, old.colors, old.composition, old.full_description);
-END;
-CREATE TRIGGER IF NOT EXISTS descriptions_au AFTER UPDATE ON descriptions BEGIN
-    INSERT INTO descriptions_fts(descriptions_fts, rowid, subject, setting, light, colors, composition, full_description)
-    VALUES ('delete', old.rowid, old.subject, old.setting, old.light, old.colors, old.composition, old.full_description);
-    INSERT INTO descriptions_fts(rowid, subject, setting, light, colors, composition, full_description)
-    VALUES (new.rowid, new.subject, new.setting, new.light, new.colors, new.composition, new.full_description);
-END;
+CREATE INDEX IF NOT EXISTS idx_descriptions_fts ON descriptions USING gin(fts);
 
 CREATE TABLE IF NOT EXISTS thumbnails (
     photo_id   TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
-    bytes      BLOB NOT NULL,
+    bytes      BYTEA NOT NULL,
     width      INTEGER NOT NULL DEFAULT 1024,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS inference (
@@ -105,11 +101,18 @@ CREATE TABLE IF NOT EXISTS inference (
     model        TEXT,
     preview_ms   INTEGER,
     inference_ms INTEGER,
-    described_at TEXT NOT NULL DEFAULT (datetime('now'))
+    described_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-`
 
-// legacyPathCols are columns from the slice-1 schema that the cutover removes.
-// Dropped via ALTER TABLE on existing databases; absent on fresh ones (the
-// CREATE TABLE above already omits them).
-var legacyPathCols = []string{"json_path", "md_path", "html_path", "jpg_path"}
+-- Vector chunks table: one row per chunk per photo. nomic-embed-text-v1.5
+-- output dim is 768. HNSW index for similarity (vector_cosine_ops matches
+-- the <=> distance operator the search path uses).
+CREATE TABLE IF NOT EXISTS chunks (
+    photo_id   TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    idx        SMALLINT NOT NULL,
+    text       TEXT NOT NULL,
+    embedding  vector(768) NOT NULL,
+    PRIMARY KEY (photo_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
+`

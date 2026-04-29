@@ -2,7 +2,7 @@
 
 _Research preview :warning: this project is under heavy discovery work and development_
 
-**RAG Photo Organizer** — a local-LLM photo library with GraphRAG search. *(Yes, it's a palindrome.)*
+**RAG Photo Organizer** — a local-LLM photo library with vector search. *(Yes, it's a palindrome.)*
 
 A collection of utility shell scripts and Go programs to: organize, normalize, describe, render, and search media.
 
@@ -11,10 +11,21 @@ A collection of utility shell scripts and Go programs to: organize, normalize, d
 - **macOS** — the organizer uses macOS-specific syscalls for file birth time
 - **[LM Studio](https://lmstudio.ai/)** — local LLM inference server (vision + text + embedding models)
 - **[exiftool](https://exiftool.org/)** — EXIF metadata extraction (`brew install exiftool`)
-- **[ImageMagick](https://imagemagick.org/)** — image resizing for LLM previews and HTML rendering (`brew install imagemagick`)
+- **[ImageMagick](https://imagemagick.org/)** — image resizing for LLM previews (`brew install imagemagick`)
 - **[rclone](https://rclone.org/)** — NAS sync (`brew install rclone`)
+- **Postgres 18 + pgvector** — `./scripts/bootstrap.sh` installs both via Homebrew, starts the cluster, creates the library DB, and loads the vector extension. Re-run any time; idempotent.
 - **Go 1.26+** — all pipeline tools are pure Go (`go run`, no build step)
-- **Python 3.10+** + **[uv](https://docs.astral.sh/uv/)** — for GraphRAG search tools (`brew install uv`)
+- **Python 3.10+** + **[uv](https://docs.astral.sh/uv/)** — for the indexer and search (`brew install uv`)
+
+## Quick start
+
+```bash
+# One-time, on a fresh checkout
+./scripts/bootstrap.sh           # postgres + pgvector + ragotogar DB + schema
+
+# Each time
+PHOTO_DIR=/path/to/photos ./full_run.sh
+```
 
 ## Pipeline
 
@@ -23,9 +34,9 @@ Each step feeds the next:
 | Step | What | Script |
 |------|------|--------|
 | 1. **Organize** | Sort media into type folders (JPEG, RAW, MOV...) and date subfolders | `scripts/organize.sh` |
-| 2. **Describe** | Send each photo to a vision LLM, write photo + EXIF + parsed fields + 1024px thumbnail BLOB into `tools/.sql_index/library.db` | `scripts/photo_describe.sh` |
-| 3. **Index** | Read each photo from SQL and feed into a LightRAG knowledge graph (entity extraction + vector embedding) | `tools/index_and_vectorize.sh` |
-| 4. **Search** | Query the graph with natural language, get synthesized answers or file lists | `tools/search.sh` |
+| 2. **Describe** | Send each photo to a vision LLM, write photo + EXIF + parsed fields + 1024px thumbnail BLOB into Postgres | `scripts/photo_describe.sh` |
+| 3. **Index** | Read each photo from Postgres, chunk + embed via LM Studio, INSERT into the `chunks` table (pgvector) | `tools/index_and_vectorize.sh` |
+| 4. **Search** | pgvector cosine similarity (`ORDER BY embedding <=> $1`); optional LLM verify pass | `tools/search.sh` |
 | 5. **Browse** | Web server — search box + thumbnail grid; per-photo pages render on-demand from SQL | `scripts/web.sh` |
 
 Steps are independent — you can run search without ever organizing, or describe without syncing to a NAS. The typical full flow is 1 → 2 → 3 → 4 → 5.
@@ -35,9 +46,10 @@ Steps are independent — you can run search without ever organizing, or describ
 | Component | Location | Description |
 |-----------|----------|-------------|
 | Go Media Organizer | `cmd/organize` | Parallel file organizer: sorts media into type/date folders, reunites sidecars. macOS-only. |
-| Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata + thumbnail JPG → SQLite library.db |
+| Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata + thumbnail JPG → Postgres |
 | NAS Sync | `scripts/clone.sh` | rclone-based sync with month/year filtering and `--no-videos` |
-| GraphRAG Search | `tools/` | LightRAG knowledge graph (reads photos from SQL); semantic + graph search |
+| Vector Indexer | `tools/index_and_vectorize.py` | Chunks + embeds each photo's description, INSERTs into pgvector chunks table |
+| Vector Search | `tools/search.py` | pgvector cosine similarity over chunks; optional LLM verify pass |
 | Web Server | `cmd/web` | Search UI + per-photo HTML pages rendered on-demand from SQL; thumbnail BLOBs streamed from SQL |
 | Cashier (markdown) | `cmd/cashier` | General-purpose markdown → HTML renderer with the cashier design system. Not in the photo pipeline; kept for ad-hoc use. |
 
@@ -87,15 +99,15 @@ Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutine
 
 ## Photo Describer (`cmd/describe`)
 
-Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual description via LM Studio's vision API. All output (typed EXIF columns, parsed `subject/setting/light/colors/composition` fields, full description, thumbnail BLOB, model + timing) writes directly to a single SQLite library at `tools/.sql_index/library.db`. The `photos` table is the source of truth — no JSON sidecars, no MD/HTML files.
+Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual description via LM Studio's vision API. All output (typed EXIF columns, parsed `subject/setting/light/colors/composition` fields, full description, thumbnail BLOB, model + timing) writes directly to the Postgres library. The `photos` table is the source of truth — no JSON sidecars, no MD/HTML files.
 
 **Usage:**
 
 ```bash
 ./scripts/photo_describe.sh /path/to/photos
 
-# Custom library path
-./scripts/photo_describe.sh -db /tmp/other.db /path/to/photos
+# Custom library DSN
+./scripts/photo_describe.sh -dsn postgres:///other_db /path/to/photos
 
 # Preview which files would be processed
 ./scripts/photo_describe.sh -dry-run /path/to/photos
@@ -114,8 +126,9 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 
 | Flag | Description |
 |------|-------------|
-| `-db PATH` | SQLite library path (default: `tools/.sql_index/library.db`, resolved from the repo root) |
+| `-dsn DSN` | Postgres library DSN (default: `postgres:///ragotogar` or `LIBRARY_DSN` env) |
 | `-force` | Re-describe photos already in the DB; UPSERTs across all five tables |
+| `-init-only` | Open the DB, apply the schema, and exit (used by `scripts/bootstrap.sh`) |
 | `-model NAME` | LM Studio model name (default: `qwen/qwen3-vl-8b` or `LM_MODEL` env) |
 | `-dry-run` | List files without calling the LLM or touching the DB |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
@@ -126,6 +139,7 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LIBRARY_DSN` | `postgres:///ragotogar` | Postgres connection string (shared by all components) |
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
 | `LM_MODEL` | `qwen/qwen3-vl-8b` | Vision model name (see `STRATEGIES.md` for model comparison) |
 | `RESIZE_PX` | `1024` | Longest edge resize for preview (also the thumbnail BLOB size) |
@@ -133,18 +147,19 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 
 **Library schema:**
 
-`cmd/describe` is the schema authority — it applies `CREATE TABLE IF NOT EXISTS` on every run, so the DB is created on first invocation and migrated forward on subsequent ones. Five tables, all keyed on `photos.id` (currently equal to `name` until Phase 5 stable IDs):
+`cmd/describe` is the schema authority — it applies `CREATE TABLE IF NOT EXISTS` on every run, so the DB is created on first invocation and migrated forward on subsequent ones. Seven tables, all keyed on `photos.id` (currently equal to `name` until Phase 7 stable IDs):
 
 | Table | Holds |
 |-------|-------|
 | `photos` | `id`, `name`, `file_path` (original on disk), `file_basename`, timestamps |
 | `exif` | Typed columns from EXIF: `camera_make`, `camera_model`, `lens_model`, `date_taken` (ISO 8601 + decomposed year/month), `focal_length_mm`, `f_number`, `exposure_time_seconds`, `iso`, `exposure_compensation`, `gps_latitude/longitude`, etc. |
-| `descriptions` | Parsed `subject / setting / light / colors / composition` plus `full_description` (the raw LLM output) |
-| `descriptions_fts` | FTS5 virtual table over `descriptions` with `porter unicode61` tokenization. Triggers keep it in sync. |
-| `thumbnails` | 1024px JPG bytes as a BLOB. Generated from the same magick output sent to the vision model — no second resize. |
+| `descriptions` | Parsed `subject / setting / light / colors / composition`, `full_description` (the raw LLM output), and a generated `fts tsvector` column (English stemmer) for keyword recall |
+| `thumbnails` | 1024px JPG bytes as a `BYTEA` BLOB. Generated from the same magick output sent to the vision model — no second resize. |
 | `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
+| `chunks` | One row per chunk per photo. `text TEXT` + `embedding vector(768)` (nomic-embed-text-v1.5). HNSW index on `embedding vector_cosine_ops`. Owned by the indexer (`tools/index_and_vectorize`). |
+| `schema_version` | Single-row marker for migrations |
 
-The `photos.id` column is reserved for the Phase 5 stable hash; it equals `name` today. Photo filenames include date + camera model (`20250928_X100VI_DSCF1516`) to avoid collisions across cameras.
+`cmd/describe` itself never touches `chunks` — that's the indexer's table. Re-describing a photo overwrites its photos / exif / descriptions / inference / thumbnails rows but leaves chunks alone; re-running `./tools/index_and_vectorize.sh` regenerates chunks from the fresh description.
 
 **Key details:**
 
@@ -155,18 +170,16 @@ The `photos.id` column is reserved for the Phase 5 stable hash; it equals `name`
 - Exponential backoff with jitter on API failures
 - Unique session ID per request to prevent LM Studio KV cache reuse
 - Strips `<think>` blocks from reasoning models; detects when model exhausts tokens on reasoning with no content
-- Skip-exists checks `SELECT 1 FROM photos WHERE name = ?` (use `-force` to re-describe)
-- All five tables get UPSERTed inside one transaction per photo
-- **Requirements:** [exiftool](https://exiftool.org/), [ImageMagick](https://imagemagick.org/), LM Studio running with a vision model loaded
+- Skip-exists checks `SELECT 1 FROM photos WHERE name = $1` (use `-force` to re-describe)
+- All five describe-owned tables get UPSERTed inside one transaction per photo
+- **Requirements:** [exiftool](https://exiftool.org/), [ImageMagick](https://imagemagick.org/), Postgres + pgvector (`./scripts/bootstrap.sh`), LM Studio running with a vision model loaded
 
 **Ad-hoc SQL:**
 
 ```bash
-./tools/sql_query.sh "SELECT camera_model, COUNT(*) FROM exif GROUP BY camera_model"
-./tools/sql_query.sh -f /path/to/query.sql
+psql -d ragotogar -c "SELECT camera_model, COUNT(*) FROM exif GROUP BY camera_model"
+psql -d ragotogar -f /path/to/query.sql
 ```
-
-**Backfill:** if you have an existing library populated by an earlier pipeline (no `thumbnails` / `inference` rows), `./tools/bootstrap_thumbs_inference.sh` re-derives both from `photos.file_path` (magick) and any matching `describe_*/<name>.json` sidecars on disk.
 
 ## Cashier (`cmd/cashier`)
 
@@ -180,24 +193,23 @@ The cashier source tree stays in place for ad-hoc markdown rendering — essays,
 ./scripts/cashier.sh all <dir>
 ```
 
-The photo `.jpg` sidecar `cmd/cashier` produces is no longer used by `cmd/web` — thumbnails come out of the `thumbnails` BLOB in `library.db`.
+The photo `.jpg` sidecar `cmd/cashier` produces is no longer used by `cmd/web` — thumbnails come out of the `thumbnails` BLOB in Postgres.
 
-## Photo Search — GraphRAG (`tools/`)
+## Photo Search — pgvector (`tools/`)
 
-Indexes photo descriptions from `library.db` into a knowledge graph using [LightRAG](https://github.com/HKUDS/LightRAG), enabling semantic and graph-based search across your photo library. Uses LM Studio for both LLM (entity/relationship extraction) and embeddings.
+Indexes photo descriptions from the Postgres library into the `chunks` table (pgvector vector(768) + HNSW index). Search is a single SQL query: `ORDER BY embedding <=> $1 LIMIT k`. Uses LM Studio for embeddings and (optionally) for the LLM verify pass.
 
 Split into three modules with separate concerns:
 
-- **`rag_common.py`** — shared config (models, paths), LLM/embedding functions, RAG initialization, SQL helpers (`connect_library`, `fetch_photo_dict`, `iter_photo_names`)
-- **`index_and_vectorize.py`** — reads photos from SQL, runs entity extraction + vector embedding via `ainsert()`
-- **`search.py`** — query-only; verify mode pulls indexable text from SQL too, so retrieval and verification stay coherent
+- **`rag_common.py`** — Postgres connection (`connect_library` returns an asyncpg conn with `register_vector`), photo dict helper, document builder, simple character-window chunker, embedding client
+- **`index_and_vectorize.py`** — reads photos from SQL, chunks each `build_document()` output, embeds via LM Studio, INSERTs into the `chunks` table. Idempotent: skips photos that already have chunks unless `--reindex` is passed.
+- **`search.py`** — query-only; embeds the query, runs `SELECT ... ORDER BY embedding <=> $1 LIMIT k`, optionally pipes candidates through an LLM verify pass
 
 **How it works:**
 
-1. `index_and_vectorize.py` iterates `SELECT name FROM photos`, reshapes each row's typed columns into the dict `build_document()` expects, and feeds the resulting text into LightRAG
-2. The LLM extracts entities (objects, rooms, cameras, settings, colors, etc.) into a knowledge graph (NetworkX + GraphML)
-3. The same text is embedded via a local embedding model for vector search
-4. Queries combine vector similarity with graph traversal for comprehensive results
+1. `index_and_vectorize.py` iterates `SELECT name FROM photos`, calls `build_document()` per row, splits the result into ~6KB chunks, embeds each chunk via LM Studio, INSERTs `(photo_id, idx, text, embedding)` rows
+2. Search embeds the query string the same way, then aggregates per-photo via `SELECT name, MAX(1 - (embedding <=> $1)) AS similarity FROM chunks JOIN photos ... GROUP BY name ORDER BY similarity DESC LIMIT k`
+3. Optional `--verify` runs the LLM yes/no relevance check on each candidate's `build_document()` text — same text the indexer embedded, so retrieval and verification stay coherent
 
 **Setup:**
 
@@ -219,102 +231,75 @@ lms load mistralai/ministral-3-3b --context-length 65536 --parallel 8
 # Embedding model for vector search (768-dim)
 lms load text-embedding-nomic-embed-text-v1.5
 
-# Optional: 24B model for multi-document synthesis queries (global/hybrid modes over many chunks)
-# Only load if you plan to override SEARCH_MODEL for synthesis-heavy queries.
+# Optional: 24B model for the LLM verify pass (--verify with -retrieve)
 lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 ```
-
-> **Context length trap:** when loading with `--parallel N`, LM Studio hard-partitions context across slots (each slot gets `context / N` tokens) unless **Unified KV** is enabled in the GUI. LightRAG's entity-extraction prompts run ~4100–5100 tokens, so `--context-length 32000 --parallel 8` gives only 4000/slot and will fail sporadically with 400 errors. Oversize `--context-length` or enable Unified KV. See [`STRATEGIES.md`](STRATEGIES.md) for details.
 
 **Usage:**
 
 ```bash
-# Index every photo currently in library.db
+# Index every photo currently in the library
 ./tools/index_and_vectorize.sh
 
-# Re-index (clear existing graph and rebuild)
+# Re-index (TRUNCATE chunks then re-embed all photos)
 ./tools/index_and_vectorize.sh --reindex
 
-# Override library path
-./tools/index_and_vectorize.sh --db /tmp/other.db
+# Override library DSN
+./tools/index_and_vectorize.sh --dsn postgres:///other_db
 
-# Query (hybrid mode — combines local graph + global summaries)
+# Query — pure vector similarity, top 30 by default
 ./tools/search.sh "bedroom photos with warm light"
 
-# Query with specific mode
-./tools/search.sh --mode naive "shallow depth of field"     # pure vector search (fastest)
-./tools/search.sh --mode local "what objects are on the desk" # graph neighborhood
-./tools/search.sh --mode global "summarize all indoor scenes" # full graph reasoning
-./tools/search.sh --mode hybrid "what cameras were used"      # local + global combined
+# Retrieval only — same vector query, more results, no LLM synthesis
+./tools/search.sh --retrieve "shallow depth of field"
 
-# Synthesis + list all retrieved source files
-./tools/search.sh --sources --mode global "summarize all indoor scenes"
+# Strict retrieval — cosine ≥ 0.5
+./tools/search.sh --precise "indoor scenes with warm light"
 
-# Retrieval only — strict matching, no LLM synthesis, just the file list
-./tools/search.sh --retrieve "airplanes"
+# Verify: vector retrieval + LLM yes/no check per candidate, keep only YES
+./tools/search.sh --retrieve --verify "April photos with trees"
 
-# Strict retrieval then synthesize over only exact matches
-./tools/search.sh --precise "what is the most common framing I use indoors"
-
-# Use a different model for search
-SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --mode global "roadtrip in winter"
-
-# Precise mode with devstral for exhaustive multi-photo analysis
-SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "analyze the framing of every indoor photo"
+# Use a different model for the verify pass
+SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --retrieve --verify "..."
 ```
-
-**Query modes:**
-
-| Mode | Description |
-|------|-------------|
-| `naive` | Pure vector similarity search on text chunks, no knowledge graph (fastest) |
-| `local` | Retrieves relevant entities, then uses their graph neighborhood as context |
-| `global` | Uses community summaries from the full knowledge graph for broad thematic answers |
-| `hybrid` | Combines local + global for the most comprehensive results (default) |
 
 **Output flags** (mutually exclusive):
 
 | Flag | Description |
 |------|-------------|
-| *(default)* | Synthesis only — LLM answer from retrieved context |
-| `--sources` | Synthesis + full list of all retrieved source files |
-| `--retrieve` | Retrieval only — strict matching (cosine ≥ 0.5), returns matched file list with no LLM synthesis. Honors `--mode` (default: `hybrid`). |
-| `--precise` | Strict retrieval (cosine ≥ 0.5) then synthesize over only exact matches. Honors `--mode`. Best with `SEARCH_MODEL` override for large result sets. See [`STRATEGIES.md`](STRATEGIES.md). |
-| `--verify` | Composes with `--retrieve`: runs an LLM yes/no relevance check on each candidate, keeps only YES matches. Pulls the same indexable text from `library.db` that the indexer used, so retrieval and verification stay coherent. Override the library path with `--db <path>` if needed. |
+| *(default)* | Top-30 vector retrieval, no LLM |
+| `--retrieve` | Top-500 vector retrieval, no LLM (used by cmd/web; output parses cleanly via the `[N] name` regex) |
+| `--precise` | Top-500 retrieval filtered to cosine ≥ 0.5 |
+| `--verify` | Composes with `--retrieve`/`--precise`: runs an LLM yes/no relevance check on each candidate's `build_document()` text, keeps only YES matches |
 
 **Environment variables:**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LIBRARY_DSN` | `postgres:///ragotogar` | Postgres connection string |
 | `LM_STUDIO_BASE` | `http://localhost:1234` | LM Studio API endpoint |
-| `INDEX_MODEL` | `mistralai/ministral-3-3b` | LLM for entity extraction during indexing |
-| `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for query synthesis |
-| `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | Embedding model for vector search |
-| `COSINE_THRESHOLD` | `0.2` | Cosine similarity threshold for vector retrieval |
-| `CHUNK_TOP_K` | `20` | Max chunks returned by retrieval |
-
-> **Model sizing notes:** `INDEX_MODEL` is a text-only task — 3B is fast with GGUF parallel batching and validated equivalent to devstral on entity density (~9 entities/photo). `SEARCH_MODEL` at 3B is adequate for `naive`/`local` and most single-photo answers, but for `global`/`hybrid`/`--precise` multi-document synthesis, override to 24B: `SEARCH_MODEL="mistralai/devstral-small-2-2512" ./tools/search.sh --precise "..."` — small models fixate on a few chunks; 24B cites across many. `--retrieve` and `--precise` override `COSINE_THRESHOLD` to 0.5 and `CHUNK_TOP_K` to 500 (effectively uncapped). See [`STRATEGIES.md`](STRATEGIES.md) for validated thresholds and model comparisons.
+| `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for the verify pass |
+| `EMBED_MODEL` | `text-embedding-nomic-embed-text-v1.5` | 768-dim embedding model — changing it requires re-indexing |
 
 **Key details:**
 
-- Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — the graph captures entities like "X100VI", "f/2", "ISO 3200" alongside visual entities like "bedroom" and "paisley duvet"
-- Three-slot model architecture: Qwen3-VL 8B for description (vision); Ministral 3B GGUF for index entity extraction and query synthesis; devstral 24B GGUF for multi-document synthesis override. See [`STRATEGIES.md`](STRATEGIES.md) for the five-model comparison and sizing evidence.
-- LLM calls use `max_tokens: -1` to let LM Studio use the full context window
-- `index_and_vectorize.py` reads every photo from `library.db` via a JOIN across photos / exif / descriptions; new photos picked up on the next run
-- All documents are batched into a single `ainsert()` call so LightRAG processes chunks in parallel across 8 concurrent LLM workers
-- Embedding model must be `nomic-embed-text-v1.5` (768-dim) — changing the embedding model requires re-indexing
-- LightRAG index is stored in `tools/.rag_index/` (gitignored), separate from the SQL library at `tools/.sql_index/library.db`
-- **Requirements:** Python 3.10+, LM Studio with an LLM and embedding model loaded, a populated `library.db` (run `cmd/describe` first)
+- Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — vector captures "X100VI", "f/2", "ISO 3200" alongside visual phrases like "bedroom" and "paisley duvet"
+- Chunking is a simple character-window splitter (~6KB per chunk with 400-byte overlap). Most photo descriptions fit in a single chunk; only long-form descriptions spill over.
+- HNSW index on `embedding vector_cosine_ops` — cosine is the metric, `<=>` is the distance operator
+- Re-indexing is incremental by default (skips photos that already have any chunks); use `--reindex` to TRUNCATE and rebuild
+- Per-photo similarity = `MAX(1 - (embedding <=> $1))` over the photo's chunks (best chunk wins) so the same photo doesn't appear multiple times in results
+- Embedding model must be `nomic-embed-text-v1.5` (768-dim); changing it requires re-indexing
+- **Requirements:** Postgres + pgvector (`./scripts/bootstrap.sh`), Python 3.10+, LM Studio with an embedding model loaded, a populated library (run `cmd/describe` first)
 
 ## Web Server (`cmd/web`)
 
-Browser UI sitting on top of `library.db`. Type a query, get a grid of matching photo thumbnails; click a thumbnail to open the full per-photo page rendered on-demand from SQL via Go's `html/template`. Thumbnails stream from the `thumbnails` BLOB column.
+Browser UI sitting on top of the Postgres library. Type a query, get a grid of matching photo thumbnails; click a thumbnail to open the full per-photo page rendered on-demand from SQL via Go's `html/template`. Thumbnails stream from the `thumbnails` BLOB column.
 
 **Usage:**
 
 ```bash
-./scripts/web.sh                          # default: :8080, library at tools/.sql_index/library.db
-./scripts/web.sh -db /tmp/other.db        # different library
+./scripts/web.sh                          # default: :8080, library at postgres:///ragotogar
+./scripts/web.sh -dsn postgres:///other_db
 ./scripts/web.sh -addr :9000              # different port
 ```
 
@@ -325,7 +310,7 @@ Then open `http://localhost:8080`.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-addr` | `:8080` | Listen address |
-| `-db` | `tools/.sql_index/library.db` | SQLite library path |
+| `-dsn` | `postgres:///ragotogar` | Postgres library DSN (overrides `LIBRARY_DSN` env) |
 | `-repo` | `.` | Repo root (where `tools/search.sh` and `styles.css` live) |
 
 **Routes:**
@@ -347,9 +332,9 @@ Then open `http://localhost:8080`.
 | `graph` | `--retrieve --mode local` | LLM extracts keywords from the query, then walks the graph from matched entities. ~1–2s. Often underperforms naive on small corpora where entity coverage is thin. |
 | `hybrid` | `--retrieve --mode hybrid` | local + global community summaries. Broadest coverage, usually similar to local for direct photo lookup. |
 
-All pills use `--retrieve` (cosine ≥ 0.5, no LLM synthesis). Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when LightRAG indexed a basename that's since been deleted from the library).
+All pills use `--retrieve` (vector retrieval, no LLM synthesis). Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when chunks reference a basename that's since been deleted from the library).
 
-**Requirements:** A built LightRAG index (see [Photo Search](#photo-search--graphrag-tools)) and a populated `library.db` (run `cmd/describe` first).
+**Requirements:** A populated `chunks` table (see [Photo Search](#photo-search--pgvector-tools)) and a populated library (run `cmd/describe` first).
 
 ## Tests
 
@@ -438,9 +423,18 @@ Convenience wrapper that runs the Go media organizer. Passes all arguments throu
 ./scripts/organize.sh -mtime /path/to/directory
 ```
 
+### `scripts/bootstrap.sh` — One-time Setup
+
+Installs Postgres + pgvector via Homebrew, starts the cluster, creates the `ragotogar` database, loads the vector extension, and applies the schema via `cmd/describe -init-only`. Idempotent. Run after a fresh checkout (or to verify the local Postgres is in good shape).
+
+```bash
+./scripts/bootstrap.sh
+LIBRARY_DB_NAME=alt ./scripts/bootstrap.sh   # different DB name
+```
+
 ### `scripts/dir_photos.sh` — Full Directory Pipeline
 
-Describes every photo in a directory; everything (EXIF, parsed fields, full description, thumbnail BLOB, model + timing) lands in `tools/.sql_index/library.db`. Run `./tools/index_and_vectorize.sh` afterward to build the LightRAG graph and `./scripts/web.sh` to browse.
+Describes every photo in a directory; everything (EXIF, parsed fields, full description, thumbnail BLOB, model + timing) lands in the Postgres library. Run `./tools/index_and_vectorize.sh` afterward to embed the descriptions into pgvector and `./scripts/web.sh` to browse.
 
 ```bash
 ./scripts/dir_photos.sh ~/X100VI/JPEG/April2026
@@ -462,11 +456,11 @@ Convenience wrapper around `go run ./cmd/cashier`. Not part of the photo pipelin
 
 ### `scripts/web.sh` — Web Server
 
-Runs `cmd/web` with the repo root passed in for `tools/search.sh` and `styles.css` resolution. Defaults to `:8080` and the canonical library at `tools/.sql_index/library.db`.
+Runs `cmd/web` with the repo root passed in for `tools/search.sh` and `styles.css` resolution. Defaults to `:8080` and the canonical library at `postgres:///ragotogar`.
 
 ```bash
 ./scripts/web.sh                          # default
-./scripts/web.sh -db /tmp/other.db        # different library
+./scripts/web.sh -dsn postgres:///alt     # different library
 ./scripts/web.sh -addr :9000              # different port
 ```
 

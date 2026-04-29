@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type result struct {
@@ -43,54 +43,36 @@ func resolveMode(m string) string {
 	return "naive"
 }
 
-func defaultDBPath() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "library.db"
+func defaultDSN() string {
+	if v := os.Getenv("LIBRARY_DSN"); v != "" {
+		return v
 	}
-	dir := cwd
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return filepath.Join(dir, "tools", ".sql_index", "library.db")
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return filepath.Join(cwd, "tools", ".sql_index", "library.db")
-		}
-		dir = parent
-	}
+	return "postgres:///ragotogar"
 }
 
 func main() {
 	var (
 		addr     = flag.String("addr", ":8080", "listen address")
-		dbPath   = flag.String("db", defaultDBPath(), "SQLite library path")
+		dsn      = flag.String("dsn", defaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
 		repoRoot = flag.String("repo", ".", "repo root (where tools/search.sh lives)")
 	)
 	flag.Parse()
 
-	absDB, err := filepath.Abs(*dbPath)
-	if err != nil {
-		log.Fatalf("invalid -db: %v", err)
-	}
 	absRepo, err := filepath.Abs(*repoRoot)
 	if err != nil {
 		log.Fatalf("invalid -repo: %v", err)
-	}
-	if _, err := os.Stat(absDB); err != nil {
-		log.Fatalf("library DB %s: %v (run cmd/describe to populate it)", absDB, err)
 	}
 	if _, err := os.Stat(filepath.Join(absRepo, "tools", "search.sh")); err != nil {
 		log.Fatalf("search.sh not found under %s/tools: %v", absRepo, err)
 	}
 
-	db, err := sql.Open("sqlite", absDB+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("pgx", *dsn)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		log.Fatalf("ping db: %v", err)
+		log.Fatalf("ping db (%s): %v", *dsn, err)
 	}
 
 	indexTmpl := template.Must(template.New("index").Parse(indexHTML))
@@ -128,7 +110,7 @@ func main() {
 		http.ServeFile(w, r, filepath.Join(absRepo, "styles.css"))
 	})
 
-	log.Printf("library: %s", absDB)
+	log.Printf("library: %s", *dsn)
 	log.Printf("repo:    %s", absRepo)
 	log.Printf("listening on http://localhost%s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))

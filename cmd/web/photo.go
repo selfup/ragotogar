@@ -72,7 +72,7 @@ func loadPhotoView(db *sql.DB, name string) (*photoView, error) {
 		LEFT JOIN exif e         ON p.id = e.photo_id
 		LEFT JOIN descriptions d ON p.id = d.photo_id
 		LEFT JOIN inference i    ON p.id = i.photo_id
-		WHERE p.name = ?
+		WHERE p.name = $1
 	`, name).Scan(
 		&v.Photo.Name, &v.Photo.FileBasename, &v.Photo.FilePath,
 		&cameraMake, &cameraModel, &lensModel, &lensInfo,
@@ -136,7 +136,7 @@ func loadPhotoView(db *sql.DB, name string) (*photoView, error) {
 // by search result validation in place of the old file-existence check.
 func photoExists(db *sql.DB, name string) bool {
 	var n int
-	err := db.QueryRow("SELECT 1 FROM photos WHERE name = ?", name).Scan(&n)
+	err := db.QueryRow("SELECT 1 FROM photos WHERE name = $1", name).Scan(&n)
 	return err == nil
 }
 
@@ -145,7 +145,7 @@ func photoExists(db *sql.DB, name string) bool {
 func thumbnailBytes(db *sql.DB, name string) ([]byte, error) {
 	var data []byte
 	err := db.QueryRow(
-		"SELECT bytes FROM thumbnails WHERE photo_id = ?", name,
+		"SELECT bytes FROM thumbnails WHERE photo_id = $1", name,
 	).Scan(&data)
 	return data, err
 }

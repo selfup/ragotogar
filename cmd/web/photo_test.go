@@ -1,19 +1,24 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"html/template"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"strings"
 	"testing"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const minimalSchema = `
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE photos (
     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
     file_path TEXT, file_basename TEXT
@@ -21,11 +26,11 @@ CREATE TABLE photos (
 CREATE TABLE exif (
     photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
     camera_make TEXT, camera_model TEXT, lens_model TEXT, lens_info TEXT,
-    date_taken TEXT, focal_length_mm REAL, focal_length_35mm REAL,
-    f_number REAL, exposure_time_seconds REAL, iso INTEGER,
-    exposure_compensation REAL, exposure_mode TEXT, metering_mode TEXT,
+    date_taken TEXT, focal_length_mm DOUBLE PRECISION, focal_length_35mm DOUBLE PRECISION,
+    f_number DOUBLE PRECISION, exposure_time_seconds DOUBLE PRECISION, iso INTEGER,
+    exposure_compensation DOUBLE PRECISION, exposure_mode TEXT, metering_mode TEXT,
     white_balance TEXT, flash TEXT, image_width INTEGER, image_height INTEGER,
-    gps_latitude REAL, gps_longitude REAL, artist TEXT, software TEXT
+    gps_latitude DOUBLE PRECISION, gps_longitude DOUBLE PRECISION, artist TEXT, software TEXT
 );
 CREATE TABLE descriptions (
     photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
@@ -34,7 +39,7 @@ CREATE TABLE descriptions (
 );
 CREATE TABLE thumbnails (
     photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
-    bytes BLOB NOT NULL, width INTEGER NOT NULL DEFAULT 1024
+    bytes BYTEA NOT NULL, width INTEGER NOT NULL DEFAULT 1024
 );
 CREATE TABLE inference (
     photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
@@ -42,24 +47,74 @@ CREATE TABLE inference (
 );
 `
 
+func adminDSN(t *testing.T) string {
+	t.Helper()
+	if v := os.Getenv("TEST_LIBRARY_DSN"); v != "" {
+		return v
+	}
+	if v := os.Getenv("LIBRARY_DSN"); v != "" {
+		return rewriteDBName(v, "postgres")
+	}
+	return "postgres:///postgres"
+}
+
+func rewriteDBName(dsn, newDB string) string {
+	idx := strings.LastIndex(dsn, "/")
+	if idx < 0 || idx == len(dsn)-1 {
+		return dsn + newDB
+	}
+	return dsn[:idx+1] + newDB
+}
+
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=foreign_keys(1)")
+	admin, err := sql.Open("pgx", adminDSN(t))
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	if err := admin.Ping(); err != nil {
+		admin.Close()
+		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
+	}
+	defer admin.Close()
+
+	rnd := make([]byte, 6)
+	rand.Read(rnd)
+	name := "ragotogar_web_test_" + hex.EncodeToString(rnd)
+	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE %s", name)); err != nil {
+		t.Fatalf("create test db: %v", err)
+	}
+
+	dsn := rewriteDBName(adminDSN(t), name)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
 	if _, err := db.Exec(minimalSchema); err != nil {
-		t.Fatalf("schema: %v", err)
+		db.Close()
+		t.Fatalf("apply schema: %v", err)
 	}
+
+	t.Cleanup(func() {
+		db.Close()
+		admin2, err := sql.Open("pgx", adminDSN(t))
+		if err != nil {
+			return
+		}
+		defer admin2.Close()
+		admin2.Exec(fmt.Sprintf(
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", name,
+		))
+		admin2.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
+	})
+
 	return db
 }
 
 func seedPhoto(t *testing.T, db *sql.DB, name string, thumb []byte) {
 	t.Helper()
 	if _, err := db.Exec(
-		"INSERT INTO photos (id, name, file_path, file_basename) VALUES (?, ?, ?, ?)",
+		"INSERT INTO photos (id, name, file_path, file_basename) VALUES ($1, $2, $3, $4)",
 		name, name, "/some/path/"+name+".jpg", name+".jpg",
 	); err != nil {
 		t.Fatalf("photos: %v", err)
@@ -67,27 +122,27 @@ func seedPhoto(t *testing.T, db *sql.DB, name string, thumb []byte) {
 	if _, err := db.Exec(`
 		INSERT INTO exif (photo_id, camera_make, camera_model, date_taken,
 		                  focal_length_mm, f_number, exposure_time_seconds, iso)
-		VALUES (?, 'FUJIFILM', 'X100VI', '2024-04-21T16:27:54', 23.0, 5.6, ?, 500)
+		VALUES ($1, 'FUJIFILM', 'X100VI', '2024-04-21T16:27:54', 23.0, 5.6, $2, 500)
 	`, name, 1.0/250); err != nil {
 		t.Fatalf("exif: %v", err)
 	}
 	if _, err := db.Exec(`
 		INSERT INTO descriptions
 		    (photo_id, subject, setting, light, colors, composition, full_description)
-		VALUES (?, 'a man in a gray shirt', 'indoor scene',
+		VALUES ($1, 'a man in a gray shirt', 'indoor scene',
 		        'natural daylight', 'muted greens', 'shallow DOF',
 		        'Full description of the scene.')
 	`, name); err != nil {
 		t.Fatalf("descriptions: %v", err)
 	}
 	if _, err := db.Exec(
-		"INSERT INTO thumbnails (photo_id, bytes, width) VALUES (?, ?, 1024)",
+		"INSERT INTO thumbnails (photo_id, bytes, width) VALUES ($1, $2, 1024)",
 		name, thumb,
 	); err != nil {
 		t.Fatalf("thumbnails: %v", err)
 	}
 	if _, err := db.Exec(
-		"INSERT INTO inference (photo_id, model, preview_ms, inference_ms) VALUES (?, 'qwen/qwen3-vl-8b', 666, 10394)",
+		"INSERT INTO inference (photo_id, model, preview_ms, inference_ms) VALUES ($1, 'qwen/qwen3-vl-8b', 666, 10394)",
 		name,
 	); err != nil {
 		t.Fatalf("inference: %v", err)
@@ -123,12 +178,12 @@ func TestServePhotoHTMLRendersAllSections(t *testing.T) {
 		"test_photo", // name (in title, h1, photo-meta)
 		"FUJIFILM",   // camera make
 		"X100VI",     // camera model
-		"21 April 2024",         // humanDate output
-		"23.0 mm",               // focal
-		"f/5.6",                 // aperture
-		"1/250",                 // shutter (shutterFraction func)
-		"a man in a gray shirt", // subject pillar
-		"indoor scene",          // setting pillar
+		"21 April 2024",          // humanDate output
+		"23.0 mm",                // focal
+		"f/5.6",                  // aperture
+		"1/250",                  // shutter (shutterFraction func)
+		"a man in a gray shirt",  // subject pillar
+		"indoor scene",           // setting pillar
 		`/photos/test_photo.jpg`, // image src + tagline link
 		// inference timing prose
 		"Preview generated in 666ms",

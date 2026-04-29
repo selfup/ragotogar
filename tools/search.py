@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Search photo descriptions using a LightRAG knowledge graph.
+Search photo descriptions via pgvector cosine similarity.
 
-Requires an existing index built by index_and_vectorize.py.
+Requires an indexed corpus: run `cmd/describe` to populate the photos
+tables, then `tools/index_and_vectorize.sh` to embed each description
+into the chunks table.
 
 Usage:
     python search.py "bedroom photos with warm light"
-    python search.py --mode naive "shallow depth of field"
-    python search.py --mode local "what cameras were used"
-    python search.py --mode global "summarize all indoor scenes"
+    python search.py --retrieve "shallow depth of field"
+    python search.py --retrieve --verify "April photos with trees"
 
 Environment:
+    LIBRARY_DSN     (default: postgres:///ragotogar)
     LM_STUDIO_BASE  (default: http://localhost:1234)
-    INDEX_MODEL     (default: devstral-small-2-2512) — LLM for query reasoning
+    SEARCH_MODEL    (default: mistralai/ministral-3-3b) — LLM for verify
     EMBED_MODEL     (default: text-embedding-nomic-embed-text-v1.5)
 """
 
@@ -21,63 +23,45 @@ import asyncio
 import os
 import sys
 
-from lightrag import QueryParam
-
 from rag_common import (
-    INDEX_DIR, LIBRARY_DB, SEARCH_MODEL,
-    build_document, connect_library, create_rag, fetch_photo_dict, make_llm_func,
+    LIBRARY_DSN, SEARCH_MODEL,
+    build_document, connect_library, embed_texts, fetch_photo_dict, make_llm_func,
 )
 
 
-def unique_files(data):
-    """Extract unique source file paths from a query-data response, in retrieval order."""
-    refs = data.get("references", [])
-    chunks = data.get("chunks", [])
-    ref_map = {r["reference_id"]: r["file_path"] for r in refs if "reference_id" in r}
-
-    seen = set()
-    files = []
-    for chunk in chunks:
-        fp = chunk.get("file_path") or ref_map.get(chunk.get("reference_id"), "")
-        if fp and fp not in seen:
-            seen.add(fp)
-            files.append(fp)
-    for r in refs:
-        fp = r.get("file_path", "")
-        if fp and fp not in seen:
-            seen.add(fp)
-            files.append(fp)
-    return files
+DEFAULT_TOP_K = 30
+STRICT_TOP_K = 500
+COSINE_THRESHOLD = 0.5  # applied in --retrieve and --precise modes
 
 
-def print_sources(data):
-    """Print retrieved source files from structured query data."""
-    files = unique_files(data)
-    if not files:
+async def vector_search(conn, query, top_k, threshold=None):
+    """Return [(name, similarity)] ordered by descending similarity.
+
+    Aggregates per-photo: takes the best chunk score per photo so we don't
+    return the same photo multiple times via different chunks. When
+    `threshold` is set, only photos with similarity ≥ threshold come back —
+    matches the old LightRAG `cosine_better_than_threshold` cutoff."""
+    [embedding] = await embed_texts([query])
+    rows = await conn.fetch("""
+        SELECT name, MAX(1 - (embedding <=> $1)) AS similarity
+        FROM chunks JOIN photos ON photos.id = chunks.photo_id
+        GROUP BY name
+        ORDER BY similarity DESC
+        LIMIT $2
+    """, embedding, top_k)
+    out = [(r["name"], float(r["similarity"])) for r in rows]
+    if threshold is not None:
+        out = [(n, s) for n, s in out if s >= threshold]
+    return out
+
+
+def print_sources(results):
+    """Print '[i] name' lines so cmd/web can parse them via the existing regex."""
+    if not results:
         return
-    print(f"\n--- Retrieved Sources ({len(files)} files) ---")
-    for i, fp in enumerate(files, 1):
-        print(f"  [{i}] {fp}")
-
-
-def _name_from_indexed_path(path):
-    """LightRAG stores file basenames (with .json extension) as the
-    `file_path` reference. The photo's library name strips the extension."""
-    base = os.path.basename(path)
-    return base[:-5] if base.endswith(".json") else base
-
-
-def _read_indexable_text(name, conn):
-    """Reproduce the same indexable text build_document() produced for the
-    indexer, but pulled from the typed SQL columns instead of a JSON sidecar.
-
-    Verify must see the same text the indexer embedded so retrieval and
-    verification stay coherent (a query for "April" or "X100VI" or "f/2"
-    matches both layers or neither). Returns None if the photo isn't in SQL."""
-    data = fetch_photo_dict(conn, name)
-    if data is None:
-        return None
-    return build_document(data)
+    print(f"\n--- Retrieved Sources ({len(results)} files) ---")
+    for i, (name, _) in enumerate(results, 1):
+        print(f"  [{i}] {name}")
 
 
 VERIFY_PROMPT = """Determine if a photo is relevant to a search query.
@@ -94,125 +78,98 @@ answer YES. Only answer NO if the photo is clearly unrelated to the query.
 Reply with exactly one word: YES or NO."""
 
 
-async def _verify_one(query, file_path, document, llm_func):
-    """Ask the LLM if a photo matches the query. Returns (file_path, verdict, raw_response)."""
+async def _verify_one(query, name, document, llm_func):
     if not document:
-        return file_path, False, "(no document)"
+        return name, False, "(no document)"
     prompt = VERIFY_PROMPT.format(query=query, document=document[:3000])
     try:
         resp = await llm_func(prompt)
     except Exception as e:
-        print(f"  [verify error] {file_path}: {e}", file=sys.stderr)
-        return file_path, False, f"(error: {e})"
+        print(f"  [verify error] {name}: {e}", file=sys.stderr)
+        return name, False, f"(error: {e})"
     verdict = resp.strip().upper().startswith("Y")
-    return file_path, verdict, resp.strip()
+    return name, verdict, resp.strip()
 
 
-async def verify_filter(query, files, llm_func, db_path=None):
-    """Run parallel LLM verification on each candidate's indexed text, return only matches.
-    Logs per-photo verdicts to stderr for debugging.
+async def verify_filter(conn, query, candidates, llm_func):
+    """Run parallel LLM verification on each candidate's indexed text."""
+    documents = []
+    for name, _ in candidates:
+        data = await fetch_photo_dict(conn, name)
+        documents.append(build_document(data) if data else None)
 
-    `files` are LightRAG-stored references (basenames). We resolve each one to
-    its photo name and pull the indexable text from SQL."""
-    conn = connect_library(db_path)
-    try:
-        names = [_name_from_indexed_path(fp) for fp in files]
-        documents = [_read_indexable_text(n, conn) for n in names]
-    finally:
-        conn.close()
-    print(f"\n--- Verifying {len(files)} candidate(s) with LLM ---", file=sys.stderr)
+    print(f"\n--- Verifying {len(candidates)} candidate(s) with LLM ---", file=sys.stderr)
     results = await asyncio.gather(*[
-        _verify_one(query, fp, doc, llm_func) for fp, doc in zip(files, documents)
+        _verify_one(query, name, doc, llm_func)
+        for (name, _), doc in zip(candidates, documents)
     ])
     kept = []
-    for fp, verdict, raw in results:
+    for name, verdict, raw in results:
         marker = "✓" if verdict else "✗"
-        print(f"  {marker} {os.path.basename(fp)}: {raw[:80]}", file=sys.stderr)
+        print(f"  {marker} {name}: {raw[:80]}", file=sys.stderr)
         if verdict:
-            kept.append(fp)
+            kept.append(name)
     return kept
 
 
 def print_verified(query, kept, total):
     print(f"\n--- Verified Sources ({len(kept)}/{total} kept) ---")
-    for i, fp in enumerate(kept, 1):
-        print(f"  [{i}] {fp}")
+    for i, name in enumerate(kept, 1):
+        print(f"  [{i}] {name}")
 
 
-async def do_query(query_text, mode="hybrid", sources=False, retrieve=False, precise=False, verify=False, db_path=None):
-    if not os.path.exists(INDEX_DIR):
-        print("No index found. Run index_and_vectorize.py first.", file=sys.stderr)
-        sys.exit(1)
-
-    cosine_threshold = 0.5 if (precise or retrieve) else None
-    rag = await create_rag(model=SEARCH_MODEL, cosine_threshold=cosine_threshold)
-
-    # --retrieve and --precise both pin chunk_top_k=500; the user's chosen --mode
-    # (naive/local/hybrid) is preserved so retrieval can be either pure vector
-    # or graph-aware.
-    strict_top_k = 500
-
+async def do_query(query_text, retrieve=False, precise=False, verify=False, dsn=None):
+    conn = await connect_library(dsn)
     try:
-        if retrieve:
-            result = await rag.aquery_data(query_text, param=QueryParam(mode=mode, enable_rerank=False, chunk_top_k=strict_top_k))
-            if verify:
-                files = unique_files(result.get("data", {}))
-                kept = await verify_filter(query_text, files, make_llm_func(SEARCH_MODEL), db_path=db_path)
-                print_verified(query_text, kept, len(files))
-            else:
-                print_sources(result.get("data", {}))
-        elif precise:
-            result = await rag.aquery_llm(query_text, param=QueryParam(mode=mode, enable_rerank=False, chunk_top_k=strict_top_k))
-            print(result.get("llm_response", {}).get("content", ""))
-            print_sources(result.get("data", {}))
-        elif sources:
-            result = await rag.aquery_llm(query_text, param=QueryParam(mode=mode, enable_rerank=False))
-            print(result.get("llm_response", {}).get("content", ""))
-            print_sources(result.get("data", {}))
+        # Precision check: require some chunks to exist before querying.
+        n = await conn.fetchval("SELECT COUNT(*) FROM chunks")
+        if n == 0:
+            print("No chunks in library. Run tools/index_and_vectorize.sh first.", file=sys.stderr)
+            sys.exit(1)
+
+        # Match the old LightRAG behavior: --retrieve and --precise both pin
+        # cosine ≥ 0.5 with a wide top_k cap. Without this, every photo above
+        # any similarity floods the verify pass — slow and noisy.
+        if retrieve or precise:
+            top_k = STRICT_TOP_K
+            threshold = COSINE_THRESHOLD
         else:
-            result = await rag.aquery(query_text, param=QueryParam(mode=mode, enable_rerank=False))
-            print(result)
+            top_k = DEFAULT_TOP_K
+            threshold = None
+        results = await vector_search(conn, query_text, top_k, threshold=threshold)
+
+        if verify and (retrieve or precise):
+            kept = await verify_filter(conn, query_text, results, make_llm_func(SEARCH_MODEL))
+            print_verified(query_text, kept, len(results))
+        else:
+            print_sources(results)
     finally:
-        await rag.finalize_storages()
+        await conn.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Search photo descriptions via LightRAG")
+    parser = argparse.ArgumentParser(description="Search photo descriptions via pgvector")
     parser.add_argument("text", help="Search query")
-    parser.add_argument(
-        "--mode",
-        choices=["naive", "local", "global", "hybrid"],
-        default="hybrid",
-        help="Query mode (default: hybrid)",
-    )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--sources",
-        action="store_true",
-        help="Show all retrieved source files after the synthesis",
-    )
-    group.add_argument(
-        "--retrieve",
-        action="store_true",
-        help="Retrieval only — list matched source files, no LLM synthesis",
-    )
-    group.add_argument(
-        "--precise",
-        action="store_true",
-        help="Strict retrieval (cosine>=0.5, naive) then synthesize over exact matches only",
-    )
-    parser.add_argument(
-        "--verify",
-        action="store_true",
-        help="With --retrieve: run an LLM yes/no check on each candidate's description, keep only YES matches",
-    )
-    parser.add_argument(
-        "--db",
-        default=LIBRARY_DB,
-        help=f"SQLite library path used by --verify to look up indexable text (default: {LIBRARY_DB})",
-    )
+    group.add_argument("--retrieve", action="store_true",
+                       help="Retrieval only — list matched photos, no LLM synthesis")
+    group.add_argument("--precise", action="store_true",
+                       help="Strict retrieval (cosine ≥ 0.5)")
+    parser.add_argument("--verify", action="store_true",
+                       help="With --retrieve: LLM yes/no check on each candidate, keep only YES matches")
+    parser.add_argument("--dsn", default=LIBRARY_DSN,
+                       help=f"Postgres DSN (default: {LIBRARY_DSN})")
+    # Legacy --mode is accepted-but-ignored so existing call sites
+    # (cmd/web/search.go) keep working without a flag-removal coordination.
+    parser.add_argument("--mode", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    asyncio.run(do_query(args.text, mode=args.mode, sources=args.sources, retrieve=args.retrieve, precise=args.precise, verify=args.verify, db_path=args.db))
+    asyncio.run(do_query(
+        args.text,
+        retrieve=args.retrieve,
+        precise=args.precise,
+        verify=args.verify,
+        dsn=args.dsn,
+    ))
 
 
 if __name__ == "__main__":

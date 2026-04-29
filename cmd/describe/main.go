@@ -33,9 +33,10 @@ var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 type config struct {
 	inputDir         string
 	inputFile        string // set when a single file is passed instead of a directory
-	dbPath           string
+	dsn              string
 	force            bool
 	dryRun           bool
+	initOnly         bool
 	lmBase           string
 	model            string
 	resizePx         int
@@ -95,14 +96,23 @@ func main() {
 		inferenceWorkers: 1,
 	}
 
-	flag.StringVar(&cfg.dbPath, "db", defaultDBPath(), "SQLite library path")
+	flag.StringVar(&cfg.dsn, "dsn", defaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
 	flag.BoolVar(&cfg.force, "force", false, "Re-describe photos already in the DB (UPSERT on the photos.name conflict)")
+	flag.BoolVar(&cfg.initOnly, "init-only", false, "Open the DB, apply the schema, and exit (used by scripts/bootstrap.sh)")
 	flag.StringVar(&cfg.model, "model", cfg.model, "LM Studio model name")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "List files that would be processed without calling the LLM")
 	flag.IntVar(&cfg.maxRetries, "retries", cfg.maxRetries, "Max retry attempts per image on API failure")
 	flag.IntVar(&cfg.previewWorkers, "preview-workers", cfg.previewWorkers, "Parallel preview (resize/extract) workers")
 	flag.IntVar(&cfg.inferenceWorkers, "inference-workers", cfg.inferenceWorkers, "Parallel LLM inference workers (default 1; bump to N to use LM Studio's --parallel N batching)")
 	flag.Parse()
+
+	if cfg.initOnly {
+		if err := initOnly(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if flag.NArg() != 1 {
 		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <input_dir|image_file>\n", os.Args[0])
@@ -133,6 +143,19 @@ func main() {
 	}
 }
 
+// initOnly opens the DB to apply the schema (CREATE TABLE IF NOT EXISTS),
+// then closes it. Used by scripts/bootstrap.sh so a fresh checkout has all
+// tables ready before the Python tools or cmd/web touch the library.
+func initOnly(cfg config) error {
+	db, err := openDB(cfg.dsn)
+	if err != nil {
+		return fmt.Errorf("open library: %w", err)
+	}
+	defer db.Close()
+	fmt.Printf("Schema applied to %s\n", cfg.dsn)
+	return nil
+}
+
 func run(cfg config) error {
 	var files []string
 	if cfg.inputFile != "" {
@@ -150,7 +173,7 @@ func run(cfg config) error {
 	}
 
 	fmt.Printf("Found %d image(s) in '%s'\n", len(files), cfg.inputDir)
-	fmt.Printf("Library: %s\n", cfg.dbPath)
+	fmt.Printf("Library: %s\n", cfg.dsn)
 	fmt.Printf("Model:   %s @ %s\n", cfg.model, cfg.lmBase)
 	fmt.Printf("Retries: %d (delay %s)\n", cfg.maxRetries, cfg.retryDelay)
 	fmt.Printf("Preview workers: %d\n", cfg.previewWorkers)
@@ -164,7 +187,7 @@ func run(cfg config) error {
 		return nil
 	}
 
-	db, err := openDB(cfg.dbPath)
+	db, err := openDB(cfg.dsn)
 	if err != nil {
 		return fmt.Errorf("open library: %w", err)
 	}
@@ -205,7 +228,7 @@ func run(cfg config) error {
 
 	if len(jobs) == 0 {
 		fmt.Printf("\nDone. Processed: 0, Errors: 0, Skipped: %d\n", skipped)
-		fmt.Printf("Library: %s\n", cfg.dbPath)
+		fmt.Printf("Library: %s\n", cfg.dsn)
 		return nil
 	}
 
@@ -303,7 +326,7 @@ func run(cfg config) error {
 	wg.Wait()
 
 	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed.Load(), errors.Load(), skipped)
-	fmt.Printf("Library: %s\n", cfg.dbPath)
+	fmt.Printf("Library: %s\n", cfg.dsn)
 	return nil
 }
 

@@ -1,29 +1,107 @@
 package main
 
 import (
-	"path/filepath"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// TestOpenDBCreatesSchema verifies a fresh DB ends up with all expected
-// tables, indexes, and triggers — the slice-1 schema additions land here too
-// (thumbnails, inference) since cmd/describe is the schema authority.
-func TestOpenDBCreatesSchema(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
+// adminDSN is the DSN we use to CREATE/DROP transient test databases.
+// Connects to the maintenance database (`postgres`) so we can issue DDL
+// against the cluster itself.
+func adminDSN(t *testing.T) string {
+	t.Helper()
+	if v := os.Getenv("TEST_LIBRARY_DSN"); v != "" {
+		return v
 	}
-	defer db.Close()
+	if v := os.Getenv("LIBRARY_DSN"); v != "" {
+		// strip the dbname; replace with `postgres`
+		return rewriteDBName(v, "postgres")
+	}
+	return "postgres:///postgres"
+}
+
+func rewriteDBName(dsn, newDB string) string {
+	// crude but adequate for the two DSN shapes we use:
+	//   postgres:///dbname            (path-style)
+	//   postgres://host:port/dbname   (URL-style)
+	// strip everything after the last "/" if it isn't already empty
+	idx := strings.LastIndex(dsn, "/")
+	if idx < 0 || idx == len(dsn)-1 {
+		return dsn + newDB
+	}
+	return dsn[:idx+1] + newDB
+}
+
+// newTempDB creates a uniquely-named Postgres database, applies the schema,
+// and returns an open connection plus a cleanup function. Skips the test
+// (rather than failing) when no Postgres is reachable so unit tests don't
+// brick on machines without ./scripts/bootstrap.sh having run.
+func newTempDB(t *testing.T) *sql.DB {
+	t.Helper()
+	admin, err := sql.Open("pgx", adminDSN(t))
+	if err != nil {
+		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
+	}
+	if err := admin.Ping(); err != nil {
+		admin.Close()
+		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
+	}
+	defer admin.Close()
+
+	rnd := make([]byte, 6)
+	rand.Read(rnd)
+	name := "ragotogar_test_" + hex.EncodeToString(rnd)
+	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE %s", name)); err != nil {
+		t.Fatalf("create test db: %v", err)
+	}
+
+	dsn := rewriteDBName(adminDSN(t), name)
+	db, err := openDB(dsn)
+	if err != nil {
+		// best-effort cleanup
+		admin2, _ := sql.Open("pgx", adminDSN(t))
+		if admin2 != nil {
+			admin2.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
+			admin2.Close()
+		}
+		t.Fatalf("open test db: %v", err)
+	}
+
+	t.Cleanup(func() {
+		db.Close()
+		// ensure the test DB is droppable: kill any lingering backends
+		admin2, err := sql.Open("pgx", adminDSN(t))
+		if err != nil {
+			return
+		}
+		defer admin2.Close()
+		admin2.Exec(fmt.Sprintf(
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", name,
+		))
+		admin2.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
+	})
+
+	return db
+}
+
+func TestOpenDBCreatesSchema(t *testing.T) {
+	db := newTempDB(t)
 
 	expected := []string{
 		"schema_version", "photos", "exif", "descriptions",
-		"descriptions_fts", "thumbnails", "inference",
+		"thumbnails", "inference", "chunks",
 	}
 	for _, name := range expected {
 		var found int
 		err := db.QueryRow(
-			"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", name,
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name=$1", name,
 		).Scan(&found)
 		if err != nil {
 			t.Fatalf("query for %s: %v", name, err)
@@ -37,46 +115,31 @@ func TestOpenDBCreatesSchema(t *testing.T) {
 		"idx_photos_name", "idx_exif_camera", "idx_exif_make", "idx_exif_date",
 		"idx_exif_year_month", "idx_exif_iso", "idx_exif_aperture",
 		"idx_exif_focal", "idx_exif_artist",
+		"idx_descriptions_fts", "idx_chunks_embedding",
 	}
 	for _, name := range expectedIdx {
 		var found int
 		err := db.QueryRow(
-			"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", name,
+			"SELECT COUNT(*) FROM pg_indexes WHERE schemaname='public' AND indexname=$1", name,
 		).Scan(&found)
 		if err != nil || found != 1 {
 			t.Errorf("index %s missing (err=%v count=%d)", name, err, found)
 		}
 	}
-
-	for _, name := range []string{"descriptions_ai", "descriptions_ad", "descriptions_au"} {
-		var found int
-		err := db.QueryRow(
-			"SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?", name,
-		).Scan(&found)
-		if err != nil || found != 1 {
-			t.Errorf("trigger %s missing (err=%v count=%d)", name, err, found)
-		}
-	}
 }
 
-// TestPhotosTableNoLegacyPathColumns verifies the post-cutover photos table
-// — no json_path / md_path / html_path / jpg_path. These were dropped from
-// the schema; if they reappear, sql_sync's old shape leaked back in.
+// TestPhotosTableNoLegacyPathColumns guards against the slice-1 path columns
+// reappearing in the schema.
 func TestPhotosTableNoLegacyPathColumns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	db := newTempDB(t)
 
-	for _, col := range legacyPathCols {
+	for _, col := range []string{"json_path", "md_path", "html_path", "jpg_path"} {
 		var found int
 		err := db.QueryRow(
-			"SELECT COUNT(*) FROM pragma_table_info('photos') WHERE name=?", col,
+			"SELECT COUNT(*) FROM information_schema.columns WHERE table_name='photos' AND column_name=$1", col,
 		).Scan(&found)
 		if err != nil {
-			t.Fatalf("pragma_table_info: %v", err)
+			t.Fatalf("information_schema query: %v", err)
 		}
 		if found != 0 {
 			t.Errorf("photos.%s should not exist (found=%d)", col, found)
@@ -84,45 +147,8 @@ func TestPhotosTableNoLegacyPathColumns(t *testing.T) {
 	}
 }
 
-// TestDropLegacyPathColumns simulates an old DB shape and verifies the
-// migration drops the columns idempotently.
-func TestDropLegacyPathColumns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
-
-	// Re-add columns to simulate the slice-1 shape, then re-run init.
-	for _, col := range legacyPathCols {
-		if _, err := db.Exec("ALTER TABLE photos ADD COLUMN " + col + " TEXT"); err != nil {
-			t.Fatalf("re-add %s: %v", col, err)
-		}
-	}
-	if err := initSchema(db); err != nil {
-		t.Fatalf("re-init: %v", err)
-	}
-	for _, col := range legacyPathCols {
-		var found int
-		if err := db.QueryRow(
-			"SELECT COUNT(*) FROM pragma_table_info('photos') WHERE name=?", col,
-		).Scan(&found); err != nil {
-			t.Fatalf("pragma: %v", err)
-		}
-		if found != 0 {
-			t.Errorf("legacy column %s not dropped", col)
-		}
-	}
-}
-
 func TestInsertPhotoRoundTrip(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	db := newTempDB(t)
 
 	exif := exifData{
 		FileName:             "DSCF0086.JPG",
@@ -160,10 +186,9 @@ func TestInsertPhotoRoundTrip(t *testing.T) {
 	}
 
 	var (
-		name, fileBasename string
-		filePath           string
+		name, fileBasename, filePath string
 	)
-	err = db.QueryRow(
+	err := db.QueryRow(
 		"SELECT name, file_path, file_basename FROM photos WHERE id = 'test_photo'",
 	).Scan(&name, &filePath, &fileBasename)
 	if err != nil {
@@ -253,12 +278,7 @@ func TestInsertPhotoRoundTrip(t *testing.T) {
 }
 
 func TestInsertPhotoIdempotent(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	db := newTempDB(t)
 
 	exif := exifData{Make: "FUJIFILM", Model: "X100VI", DateTimeOriginal: "2024:04:21 16:27:54"}
 	fields := descriptionFields{Subject: "x"}
@@ -280,12 +300,7 @@ func TestInsertPhotoIdempotent(t *testing.T) {
 }
 
 func TestCascadeDelete(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	db := newTempDB(t)
 
 	exif := exifData{Make: "F", Model: "X"}
 	if err := insertPhoto(db, "p", "/p", exif, "d", descriptionFields{Subject: "trees"},
@@ -308,12 +323,7 @@ func TestCascadeDelete(t *testing.T) {
 }
 
 func TestFTSPorterStemming(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	db := newTempDB(t)
 
 	exif := exifData{Make: "F"}
 	fields := descriptionFields{Subject: "a forest with many trees"}
@@ -322,10 +332,10 @@ func TestFTSPorterStemming(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// porter should stem "tree" → match "trees"
+	// Postgres English stemmer should match "tree" → "trees"
 	var n int
 	if err := db.QueryRow(
-		"SELECT COUNT(*) FROM descriptions_fts WHERE descriptions_fts MATCH ?", "tree",
+		"SELECT COUNT(*) FROM descriptions WHERE fts @@ plainto_tsquery('english', $1)", "tree",
 	).Scan(&n); err != nil {
 		t.Fatalf("fts query: %v", err)
 	}
@@ -335,12 +345,7 @@ func TestFTSPorterStemming(t *testing.T) {
 }
 
 func TestListExistingNames(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "library.db")
-	db, err := openDB(dbPath)
-	if err != nil {
-		t.Fatalf("openDB: %v", err)
-	}
-	defer db.Close()
+	db := newTempDB(t)
 
 	exif := exifData{Make: "F"}
 	fields := descriptionFields{Subject: "x"}

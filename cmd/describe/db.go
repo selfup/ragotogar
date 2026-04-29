@@ -4,28 +4,26 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3 // Phase 2: Postgres + pgvector
 
-// openDB opens (or creates) the SQLite library at path, runs schema +
-// migrations, and returns a connection with FK enforcement on.
-func openDB(path string) (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return nil, fmt.Errorf("mkdir db dir: %w", err)
-	}
-	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(wal)"
-	db, err := sql.Open("sqlite", dsn)
+// openDB opens a connection to the library Postgres database, applies the
+// schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
+//
+// The vector extension must already be loaded. Run ./scripts/bootstrap.sh
+// on a fresh machine to install Postgres + pgvector and load the extension.
+func openDB(dsn string) (*sql.DB, error) {
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("connect %s: %w", dsn, err)
 	}
 	if err := initSchema(db); err != nil {
 		db.Close()
@@ -35,39 +33,20 @@ func openDB(path string) (*sql.DB, error) {
 }
 
 func initSchema(db *sql.DB) error {
+	// pgvector is required for the chunks table — load it before any
+	// schema DDL so a fresh DB (e.g. test temp database) self-bootstraps.
+	// Trusted-extension flag in pgvector 0.7+ means no superuser needed.
+	if _, err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
+		return fmt.Errorf("load vector extension: %w (run ./scripts/bootstrap.sh on a fresh machine)", err)
+	}
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
-	if err := dropLegacyPathColumns(db); err != nil {
-		return fmt.Errorf("migrate legacy columns: %w", err)
-	}
 	if _, err := db.Exec(
-		"INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, ?)",
-		schemaVersion, time.Now().UTC().Format(time.RFC3339),
+		"INSERT INTO schema_version(version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
+		schemaVersion, time.Now().UTC(),
 	); err != nil {
 		return fmt.Errorf("schema_version row: %w", err)
-	}
-	return nil
-}
-
-// dropLegacyPathColumns removes the slice-1 path columns from `photos` if a
-// previous version of the schema created them. No-op on fresh DBs and on DBs
-// that have already been migrated.
-func dropLegacyPathColumns(db *sql.DB) error {
-	for _, col := range legacyPathCols {
-		var found int
-		if err := db.QueryRow(
-			"SELECT COUNT(*) FROM pragma_table_info('photos') WHERE name = ?",
-			col,
-		).Scan(&found); err != nil {
-			return err
-		}
-		if found == 0 {
-			continue
-		}
-		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE photos DROP COLUMN %s", col)); err != nil {
-			return fmt.Errorf("drop %s: %w", col, err)
-		}
 	}
 	return nil
 }
@@ -95,6 +74,10 @@ func listExistingNames(db *sql.DB) (map[string]bool, error) {
 // insertPhoto writes one describe result across photos / exif / descriptions /
 // inference / thumbnails in a single transaction. UPSERT semantics so re-runs
 // (e.g. with -force) overwrite cleanly.
+//
+// The chunks table is owned by the indexer (tools/index_and_vectorize); a new
+// describe overwrites the photo row but does not touch chunks. Re-running the
+// indexer regenerates chunks from the fresh description.
 func insertPhoto(
 	db *sql.DB,
 	name, srcPath string,
@@ -113,11 +96,11 @@ func insertPhoto(
 
 	if _, err := tx.Exec(`
 		INSERT INTO photos (id, name, file_path, file_basename)
-		VALUES (?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT(id) DO UPDATE SET
-			file_path     = excluded.file_path,
-			file_basename = excluded.file_basename,
-			updated_at    = datetime('now')
+			file_path     = EXCLUDED.file_path,
+			file_basename = EXCLUDED.file_basename,
+			updated_at    = now()
 	`, name, name, srcPath, exif.FileName); err != nil {
 		return fmt.Errorf("upsert photos: %w", err)
 	}
@@ -130,31 +113,31 @@ func insertPhoto(
 			focal_length_mm, focal_length_35mm, f_number, exposure_time_seconds,
 			iso, exposure_compensation, exposure_mode, metering_mode, white_balance, flash,
 			image_width, image_height, gps_latitude, gps_longitude, artist, software
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		ON CONFLICT(photo_id) DO UPDATE SET
-			camera_make           = excluded.camera_make,
-			camera_model          = excluded.camera_model,
-			lens_model            = excluded.lens_model,
-			lens_info             = excluded.lens_info,
-			date_taken            = excluded.date_taken,
-			date_taken_year       = excluded.date_taken_year,
-			date_taken_month      = excluded.date_taken_month,
-			focal_length_mm       = excluded.focal_length_mm,
-			focal_length_35mm     = excluded.focal_length_35mm,
-			f_number              = excluded.f_number,
-			exposure_time_seconds = excluded.exposure_time_seconds,
-			iso                   = excluded.iso,
-			exposure_compensation = excluded.exposure_compensation,
-			exposure_mode         = excluded.exposure_mode,
-			metering_mode         = excluded.metering_mode,
-			white_balance         = excluded.white_balance,
-			flash                 = excluded.flash,
-			image_width           = excluded.image_width,
-			image_height          = excluded.image_height,
-			gps_latitude          = excluded.gps_latitude,
-			gps_longitude         = excluded.gps_longitude,
-			artist                = excluded.artist,
-			software              = excluded.software
+			camera_make           = EXCLUDED.camera_make,
+			camera_model          = EXCLUDED.camera_model,
+			lens_model            = EXCLUDED.lens_model,
+			lens_info             = EXCLUDED.lens_info,
+			date_taken            = EXCLUDED.date_taken,
+			date_taken_year       = EXCLUDED.date_taken_year,
+			date_taken_month      = EXCLUDED.date_taken_month,
+			focal_length_mm       = EXCLUDED.focal_length_mm,
+			focal_length_35mm     = EXCLUDED.focal_length_35mm,
+			f_number              = EXCLUDED.f_number,
+			exposure_time_seconds = EXCLUDED.exposure_time_seconds,
+			iso                   = EXCLUDED.iso,
+			exposure_compensation = EXCLUDED.exposure_compensation,
+			exposure_mode         = EXCLUDED.exposure_mode,
+			metering_mode         = EXCLUDED.metering_mode,
+			white_balance         = EXCLUDED.white_balance,
+			flash                 = EXCLUDED.flash,
+			image_width           = EXCLUDED.image_width,
+			image_height          = EXCLUDED.image_height,
+			gps_latitude          = EXCLUDED.gps_latitude,
+			gps_longitude         = EXCLUDED.gps_longitude,
+			artist                = EXCLUDED.artist,
+			software              = EXCLUDED.software
 	`,
 		name,
 		nullIfEmpty(exif.Make),
@@ -184,14 +167,14 @@ func insertPhoto(
 
 	if _, err := tx.Exec(`
 		INSERT INTO descriptions (photo_id, subject, setting, light, colors, composition, full_description)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT(photo_id) DO UPDATE SET
-			subject          = excluded.subject,
-			setting          = excluded.setting,
-			light            = excluded.light,
-			colors           = excluded.colors,
-			composition      = excluded.composition,
-			full_description = excluded.full_description
+			subject          = EXCLUDED.subject,
+			setting          = EXCLUDED.setting,
+			light            = EXCLUDED.light,
+			colors           = EXCLUDED.colors,
+			composition      = EXCLUDED.composition,
+			full_description = EXCLUDED.full_description
 	`,
 		name,
 		nullIfEmpty(fields.Subject),
@@ -206,23 +189,23 @@ func insertPhoto(
 
 	if _, err := tx.Exec(`
 		INSERT INTO inference (photo_id, raw_response, model, preview_ms, inference_ms, described_at)
-		VALUES (?, NULL, ?, ?, ?, datetime('now'))
+		VALUES ($1, NULL, $2, $3, $4, now())
 		ON CONFLICT(photo_id) DO UPDATE SET
-			model        = excluded.model,
-			preview_ms   = excluded.preview_ms,
-			inference_ms = excluded.inference_ms,
-			described_at = datetime('now')
+			model        = EXCLUDED.model,
+			preview_ms   = EXCLUDED.preview_ms,
+			inference_ms = EXCLUDED.inference_ms,
+			described_at = now()
 	`, name, nullIfEmpty(model), previewMs, inferenceMs); err != nil {
 		return fmt.Errorf("upsert inference: %w", err)
 	}
 
 	if _, err := tx.Exec(`
 		INSERT INTO thumbnails (photo_id, bytes, width, created_at)
-		VALUES (?, ?, ?, datetime('now'))
+		VALUES ($1, $2, $3, now())
 		ON CONFLICT(photo_id) DO UPDATE SET
-			bytes      = excluded.bytes,
-			width      = excluded.width,
-			created_at = datetime('now')
+			bytes      = EXCLUDED.bytes,
+			width      = EXCLUDED.width,
+			created_at = now()
 	`, name, thumbnailBytes, 1024); err != nil {
 		return fmt.Errorf("upsert thumbnails: %w", err)
 	}
@@ -230,31 +213,12 @@ func insertPhoto(
 	return tx.Commit()
 }
 
-// findRepoRoot walks up from cwd looking for a .git directory; returns cwd
-// unchanged if none is found. Lets the default DB path resolve to the repo's
-// tools/.sql_index regardless of where the script invokes us from.
-func findRepoRoot(start string) string {
-	dir := start
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return start
-		}
-		dir = parent
+// defaultDSN reads the LIBRARY_DSN env var, falling back to a local Postgres
+// connection over the default unix socket. Matches what scripts/bootstrap.sh
+// sets up.
+func defaultDSN() string {
+	if v := os.Getenv("LIBRARY_DSN"); v != "" {
+		return v
 	}
-}
-
-// defaultDBPath returns the canonical library.db path resolved from the
-// repo root (via .git lookup) so scripts that cd into cmd/describe still
-// land on tools/.sql_index/library.db.
-func defaultDBPath() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "library.db"
-	}
-	root := findRepoRoot(cwd)
-	return filepath.Join(root, "tools", ".sql_index", "library.db")
+	return "postgres:///ragotogar"
 }
