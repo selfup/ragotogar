@@ -87,10 +87,10 @@ func run(dsn string, reclassify bool, workers int) error {
 	var ok, failed atomic.Int64
 
 	start := time.Now()
-	for i, name := range todo {
+	for _, name := range todo {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(idx int, n string) {
+		go func(n string) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if err := library.ClassifyOne(ctx, db, n, model); err != nil {
@@ -99,10 +99,8 @@ func run(dsn string, reclassify bool, workers int) error {
 				return
 			}
 			ord := ok.Add(1)
-			if ord%10 == 0 || int(ord)+int(failed.Load()) == len(todo) {
-				fmt.Printf("  [%d/%d] last: %s\n", idx+1, len(todo), n)
-			}
-		}(i, name)
+			fmt.Printf("  [%d/%d done] %s\n", ord, len(todo), n)
+		}(name)
 	}
 	wg.Wait()
 	fmt.Printf("\nDone. Classified: %d, Errors: %d, Elapsed: %s\n",

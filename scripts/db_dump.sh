@@ -25,7 +25,9 @@ echo "==> dumping $DB_NAME → $OUT"
 pg_dump -Fc -d "$DB_NAME" -f "$OUT"
 
 SIZE=$(du -h "$OUT" | awk '{print $1}')
-TABLES=$(pg_restore --list "$OUT" 2>/dev/null | awk '$2=="TABLE" && $3=="DATA" {n++} END {print n+0}')
+# Count populated tables. pg_dump emits both a TABLE entry (schema) and a
+# TABLE DATA entry (rows) per table; "TABLE DATA" is the row-bearing one.
+TABLES=$(pg_restore --list "$OUT" 2>/dev/null | grep -c "TABLE DATA")
 
 echo "==> done"
 echo "    file:   $OUT"

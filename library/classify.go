@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -11,6 +12,30 @@ import (
 
 	"github.com/lib/pq"
 )
+
+// jsonErrorContext extracts the byte offset from a json.SyntaxError and
+// returns a short context window around it so operators can see exactly
+// what the model emitted. Returns "" when err isn't a SyntaxError or the
+// offset is out of bounds. Output begins with " at byte N:\n…" so the
+// caller can format it directly into its error wrap.
+func jsonErrorContext(err error, body string) string {
+	var se *json.SyntaxError
+	if !errors.As(err, &se) {
+		return ""
+	}
+	off := int(se.Offset)
+	if off < 0 || off > len(body) {
+		return ""
+	}
+	const radius = 60
+	start := max(0, off-radius)
+	end := min(len(body), off+radius)
+	snippet := body[start:end]
+	// Replace newlines with spaces so the pointer line aligns visually.
+	snippet = strings.ReplaceAll(snippet, "\n", " ")
+	pointer := strings.Repeat(" ", off-start) + "^"
+	return fmt.Sprintf(" at byte %d:\n  %s\n  %s", off, snippet, pointer)
+}
 
 // Classification mirrors the classified table columns. Pointer types on
 // scalar fields let us distinguish "model didn't return this field" (nil →
@@ -104,7 +129,7 @@ func ParseClassifyResponse(raw string) (Classification, error) {
 	body = stripLineComments(body)
 	var m map[string]any
 	if err := json.Unmarshal([]byte(body), &m); err != nil {
-		return Classification{}, fmt.Errorf("decode classification JSON: %w (body: %s)", err, truncate(body, 200))
+		return Classification{}, fmt.Errorf("decode classification JSON: %w%s", err, jsonErrorContext(err, body))
 	}
 	return Classification{
 		POVContainer:       coerceString(m["pov_container"]),
@@ -382,7 +407,7 @@ func ClassifyOne(ctx context.Context, db *sql.DB, name, model string) error {
 	}
 	c, err := ParseClassifyResponse(raw)
 	if err != nil {
-		return fmt.Errorf("parse: %w (raw: %s)", err, truncate(raw, 400))
+		return fmt.Errorf("parse: %w", err)
 	}
 	c = ValidateClassification(c)
 	if err := UpsertClassified(db, name, c, model); err != nil {

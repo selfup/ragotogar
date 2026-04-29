@@ -321,6 +321,30 @@ func TestParseClassifyResponseStripsCommentsBeforeDecode(t *testing.T) {
 	}
 }
 
+func TestParseClassifyResponseShowsByteOffsetContextOnSyntaxError(t *testing.T) {
+	// Mid-JSON garbage character — exactly the shape we saw from Ministral
+	// in the wild (a stray "?" between key/value pairs).
+	raw := `{
+  "pov_container": "fixed_camera",
+  "pov_altitude": "ground" ?
+  "pov_angle": "eye_level"
+}`
+	_, err := ParseClassifyResponse(raw)
+	if err == nil {
+		t.Fatal("expected parse error, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "at byte ") {
+		t.Errorf("error should include byte offset:\n%s", msg)
+	}
+	if !strings.Contains(msg, "?") {
+		t.Errorf("error context should include the offending '?' character:\n%s", msg)
+	}
+	if !strings.Contains(msg, "^") {
+		t.Errorf("error should include a ^ pointer line:\n%s", msg)
+	}
+}
+
 func TestExtractJSONObjectVariants(t *testing.T) {
 	cases := []struct {
 		name string
