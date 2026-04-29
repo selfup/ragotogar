@@ -88,15 +88,17 @@ Respond with a single JSON object — keys are the field names above, values are
 
 // ParseResponse extracts the JSON object from a raw LLM response and decodes
 // it leniently. Tolerates: leading/trailing prose, ```json``` code fences,
-// scalar fields returned as numbers (animal_count: 0), and scalar fields
-// returned as single-element arrays (color_palette: ["cool"]). The 3B
-// classifier model emits these shapes a few percent of the time on long
-// schemas — too noisy to drop the row, too easy to coerce here.
+// JS-style // line comments inside the JSON, scalar fields returned as
+// numbers (animal_count: 0), and scalar fields returned as single-element
+// arrays (color_palette: ["cool"]). The 3B classifier model emits these
+// shapes a few percent of the time on long schemas — too noisy to drop the
+// row, too easy to repair here.
 func ParseResponse(raw string) (Classification, error) {
 	body := extractJSONObject(raw)
 	if body == "" {
 		return Classification{}, fmt.Errorf("no JSON object found in response: %s", truncate(raw, 200))
 	}
+	body = stripLineComments(body)
 	var m map[string]any
 	if err := json.Unmarshal([]byte(body), &m); err != nil {
 		return Classification{}, fmt.Errorf("decode classification JSON: %w (body: %s)", err, truncate(body, 200))
@@ -172,6 +174,56 @@ func coerceStringSlice(v any) []string {
 		return out
 	}
 	return nil
+}
+
+// stripLineComments removes // ... \n comments from JSON without disturbing
+// // sequences that appear inside string values (e.g. "http://example.com").
+// Tracks string and escape state with a simple scanner. Block comments
+// (/* … */) aren't handled — Ministral hasn't been observed emitting them.
+func stripLineComments(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inString := false
+	escape := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			b.WriteByte(c)
+			escape = false
+			continue
+		}
+		if inString {
+			if c == '\\' {
+				b.WriteByte(c)
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			b.WriteByte(c)
+			continue
+		}
+		if c == '"' {
+			inString = true
+			b.WriteByte(c)
+			continue
+		}
+		// outside string: detect "//" and skip to (not including) newline,
+		// so the line ending stays in the output and JSON line numbers in
+		// any later error message still line up.
+		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			if i < len(s) {
+				b.WriteByte(s[i])
+			}
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // extractJSONObject finds the substring from the first '{' to the matching

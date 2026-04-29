@@ -256,6 +256,71 @@ func TestValidateAllInvalidArrayBecomesNil(t *testing.T) {
 	}
 }
 
+func TestStripLineComments(t *testing.T) {
+	cases := []struct {
+		name     string
+		in, want string
+	}{
+		{
+			name: "trailing comment after value",
+			in:   "{\n  \"a\": 1,  // explanation here\n  \"b\": 2\n}",
+			want: "{\n  \"a\": 1,  \n  \"b\": 2\n}",
+		},
+		{
+			name: "comment after array",
+			in:   "{\"framing\": [\"x\"], // unsure if this applies\n \"motion\": \"static\"}",
+			want: "{\"framing\": [\"x\"], \n \"motion\": \"static\"}",
+		},
+		{
+			name: "double-slash inside string is preserved",
+			in:   `{"url": "http://example.com/x"}`,
+			want: `{"url": "http://example.com/x"}`,
+		},
+		{
+			name: "escaped quote then comment-like text in string preserved",
+			in:   `{"x": "she said \"//\""}`,
+			want: `{"x": "she said \"//\""}`,
+		},
+		{
+			name: "no comments — passthrough",
+			in:   `{"a": 1, "b": [1, 2]}`,
+			want: `{"a": 1, "b": [1, 2]}`,
+		},
+		{
+			name: "comment at end of string with no trailing newline",
+			in:   `{"a": 1} // tail`,
+			want: `{"a": 1} `,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripLineComments(tc.in); got != tc.want {
+				t.Errorf("\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseResponseStripsCommentsBeforeDecode(t *testing.T) {
+	// Real failing payload shape from Ministral
+	raw := "```json\n{\n" +
+		`  "pov_container": "handheld",` + "\n" +
+		`  "framing": ["unobstructed"],` + "\n" +
+		`  "motion": "camera_moving",  // shallow DOF implies slight movement` + "\n" +
+		`  "color_palette": "warm"` + "\n" +
+		"}\n```"
+	c, err := ParseResponse(raw)
+	if err != nil {
+		t.Fatalf("expected ParseResponse to succeed after stripping //, got: %v", err)
+	}
+	if c.POVContainer == nil || *c.POVContainer != "handheld" {
+		t.Errorf("pov_container: got %v", c.POVContainer)
+	}
+	if c.Motion == nil || *c.Motion != "camera_moving" {
+		t.Errorf("motion: got %v", c.Motion)
+	}
+}
+
 func TestExtractJSONObjectVariants(t *testing.T) {
 	cases := []struct {
 		name string

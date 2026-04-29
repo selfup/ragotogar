@@ -154,6 +154,9 @@ func classifyOne(ctx context.Context, db *sql.DB, name, model string) error {
 	}
 	c, err := ParseResponse(raw)
 	if err != nil {
+		// Dump the full raw body to stderr — the wrapped error truncates,
+		// but for diagnosing classifier-output bugs we want everything.
+		fmt.Fprintf(os.Stderr, "  [classifier raw output for %s]\n%s\n  [end raw]\n", name, raw)
 		return fmt.Errorf("parse: %w", err)
 	}
 	c = Validate(c)
