@@ -116,10 +116,14 @@ brew services start postgresql@18
 # vision and text inference are sequential within a worker — no LM Studio
 # model contention. Classify failures are logged but don't fail the photo;
 # the standalone classify pass below catches anything that slipped through.
+# Honor an outer LM_MODEL if the caller set one, otherwise default to gemma.
+# The previous form (LM_MODEL=foo cmd ...) silently shadowed any outer value
+# the user exported on the same line — e.g. `LM_MODEL=ministral ./full_run.sh`
+# would still see gemma. ${LM_MODEL:-gemma-4-31b-it} fixes that.
 for d in "${DIRS[@]}"; do
     echo "=== describe + classify: $d ==="
     # shellcheck disable=SC2086 # word-split intentional — flags don't contain spaces
-    LM_MODEL=gemma-4-31b-it ./scripts/photo_describe.sh $describe_force -classify --preview-workers 8 --inference-workers 2 "$d"
+    LM_MODEL="${LM_MODEL:-gemma-4-31b-it}" ./scripts/photo_describe.sh $describe_force -classify --preview-workers 8 --inference-workers 2 "$d"
 done
 
 # Safety-net catch-up: run cmd/classify standalone for any photo whose inline
