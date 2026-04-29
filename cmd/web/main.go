@@ -62,8 +62,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid -repo: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(absRepo, "scripts", "search.sh")); err != nil {
-		log.Fatalf("search.sh not found under %s/scripts: %v", absRepo, err)
+	if _, err := os.Stat(filepath.Join(absRepo, "styles.css")); err != nil {
+		log.Fatalf("styles.css not found at %s: %v", absRepo, err)
 	}
 
 	db, err := sql.Open("pgx", *dsn)
@@ -88,7 +88,7 @@ func main() {
 		mode := resolveMode(r.URL.Query().Get("mode"))
 		var results []result
 		if q != "" {
-			results = search(db, q, mode, absRepo)
+			results = search(db, q, mode)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := indexTmpl.Execute(w, pageData{Q: q, Mode: mode, Results: results}); err != nil {
@@ -98,8 +98,8 @@ func main() {
 	mux.HandleFunc("/photos/", func(w http.ResponseWriter, r *http.Request) {
 		// Both /photos/<name> (HTML) and /photos/<name>.jpg (BLOB) live here.
 		path := strings.TrimPrefix(r.URL.Path, "/photos/")
-		if strings.HasSuffix(path, ".jpg") {
-			servePhotoJPG(w, r, db, strings.TrimSuffix(path, ".jpg"))
+		if before, ok := strings.CutSuffix(path, ".jpg"); ok {
+			servePhotoJPG(w, r, db, before)
 			return
 		}
 		servePhotoHTML(w, r, db, photoTmpl, path)

@@ -140,9 +140,9 @@ func dateTakenToExifString(iso string) string {
 	if iso == "" {
 		return ""
 	}
-	if i := strings.Index(iso, "T"); i >= 0 {
-		date := strings.ReplaceAll(iso[:i], "-", ":")
-		return date + " " + iso[i+1:]
+	if before, after, ok := strings.Cut(iso, "T"); ok {
+		date := strings.ReplaceAll(before, "-", ":")
+		return date + " " + after
 	}
 	return strings.ReplaceAll(iso, "-", ":")
 }

@@ -23,10 +23,7 @@ func Chunk(text string) []string {
 	step := ChunkChars - ChunkOverlap
 	var chunks []string
 	for start := 0; start < len(text); start += step {
-		end := start + ChunkChars
-		if end > len(text) {
-			end = len(text)
-		}
+		end := min(start+ChunkChars, len(text))
 		chunks = append(chunks, text[start:end])
 		if end >= len(text) {
 			break

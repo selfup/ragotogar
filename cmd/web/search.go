@@ -1,72 +1,61 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
-	"strings"
+
+	"ragotogar/internal/library"
 )
 
-// matches "  [N] <path>" lines printed by tools/search.py print_sources()
-var searchLineRE = regexp.MustCompile(`^\s*\[(\d+)\]\s+(.+)$`)
-
-// search shells out to scripts/search.sh (cmd/search) and returns results
-// that exist in the SQL library. Order is preserved from the search output
-// (vector retrieval order, highest similarity first).
+// search runs the vector retrieval (and optional verify) pipeline against
+// the library directly via library.Searcher — no exec, no shell, no go run
+// per request. Mode "naive-verify" composes the verify pass; everything
+// else is plain top-500 retrieval at cosine ≥ 0.5.
 //
-// Mode "naive-verify" composes -retrieve -verify so an LLM yes/no check
-// runs on each candidate; only YES matches survive. Other modes map to
-// plain -retrieve since pgvector doesn't have graph/hybrid concepts.
-func search(db *sql.DB, query, mode, repoRoot string) []result {
-	args := []string{"-retrieve"}
-	if mode == "naive-verify" {
-		args = append(args, "-verify")
-	}
-	args = append(args, query)
+// "graph" and "hybrid" pills are kept in the UI for backward compatibility
+// with bookmarks/links from the LightRAG era; they map to the same vector
+// path here since pgvector has no graph-aware modes.
+func search(db *sql.DB, query, mode string) []result {
+	ctx := context.Background()
+	searcher := library.NewSearcher(db)
 
-	cmd := exec.Command("./scripts/search.sh", args...)
-	cmd.Dir = repoRoot
-	// Pass stderr through to the server's terminal so progress/debug output
-	// from search.py (e.g. per-photo verify verdicts) is visible.
-	cmd.Stderr = os.Stderr
+	threshold := library.CosineThreshold
+	opts := library.SearchOptions{
+		TopK:      library.StrictTopK,
+		Threshold: &threshold,
+	}
+
 	fmt.Fprintf(os.Stderr, "search: q=%q mode=%s\n", query, mode)
-	out, err := cmd.Output()
+
+	candidates, err := searcher.Search(ctx, query, opts)
 	if err != nil {
 		log.Printf("search %q (mode=%s): %v", query, mode, err)
 		return nil
 	}
-	var results []result
-	for _, name := range parseSearchOutput(string(out)) {
-		if !photoExists(db, name) {
-			continue
+
+	var names []string
+	if mode == "naive-verify" && len(candidates) > 0 {
+		fmt.Fprintf(os.Stderr, "\n--- Verifying %d candidate(s) with LLM ---\n", len(candidates))
+		verdicts, err := searcher.VerifyFilter(ctx, query, candidates)
+		if err != nil {
+			log.Printf("verify %q: %v", query, err)
+			return nil
 		}
+		library.LogVerdicts(os.Stderr, verdicts)
+		names = library.KeptNames(verdicts)
+	} else {
+		names = make([]string, len(candidates))
+		for i, c := range candidates {
+			names[i] = c.Name
+		}
+	}
+
+	results := make([]result, 0, len(names))
+	for _, name := range names {
 		results = append(results, result{Name: name})
 	}
 	return results
-}
-
-// parseSearchOutput extracts unique photo basenames (without extension) from
-// the stdout of tools/search.sh --retrieve, preserving retrieval order.
-func parseSearchOutput(out string) []string {
-	seen := make(map[string]bool)
-	var names []string
-	for line := range strings.SplitSeq(out, "\n") {
-		m := searchLineRE.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		path := strings.TrimSpace(m[2])
-		base := filepath.Base(path)
-		name := strings.TrimSuffix(base, filepath.Ext(base))
-		if name == "" || seen[name] {
-			continue
-		}
-		seen[name] = true
-		names = append(names, name)
-	}
-	return names
 }
