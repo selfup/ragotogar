@@ -113,6 +113,13 @@ func BuildDocument(p *Photo) string {
 		w("Photographer: " + p.Artist)
 	}
 
+	if p.Vantage != "" {
+		w("Vantage: " + p.Vantage)
+	}
+	if p.GroundTruth != "" {
+		w("Ground truth: " + p.GroundTruth)
+	}
+
 	if p.FullDescription != "" {
 		w("")
 		w(p.FullDescription)

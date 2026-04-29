@@ -35,6 +35,7 @@ CREATE TABLE exif (
 CREATE TABLE descriptions (
     photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
     subject TEXT, setting TEXT, light TEXT, colors TEXT, composition TEXT,
+    vantage TEXT, ground_truth TEXT,
     full_description TEXT
 );
 CREATE TABLE thumbnails (

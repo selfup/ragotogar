@@ -36,6 +36,8 @@ type Photo struct {
 	Light           string
 	Colors          string
 	Composition     string
+	Vantage         string
+	GroundTruth     string
 	FullDescription string
 }
 
@@ -44,12 +46,12 @@ type Photo struct {
 func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	var p Photo
 	var (
-		make_, model, lensModel, lensInfo                              sql.NullString
-		dateTaken, exposureMode, whiteBalance, flash, software, artist sql.NullString
-		subject, setting, light, colors, composition, fullDesc         sql.NullString
-		focalMM, focal35, fnum, shutter, ec                            sql.NullFloat64
-		iso                                                            sql.NullInt64
-		fileBasename                                                   sql.NullString
+		make_, model, lensModel, lensInfo                                       sql.NullString
+		dateTaken, exposureMode, whiteBalance, flash, software, artist          sql.NullString
+		subject, setting, light, colors, composition, vantage, gt, fullDesc     sql.NullString
+		focalMM, focal35, fnum, shutter, ec                                     sql.NullFloat64
+		iso                                                                     sql.NullInt64
+		fileBasename                                                            sql.NullString
 	)
 	err := db.QueryRow(`
 		SELECT p.name, p.file_basename,
@@ -57,7 +59,8 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		       e.date_taken, e.focal_length_mm, e.focal_length_35mm,
 		       e.f_number, e.exposure_time_seconds, e.iso, e.exposure_compensation,
 		       e.exposure_mode, e.white_balance, e.flash, e.software, e.artist,
-		       d.subject, d.setting, d.light, d.colors, d.composition, d.full_description
+		       d.subject, d.setting, d.light, d.colors, d.composition,
+		       d.vantage, d.ground_truth, d.full_description
 		FROM photos p
 		LEFT JOIN exif e         ON p.id = e.photo_id
 		LEFT JOIN descriptions d ON p.id = d.photo_id
@@ -68,7 +71,7 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		&dateTaken, &focalMM, &focal35,
 		&fnum, &shutter, &iso, &ec,
 		&exposureMode, &whiteBalance, &flash, &software, &artist,
-		&subject, &setting, &light, &colors, &composition, &fullDesc,
+		&subject, &setting, &light, &colors, &composition, &vantage, &gt, &fullDesc,
 	)
 	if err != nil {
 		return nil, err
@@ -114,6 +117,8 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	p.Light = light.String
 	p.Colors = colors.String
 	p.Composition = composition.String
+	p.Vantage = vantage.String
+	p.GroundTruth = gt.String
 	p.FullDescription = fullDesc.String
 
 	return &p, nil

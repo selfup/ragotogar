@@ -110,6 +110,44 @@ Composition: low angle, shallow DOF`,
 				Composition: "low angle, shallow DOF",
 			},
 		},
+		{
+			name: "all seven fields including vantage and ground truth",
+			in: `Subject: a man at the gate
+Setting: airport terminal, indoor
+Light: overhead fluorescent, suggests midday
+Colors: greys, blues
+Composition: medium distance, eye level
+Vantage: handheld from inside the terminal, shooting through the boarding area window toward parked aircraft
+Ground truth: one person visible, no animals, subject is static`,
+			want: descriptionFields{
+				Subject:     "a man at the gate",
+				Setting:     "airport terminal, indoor",
+				Light:       "overhead fluorescent, suggests midday",
+				Colors:      "greys, blues",
+				Composition: "medium distance, eye level",
+				Vantage:     "handheld from inside the terminal, shooting through the boarding area window toward parked aircraft",
+				GroundTruth: "one person visible, no animals, subject is static",
+			},
+		},
+		{
+			name: "vantage and ground truth with bold markers and list dash",
+			in: `- **Subject:** a kitchen table
+- **Setting:** indoor kitchen, residential
+- **Light:** window from the right, daytime, clear weather
+- **Colors:** warm wood tones, white
+- **Composition:** eye level, close distance
+- **Vantage:** handheld at table height
+- **Ground truth:** no people, no animals, static`,
+			want: descriptionFields{
+				Subject:     "a kitchen table",
+				Setting:     "indoor kitchen, residential",
+				Light:       "window from the right, daytime, clear weather",
+				Colors:      "warm wood tones, white",
+				Composition: "eye level, close distance",
+				Vantage:     "handheld at table height",
+				GroundTruth: "no people, no animals, static",
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -129,6 +167,12 @@ Composition: low angle, shallow DOF`,
 			}
 			if got.Composition != tc.want.Composition {
 				t.Errorf("Composition mismatch:\n  got:  %q\n  want: %q", got.Composition, tc.want.Composition)
+			}
+			if got.Vantage != tc.want.Vantage {
+				t.Errorf("Vantage mismatch:\n  got:  %q\n  want: %q", got.Vantage, tc.want.Vantage)
+			}
+			if got.GroundTruth != tc.want.GroundTruth {
+				t.Errorf("GroundTruth mismatch:\n  got:  %q\n  want: %q", got.GroundTruth, tc.want.GroundTruth)
 			}
 		})
 	}

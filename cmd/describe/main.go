@@ -354,7 +354,7 @@ func describeWithRetry(cfg config, b64, exif string) (string, error) {
 }
 
 func describeImage(cfg config, b64, exif string) (string, error) {
-	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame\n- Setting: specific location type, surfaces, objects\n- Light: direction, color, source (window/lamp/sun/etc)\n- Colors: dominant palette\n- Composition: framing, angle, depth of field\n\nCamera metadata for context:\n" + exif
+	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame\n- Setting: specific location type, surfaces, objects; explicitly note indoor or outdoor\n- Light: direction, color, source (window/lamp/sun/etc); time of day suggested; weather (clear, overcast, rain, snow, fog)\n- Colors: dominant palette\n- Composition: framing, camera angle (eye level, looking up, looking down), depth of field, distance to the main subject\n- Vantage: where the camera is physically located. Is the photographer on the ground, elevated (balcony, rooftop, hill), inside a vehicle, inside a plane, on a drone, or shooting through a window/foliage/fence? If from a plane, is it on the ground or in flight? If from a vehicle, moving or stopped? Use 'unclear' if there is no evidence either way.\n- Ground truth: how many people are visible (none / one / two / a few / a group / a crowd); how many animals; is anything in motion (subject moving, camera moving, both, or static).\n\nCamera metadata for context:\n" + exif
 
 	sessionID := fmt.Sprintf("photo-describe-%d-%d", time.Now().UnixNano(), rand.Int64())
 
@@ -727,18 +727,26 @@ type descriptionFields struct {
 	Light       string `json:"light"`
 	Colors      string `json:"colors"`
 	Composition string `json:"composition"`
+	Vantage     string `json:"vantage"`
+	GroundTruth string `json:"ground_truth"`
 }
 
 // parseDescriptionFields extracts structured sections from the model output.
 // The model is prompted to use "Subject:", "Setting:", etc. headers.
+//
+// "ground truth" must precede "ground" (no overlap currently, but keep this
+// in mind if more keys are added) — the parser walks the map in unspecified
+// order, so any prefix collision needs to be resolved by avoiding overlap.
 func parseDescriptionFields(description string) descriptionFields {
 	fields := descriptionFields{}
 	sections := map[string]*string{
-		"subject":     &fields.Subject,
-		"setting":     &fields.Setting,
-		"light":       &fields.Light,
-		"colors":      &fields.Colors,
-		"composition": &fields.Composition,
+		"subject":      &fields.Subject,
+		"setting":      &fields.Setting,
+		"light":        &fields.Light,
+		"colors":       &fields.Colors,
+		"composition":  &fields.Composition,
+		"vantage":      &fields.Vantage,
+		"ground truth": &fields.GroundTruth,
 	}
 
 	lines := strings.Split(description, "\n")

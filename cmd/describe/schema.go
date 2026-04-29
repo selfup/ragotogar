@@ -15,6 +15,10 @@ package main
 //
 //   createdb ragotogar
 //   psql ragotogar -c 'CREATE EXTENSION vector'
+//
+// v4 adds descriptions.vantage and descriptions.ground_truth — prose fields
+// describing the camera POV and visible counts. Both feed the generated fts
+// column so keyword search hits "from a balcony" / "two people" queries.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -75,6 +79,8 @@ CREATE TABLE IF NOT EXISTS descriptions (
     light             TEXT,
     colors            TEXT,
     composition       TEXT,
+    vantage           TEXT,
+    ground_truth      TEXT,
     full_description  TEXT,
     fts               tsvector GENERATED ALWAYS AS (
                         to_tsvector('english',
@@ -83,6 +89,8 @@ CREATE TABLE IF NOT EXISTS descriptions (
                           coalesce(light,'')            || ' ' ||
                           coalesce(colors,'')           || ' ' ||
                           coalesce(composition,'')      || ' ' ||
+                          coalesce(vantage,'')          || ' ' ||
+                          coalesce(ground_truth,'')     || ' ' ||
                           coalesce(full_description,''))
                       ) STORED
 );
