@@ -1,11 +1,15 @@
-package main
+package library
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/lib/pq"
 )
 
 // Classification mirrors the classified table columns. Pointer types on
@@ -18,7 +22,7 @@ type Classification struct {
 	POVAngle           *string  `json:"pov_angle"`
 	SubjectAltitude    *string  `json:"subject_altitude"`
 	SubjectCategory    []string `json:"subject_category"`
-	SubjectDistance    *string  `json:"subject_distance"`
+	SubjectDistance   *string   `json:"subject_distance"`
 	SubjectCount       *string  `json:"subject_count"`
 	AnimalCount        *string  `json:"animal_count"`
 	SceneTimeOfDay     *string  `json:"scene_time_of_day"`
@@ -53,10 +57,10 @@ var AllowedArray = map[string][]string{
 	"framing":          {"through_window", "through_door", "through_foliage", "through_fence", "through_glass", "unobstructed", "unclear"},
 }
 
-// BuildPrompt formats the classifier instruction with the photo description
-// substituted in. The schema lines mirror the column definitions in
-// cmd/describe/schema.go — keep them in sync.
-func BuildPrompt(description string) string {
+// BuildClassifyPrompt formats the classifier instruction with the photo
+// description substituted in. The schema lines mirror the column definitions
+// in cmd/describe/schema.go — keep them in sync.
+func BuildClassifyPrompt(description string) string {
 	var b strings.Builder
 	b.WriteString(`You map a photo description to typed enum fields. Read carefully. For each field, return the value that best matches the description. Use "unclear" if the description does not provide enough information — DO NOT guess. Some fields take an array of values (multiple may apply).
 
@@ -86,14 +90,13 @@ Respond with a single JSON object — keys are the field names above, values are
 	return b.String()
 }
 
-// ParseResponse extracts the JSON object from a raw LLM response and decodes
-// it leniently. Tolerates: leading/trailing prose, ```json``` code fences,
-// JS-style // line comments inside the JSON, scalar fields returned as
-// numbers (animal_count: 0), and scalar fields returned as single-element
+// ParseClassifyResponse extracts the JSON object from a raw LLM response and
+// decodes it leniently. Tolerates: leading/trailing prose, ```json``` code
+// fences, JS-style // line comments inside the JSON, scalar fields returned
+// as numbers (animal_count: 0), and scalar fields returned as single-element
 // arrays (color_palette: ["cool"]). The 3B classifier model emits these
-// shapes a few percent of the time on long schemas — too noisy to drop the
-// row, too easy to repair here.
-func ParseResponse(raw string) (Classification, error) {
+// shapes a few percent of the time on long schemas.
+func ParseClassifyResponse(raw string) (Classification, error) {
 	body := extractJSONObject(raw)
 	if body == "" {
 		return Classification{}, fmt.Errorf("no JSON object found in response: %s", truncate(raw, 200))
@@ -119,61 +122,6 @@ func ParseResponse(raw string) (Classification, error) {
 		Motion:             coerceString(m["motion"]),
 		ColorPalette:       coerceString(m["color_palette"]),
 	}, nil
-}
-
-// coerceString accepts a JSON value (string, number, bool, single-element
-// array, or null) and returns a *string. Non-coercible types yield nil.
-// Used so a model-emitted "animal_count": 0 or "color_palette": ["cool"]
-// don't sink the whole row.
-func coerceString(v any) *string {
-	if v == nil {
-		return nil
-	}
-	switch t := v.(type) {
-	case string:
-		s := t
-		return &s
-	case float64:
-		// JSON numbers decode to float64. Render integers without trailing
-		// ".0" so "0" stays "0" not "0.0" — matters for the count enums.
-		s := strconv.FormatFloat(t, 'f', -1, 64)
-		return &s
-	case bool:
-		s := strconv.FormatBool(t)
-		return &s
-	case []any:
-		if len(t) == 0 {
-			return nil
-		}
-		// take first element — same coercion recursively
-		return coerceString(t[0])
-	}
-	return nil
-}
-
-// coerceStringSlice accepts a JSON value and returns []string. Tolerates a
-// bare string (wrap in 1-element slice), an array of strings (use as-is),
-// or an array of mixed types (skip non-strings).
-func coerceStringSlice(v any) []string {
-	if v == nil {
-		return nil
-	}
-	switch t := v.(type) {
-	case string:
-		if t == "" {
-			return nil
-		}
-		return []string{t}
-	case []any:
-		var out []string
-		for _, item := range t {
-			if s, ok := item.(string); ok && s != "" {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	return nil
 }
 
 // stripLineComments removes // ... \n comments from JSON without disturbing
@@ -209,9 +157,6 @@ func stripLineComments(s string) string {
 			b.WriteByte(c)
 			continue
 		}
-		// outside string: detect "//" and skip to (not including) newline,
-		// so the line ending stays in the output and JSON line numbers in
-		// any later error message still line up.
 		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
 			for i < len(s) && s[i] != '\n' {
 				i++
@@ -238,11 +183,62 @@ func extractJSONObject(raw string) string {
 	return raw[start : end+1]
 }
 
-// Validate filters Classification through the AllowedScalar / AllowedArray
-// sets. Scalar values not in the allowed set become nil (NULL in DB). Array
-// values not in the allowed set are dropped from the slice. Empty arrays
-// after filtering are returned as nil so they land as NULL rather than {}.
-func Validate(c Classification) Classification {
+// coerceString accepts a JSON value and returns *string. Non-coercible types
+// yield nil. Used so a model-emitted "animal_count": 0 or "color_palette":
+// ["cool"] don't sink the whole row.
+func coerceString(v any) *string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case string:
+		s := t
+		return &s
+	case float64:
+		s := strconv.FormatFloat(t, 'f', -1, 64)
+		return &s
+	case bool:
+		s := strconv.FormatBool(t)
+		return &s
+	case []any:
+		if len(t) == 0 {
+			return nil
+		}
+		return coerceString(t[0])
+	}
+	return nil
+}
+
+// coerceStringSlice accepts a JSON value and returns []string. Tolerates a
+// bare string (wrap in 1-element slice), an array of strings, or an array of
+// mixed types (skip non-strings).
+func coerceStringSlice(v any) []string {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case string:
+		if t == "" {
+			return nil
+		}
+		return []string{t}
+	case []any:
+		var out []string
+		for _, item := range t {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// ValidateClassification filters Classification through the AllowedScalar /
+// AllowedArray sets. Scalar values not in the allowed set become nil (NULL
+// in DB). Array values not in the allowed set are dropped from the slice.
+// Empty arrays after filtering are returned as nil.
+func ValidateClassification(c Classification) Classification {
 	c.POVContainer = filterScalar(c.POVContainer, AllowedScalar["pov_container"])
 	c.POVAltitude = filterScalar(c.POVAltitude, AllowedScalar["pov_altitude"])
 	c.POVAngle = filterScalar(c.POVAngle, AllowedScalar["pov_angle"])
@@ -290,9 +286,107 @@ func filterArray(values, allowed []string) []string {
 	return kept
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+// LoadClassifyInput concatenates the structured prose fields the describer
+// wrote, falling back to full_description if the structured fields are all
+// empty. Used as the LLM input for classification.
+func LoadClassifyInput(db *sql.DB, name string) (string, error) {
+	var subject, setting, light, colors, composition, vantage, gt, full sql.NullString
+	err := db.QueryRow(`
+		SELECT subject, setting, light, colors, composition, vantage, ground_truth, full_description
+		FROM descriptions WHERE photo_id = $1
+	`, name).Scan(&subject, &setting, &light, &colors, &composition, &vantage, &gt, &full)
+	if err != nil {
+		return "", err
 	}
-	return s[:n] + "..."
+	parts := []struct{ k, v string }{
+		{"Subject", subject.String},
+		{"Setting", setting.String},
+		{"Light", light.String},
+		{"Colors", colors.String},
+		{"Composition", composition.String},
+		{"Vantage", vantage.String},
+		{"Ground truth", gt.String},
+	}
+	var lines []string
+	for _, p := range parts {
+		if p.v != "" {
+			lines = append(lines, p.k+": "+p.v)
+		}
+	}
+	if len(lines) > 0 {
+		return strings.Join(lines, "\n"), nil
+	}
+	return full.String, nil
+}
+
+// UpsertClassified writes one classification row. Arrays use pq.Array so
+// pgx accepts the TEXT[] shape correctly.
+func UpsertClassified(db *sql.DB, name string, c Classification, model string) error {
+	_, err := db.Exec(`
+		INSERT INTO classified (
+			photo_id,
+			pov_container, pov_altitude, pov_angle,
+			subject_altitude, subject_category, subject_distance,
+			subject_count, animal_count,
+			scene_time_of_day, scene_indoor_outdoor, scene_weather,
+			framing, motion, color_palette,
+			classified_at, classifier_model
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now(), $16
+		)
+		ON CONFLICT(photo_id) DO UPDATE SET
+			pov_container        = EXCLUDED.pov_container,
+			pov_altitude         = EXCLUDED.pov_altitude,
+			pov_angle            = EXCLUDED.pov_angle,
+			subject_altitude     = EXCLUDED.subject_altitude,
+			subject_category     = EXCLUDED.subject_category,
+			subject_distance     = EXCLUDED.subject_distance,
+			subject_count        = EXCLUDED.subject_count,
+			animal_count         = EXCLUDED.animal_count,
+			scene_time_of_day    = EXCLUDED.scene_time_of_day,
+			scene_indoor_outdoor = EXCLUDED.scene_indoor_outdoor,
+			scene_weather        = EXCLUDED.scene_weather,
+			framing              = EXCLUDED.framing,
+			motion               = EXCLUDED.motion,
+			color_palette        = EXCLUDED.color_palette,
+			classified_at        = now(),
+			classifier_model     = EXCLUDED.classifier_model
+	`,
+		name,
+		c.POVContainer, c.POVAltitude, c.POVAngle,
+		c.SubjectAltitude, pq.Array(c.SubjectCategory), c.SubjectDistance,
+		c.SubjectCount, c.AnimalCount,
+		c.SceneTimeOfDay, c.SceneIndoorOutdoor, c.SceneWeather,
+		pq.Array(c.Framing), c.Motion, c.ColorPalette,
+		model,
+	)
+	return err
+}
+
+// ClassifyOne is the all-in-one classifier entry point: load the photo's
+// prose, call the LLM, parse + validate the response, UPSERT the row.
+// Returns nil on success, an error otherwise — callers decide whether a
+// classify failure should propagate (cmd/classify standalone) or be logged
+// and swallowed (cmd/describe inline mode).
+func ClassifyOne(ctx context.Context, db *sql.DB, name, model string) error {
+	doc, err := LoadClassifyInput(db, name)
+	if err != nil {
+		return fmt.Errorf("load: %w", err)
+	}
+	if doc == "" {
+		return fmt.Errorf("empty description")
+	}
+	raw, err := LLMComplete(ctx, model, BuildClassifyPrompt(doc))
+	if err != nil {
+		return fmt.Errorf("llm: %w", err)
+	}
+	c, err := ParseClassifyResponse(raw)
+	if err != nil {
+		return fmt.Errorf("parse: %w (raw: %s)", err, truncate(raw, 400))
+	}
+	c = ValidateClassification(c)
+	if err := UpsertClassified(db, name, c, model); err != nil {
+		return fmt.Errorf("upsert: %w", err)
+	}
+	return nil
 }

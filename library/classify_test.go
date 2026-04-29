@@ -1,4 +1,4 @@
-package main
+package library
 
 import (
 	"reflect"
@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-func TestBuildPromptIncludesAllFieldsAndDescription(t *testing.T) {
+func TestBuildClassifyPromptIncludesAllFieldsAndDescription(t *testing.T) {
 	desc := "Subject: a man at a gate\nVantage: handheld inside the terminal"
-	got := BuildPrompt(desc)
+	got := BuildClassifyPrompt(desc)
 
 	// every field name must appear so the model has the schema
 	for _, k := range []string{
@@ -27,7 +27,7 @@ func TestBuildPromptIncludesAllFieldsAndDescription(t *testing.T) {
 	}
 }
 
-func TestParseResponse(t *testing.T) {
+func TestParseClassifyResponse(t *testing.T) {
 	cases := []struct {
 		name    string
 		raw     string
@@ -168,7 +168,7 @@ func TestParseResponse(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := ParseResponse(tc.raw)
+			c, err := ParseClassifyResponse(tc.raw)
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("expected error, got none")
@@ -192,7 +192,7 @@ func TestValidateDropsInvalidScalars(t *testing.T) {
 		POVContainer: &bogus,
 		POVAltitude:  &good, // scalar valid for pov_container but not pov_altitude — should drop
 	}
-	got := Validate(c)
+	got := ValidateClassification(c)
 
 	if got.POVContainer != nil {
 		t.Errorf("POVContainer should be nil after dropping bogus value, got %v", *got.POVContainer)
@@ -206,7 +206,7 @@ func TestValidateDropsInvalidScalars(t *testing.T) {
 func TestValidatePreservesValidScalars(t *testing.T) {
 	g := "ground"
 	c := Classification{POVAltitude: &g}
-	got := Validate(c)
+	got := ValidateClassification(c)
 	if got.POVAltitude == nil || *got.POVAltitude != "ground" {
 		t.Errorf("POVAltitude should remain 'ground', got %v", got.POVAltitude)
 	}
@@ -219,7 +219,7 @@ func TestValidatePreservesUnclear(t *testing.T) {
 		POVAltitude:  &u,
 		Motion:       &u,
 	}
-	got := Validate(c)
+	got := ValidateClassification(c)
 	for name, v := range map[string]*string{
 		"POVContainer": got.POVContainer,
 		"POVAltitude":  got.POVAltitude,
@@ -236,7 +236,7 @@ func TestValidateFiltersArrayKeepingValid(t *testing.T) {
 		SubjectCategory: []string{"person", "spaceship", "landscape"},
 		Framing:         []string{"through_window", "made_up_value"},
 	}
-	got := Validate(c)
+	got := ValidateClassification(c)
 	want := []string{"person", "landscape"}
 	if !reflect.DeepEqual(got.SubjectCategory, want) {
 		t.Errorf("SubjectCategory: got %v, want %v", got.SubjectCategory, want)
@@ -250,7 +250,7 @@ func TestValidateAllInvalidArrayBecomesNil(t *testing.T) {
 	c := Classification{
 		SubjectCategory: []string{"spaceship", "alien"},
 	}
-	got := Validate(c)
+	got := ValidateClassification(c)
 	if got.SubjectCategory != nil {
 		t.Errorf("all-invalid array should become nil, got %v", got.SubjectCategory)
 	}
@@ -301,7 +301,7 @@ func TestStripLineComments(t *testing.T) {
 	}
 }
 
-func TestParseResponseStripsCommentsBeforeDecode(t *testing.T) {
+func TestParseClassifyResponseStripsCommentsBeforeDecode(t *testing.T) {
 	// Real failing payload shape from Ministral
 	raw := "```json\n{\n" +
 		`  "pov_container": "handheld",` + "\n" +
@@ -309,9 +309,9 @@ func TestParseResponseStripsCommentsBeforeDecode(t *testing.T) {
 		`  "motion": "camera_moving",  // shallow DOF implies slight movement` + "\n" +
 		`  "color_palette": "warm"` + "\n" +
 		"}\n```"
-	c, err := ParseResponse(raw)
+	c, err := ParseClassifyResponse(raw)
 	if err != nil {
-		t.Fatalf("expected ParseResponse to succeed after stripping //, got: %v", err)
+		t.Fatalf("expected ParseClassifyResponse to succeed after stripping //, got: %v", err)
 	}
 	if c.POVContainer == nil || *c.POVContainer != "handheld" {
 		t.Errorf("pov_container: got %v", c.POVContainer)

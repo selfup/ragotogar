@@ -22,7 +22,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pgvector/pgvector-go"
 
-	"ragotogar/internal/library"
+	"ragotogar/library"
 )
 
 func main() {

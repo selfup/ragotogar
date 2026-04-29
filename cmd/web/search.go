@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"ragotogar/internal/library"
+	"ragotogar/library"
 )
 
 // search runs the appropriate retrieval pipeline for the given mode and

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -18,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"ragotogar/library"
 )
 
 var supportedExts = map[string]bool{
@@ -37,8 +40,10 @@ type config struct {
 	force            bool
 	dryRun           bool
 	initOnly         bool
+	classify         bool // pipeline mode: classify each photo right after it's described
 	lmBase           string
 	model            string
+	classifyModel    string
 	resizePx         int
 	jpegQuality      int
 	maxRetries       int
@@ -104,6 +109,8 @@ func main() {
 	flag.IntVar(&cfg.maxRetries, "retries", cfg.maxRetries, "Max retry attempts per image on API failure")
 	flag.IntVar(&cfg.previewWorkers, "preview-workers", cfg.previewWorkers, "Parallel preview (resize/extract) workers")
 	flag.IntVar(&cfg.inferenceWorkers, "inference-workers", cfg.inferenceWorkers, "Parallel LLM inference workers (default 1; bump to N to use LM Studio's --parallel N batching)")
+	flag.BoolVar(&cfg.classify, "classify", false, "Pipeline mode: classify each photo right after describing it. Failures are logged, not fatal — re-run cmd/classify to retry.")
+	flag.StringVar(&cfg.classifyModel, "classify-model", library.ClassifyModel(), "LM Studio model for the inline classifier (only used with -classify)")
 	flag.Parse()
 
 	if cfg.initOnly {
@@ -312,6 +319,22 @@ func run(cfg config) error {
 					fmt.Fprintf(os.Stderr, "    !! DB write failed: %v\n", err)
 					errors.Add(1)
 					continue
+				}
+
+				// Pipeline-mode classification: run the small text classifier
+				// against the prose we just wrote, in this same worker. This
+				// fills the describer's tail-end idle window with classify
+				// work for the next photo, no LM Studio model contention
+				// because vision and text inference happen sequentially within
+				// the worker. Failures are logged and don't roll back the row
+				// (re-run cmd/classify standalone to retry).
+				if cfg.classify {
+					classifyStart := time.Now()
+					if err := library.ClassifyOne(context.Background(), db, j.safeName, cfg.classifyModel); err != nil {
+						fmt.Fprintf(os.Stderr, "    !! classify failed for %s: %v\n", j.safeName, err)
+					} else {
+						fmt.Printf("    classify %s\n", time.Since(classifyStart).Round(time.Millisecond))
+					}
 				}
 
 				processed.Add(1)

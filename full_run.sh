@@ -111,16 +111,21 @@ fi
 brew services start postgresql@18
 
 # Describe runs per-directory (cmd/describe takes one input dir at a time).
-# Classify and index pull from the DB, so they run once at the end after every
-# new photo is in — that way we only pay the LM Studio classify cost once,
-# and -reclassify/-reindex semantics stay correct.
+# Pipeline mode: -classify on cmd/describe runs the small text classifier
+# inline after each photo's vision describe + DB write. Same goroutine, so
+# vision and text inference are sequential within a worker — no LM Studio
+# model contention. Classify failures are logged but don't fail the photo;
+# the standalone classify pass below catches anything that slipped through.
 for d in "${DIRS[@]}"; do
-    echo "=== describe: $d ==="
+    echo "=== describe + classify: $d ==="
     # shellcheck disable=SC2086 # word-split intentional — flags don't contain spaces
-    LM_MODEL=gemma-4-31b-it ./scripts/photo_describe.sh $describe_force --preview-workers 8 --inference-workers 2 "$d"
+    LM_MODEL=gemma-4-31b-it ./scripts/photo_describe.sh $describe_force -classify --preview-workers 8 --inference-workers 2 "$d"
 done
 
-echo "=== classify ==="
+# Safety-net catch-up: run cmd/classify standalone for any photo whose inline
+# classify failed (logged in describe output) or for the --rebuild path which
+# needs a clean TRUNCATE. Cheap when nothing's to do (single SELECT).
+echo "=== classify catch-up ==="
 # shellcheck disable=SC2086
 ./scripts/classify.sh $classify_reclassify
 
