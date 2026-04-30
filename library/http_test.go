@@ -155,8 +155,8 @@ func TestPostJSONWithRetryDoesNotRetryOn400(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on 400, got nil")
 	}
-	if !errors.Is(err, errNonRetryable) {
-		t.Errorf("expected errNonRetryable wrapping, got %v", err)
+	if !errors.Is(err, ErrNonRetryable) {
+		t.Errorf("expected ErrNonRetryable wrapping, got %v", err)
 	}
 	if got := hits.Load(); got != 1 {
 		t.Errorf("expected exactly 1 hit (no retries on 4xx), got %d", got)

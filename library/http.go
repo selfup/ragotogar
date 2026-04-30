@@ -54,10 +54,12 @@ var defaultRetry = retryConfig{
 	timeout:     600 * time.Second,
 }
 
-// errNonRetryable signals that the response was a 4xx other than 429 — the
+// ErrNonRetryable signals that the response was a 4xx other than 429 — the
 // request shape was wrong (auth, model name, malformed body) and retrying
-// won't help. The retry loop returns this immediately.
-var errNonRetryable = errors.New("non-retryable HTTP error")
+// won't help. Wrapped into the returned error with %w so callers can detect
+// it via errors.Is and abort batch loops instead of grinding through N
+// identical failures.
+var ErrNonRetryable = errors.New("non-retryable HTTP error")
 
 // postJSONWithRetry POSTs body to url with up to cfg.maxAttempts attempts,
 // retrying on network errors, 429, and 5xx. Honors Retry-After (seconds) on
@@ -139,7 +141,7 @@ func postJSONWithRetryConfig(ctx context.Context, url string, body []byte, heade
 
 		// 4xx (other than 429): non-retryable
 		return nil, fmt.Errorf("HTTP %d: %s: %w",
-			resp.StatusCode, truncate(string(raw), 200), errNonRetryable)
+			resp.StatusCode, truncate(string(raw), 200), ErrNonRetryable)
 	}
 	return nil, fmt.Errorf("after %d attempts: %w", cfg.maxAttempts, lastErr)
 }

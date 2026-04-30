@@ -17,7 +17,7 @@ photos on disk
     ↓
 [2] cmd/classify      text LLM   → classified (typed enum fields from prose)
     ↓
-[3] cmd/index         embedder   → chunks (vector(768) + HNSW)
+[3] cmd/index         embedder   → chunks (halfvec(2560) + HNSW)
     ↓
 [4] cmd/web           pgvector   → search UI (vector / vector+verify / FTS+vector / FTS+vector+verify)
     cmd/search        pgvector   → CLI for the same search path
@@ -57,7 +57,7 @@ The remaining phases address each.
               │  • photos / exif / inference / thumbnails
               │  • descriptions (prose + generated tsvector)
               │  • classified (typed enums from cmd/classify)
-              │  • chunks (vector(768), HNSW)
+              │  • chunks (halfvec(2560), HNSW)
               │  • verify_cache (query × photo_id → verdict)         ← Phase 5
               └──────────────┬───────────────┘
                   ┌──────────┼──────────┐

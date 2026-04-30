@@ -7,10 +7,10 @@ import (
 	"os"
 )
 
-// EmbedDim is the embedding dimension produced by nomic-embed-text-v1.5
-// (and what cmd/describe/schema.go declares for vector(N)). Changing the
+// EmbedDim is the embedding dimension produced by text-embedding-qwen3-embedding-4b
+// (and what cmd/describe/schema.go declares for halfvec(N)). Changing the
 // embedding model requires re-indexing AND swapping this constant.
-const EmbedDim = 768
+const EmbedDim = 2560
 
 // LMStudioBase reads LM_STUDIO_BASE with the canonical localhost default.
 //
@@ -25,12 +25,15 @@ func LMStudioBase() string {
 	return "http://localhost:1234"
 }
 
-// EmbedModel reads EMBED_MODEL with the nomic default.
+// EmbedModel reads EMBED_MODEL with the text-embedding-qwen3-embedding-4b
+// default — the GGUF build of Qwen3-Embedding-4B as LM Studio exposes it.
+// LM Studio's MLX build of the same model is misclassified as an LLM and
+// won't route through /v1/embeddings, so the GGUF is required here.
 func EmbedModel() string {
 	if v := os.Getenv("EMBED_MODEL"); v != "" {
 		return v
 	}
-	return "text-embedding-nomic-embed-text-v1.5"
+	return "text-embedding-qwen3-embedding-4b"
 }
 
 // SearchModel reads SEARCH_MODEL with the ministral default — used by the

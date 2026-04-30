@@ -71,7 +71,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	vec := pgvector.NewVector(embeddings[0])
+	vec := pgvector.NewHalfVector(embeddings[0])
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, MAX(1 - (embedding <=> $1)) AS similarity

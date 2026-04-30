@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -107,6 +108,12 @@ func run(dsn string, reindex bool) error {
 	for i, name := range todo {
 		n, err := indexOne(ctx, db, name)
 		if err != nil {
+			// Non-retryable means every subsequent photo will hit the same
+			// wall (wrong model name, no model loaded, bad auth). Bail fast
+			// instead of churning through N identical failures.
+			if errors.Is(err, library.ErrNonRetryable) {
+				return fmt.Errorf("%s: %w (aborting — fix the embed endpoint and rerun)", name, err)
+			}
 			fmt.Fprintf(os.Stderr, "  [error] %s: %v\n", name, err)
 			continue
 		}
@@ -147,7 +154,7 @@ func indexOne(ctx context.Context, db *sql.DB, name string) (int, error) {
 		return 0, fmt.Errorf("delete existing chunks: %w", err)
 	}
 	for i, text := range chunks {
-		vec := pgvector.NewVector(embeddings[i])
+		vec := pgvector.NewHalfVector(embeddings[i])
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO chunks (photo_id, idx, text, embedding) VALUES ($1, $2, $3, $4)",
 			name, i, text, vec,

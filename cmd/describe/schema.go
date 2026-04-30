@@ -7,7 +7,7 @@ package main
 // cmd/describe is the schema authority. cmd/web and the Python tools open
 // the DB read-only (or with simple INSERTs that don't touch DDL).
 //
-// Phase 2 schema: Postgres + pgvector. The chunks table is new (vector(768)
+// Phase 2 schema: Postgres + pgvector. The chunks table is new (halfvec(2560)
 // + HNSW). descriptions.fts is a generated tsvector replacing FTS5. Path
 // columns (md_path/html_path/jpg_path/json_path) are gone (Phase 1.5
 // cutover landed those as no-ops). Requires the `vector` extension —
@@ -158,15 +158,17 @@ CREATE INDEX IF NOT EXISTS idx_classified_palette        ON classified(color_pal
 CREATE INDEX IF NOT EXISTS idx_classified_subject_cat    ON classified USING gin(subject_category);
 CREATE INDEX IF NOT EXISTS idx_classified_framing        ON classified USING gin(framing);
 
--- Vector chunks table: one row per chunk per photo. nomic-embed-text-v1.5
--- output dim is 768. HNSW index for similarity (vector_cosine_ops matches
--- the <=> distance operator the search path uses).
+-- Vector chunks table: one row per chunk per photo. Qwen3-Embedding-4B
+-- output dim is 2560. halfvec (16-bit float) keeps storage reasonable and is
+-- the only HNSW-viable type at this dim — pgvector caps the vector type's
+-- HNSW at 2000 dims, halfvec at 4000. halfvec_cosine_ops matches the <=>
+-- distance operator the search path uses.
 CREATE TABLE IF NOT EXISTS chunks (
     photo_id   TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
     idx        SMALLINT NOT NULL,
     text       TEXT NOT NULL,
-    embedding  vector(768) NOT NULL,
+    embedding  halfvec(2560) NOT NULL,
     PRIMARY KEY (photo_id, idx)
 );
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding halfvec_cosine_ops);
 `

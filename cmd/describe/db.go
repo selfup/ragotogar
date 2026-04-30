@@ -9,7 +9,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const schemaVersion = 5 // v5: classified table — typed enum fields from cmd/classify
+const schemaVersion = 6 // v6: chunks.embedding switched to halfvec(2560) for Qwen3-Embedding-4B
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
@@ -39,11 +39,18 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
 		return fmt.Errorf("load vector extension: %w (run ./scripts/bootstrap.sh on a fresh machine)", err)
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
-		return fmt.Errorf("apply schema: %w", err)
-	}
+	// Migrate runs before schemaSQL: schemaSQL declares the *current* shape
+	// (e.g. halfvec(2560) chunks + halfvec_cosine_ops HNSW), and on an existing
+	// DB the chunks column may still be vector(768). Running schemaSQL first
+	// would fail at CREATE INDEX IF NOT EXISTS because the new opclass can't
+	// bind to the old column type. migrateV6 fixes the column shape first;
+	// schemaSQL then becomes a no-op on existing DBs and a fresh-create on
+	// empty ones (where migrate's version query errors and bails safely).
 	if err := migrate(db); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		return fmt.Errorf("apply schema: %w", err)
 	}
 	if _, err := db.Exec(
 		"INSERT INTO schema_version(version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
@@ -55,19 +62,26 @@ func initSchema(db *sql.DB) error {
 }
 
 // migrate applies forward-only schema deltas for libraries that pre-date the
-// current schemaVersion. Each step is idempotent (ADD COLUMN IF NOT EXISTS
-// etc.) so running on a fresh DB created by schemaSQL is a no-op. The
-// schema_version row is bumped by the caller after migrate succeeds.
+// current schemaVersion. Each step is idempotent on its own version range. On
+// a fresh DB schema_version doesn't exist yet — the SELECT errors and we bail
+// safely; schemaSQL then runs and creates the schema at the current version.
+// The schema_version row is bumped by the caller after migrate succeeds.
 func migrate(db *sql.DB) error {
 	var maxVersion int
 	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&maxVersion); err != nil {
-		// schema_version table doesn't exist yet — schemaSQL should have
-		// just created it, so this is unreachable on a real DB; bail safe.
+		// Fresh DB: schemaSQL hasn't run yet, so schema_version doesn't
+		// exist. No deltas to apply — schemaSQL will create everything at
+		// the current shape.
 		return nil
 	}
 	if maxVersion < 4 {
 		if err := migrateV4(db); err != nil {
 			return fmt.Errorf("v4: %w", err)
+		}
+	}
+	if maxVersion < 6 {
+		if err := migrateV6(db); err != nil {
+			return fmt.Errorf("v6: %w", err)
 		}
 	}
 	return nil
@@ -106,6 +120,31 @@ func migrateV4(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_descriptions_fts ON descriptions USING gin(fts)`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateV6 swaps chunks.embedding from vector(768) to halfvec(2560) for the
+// Qwen3-Embedding-4B cutover. The 768-dim data isn't dimensionally valid in
+// the new column, so the rows are dropped — caller runs cmd/index -reindex
+// to repopulate. Drop the HNSW index first (it depends on the column), drop
+// and re-add the column to bypass cross-type cast rules, then recreate the
+// index with halfvec_cosine_ops.
+func migrateV6(db *sql.DB) error {
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_chunks_embedding`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`TRUNCATE chunks`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE chunks DROP COLUMN IF EXISTS embedding`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE chunks ADD COLUMN embedding halfvec(2560) NOT NULL`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding halfvec_cosine_ops)`); err != nil {
 		return err
 	}
 	return nil

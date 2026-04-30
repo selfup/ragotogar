@@ -1,8 +1,10 @@
 package library
 
-// Character-window chunker. nomic-embed-text-v1.5 accepts up to 8192 tokens,
-// so a 6KB window leaves comfortable headroom while still chopping the
-// occasional long-form description into multiple chunks.
+// Character-window chunker. Qwen3-Embedding-4B accepts up to 32K tokens, so
+// a 6KB window leaves enormous headroom while still chopping the occasional
+// long-form description into multiple chunks. The window size is held over
+// from the nomic-embed-text-v1.5 era (8192-token limit) — revisit if recall
+// suggests longer chunks would help under the stronger embedder.
 //
 // Matches tools/rag_common.chunk_text from the Phase 2 Python era so the
 // embedded chunks stay byte-comparable across the rewrite.
