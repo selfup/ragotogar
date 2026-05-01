@@ -72,6 +72,12 @@ const indexHTML = `<!doctype html>
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-variant-numeric: tabular-nums;
     }
+    .verify-stats {
+      color: var(--mute); font-size: 0.8rem; margin: -0.5rem 0 1rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .verify-stats .hit { color: var(--fg); }
     .grid {
       display: grid; gap: 1rem;
       grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -143,6 +149,11 @@ const indexHTML = `<!doctype html>
       {{if .Latency}}<span class="latency">({{.Latency}})</span>{{end}}
       {{if not .Results}} — try different words or broader concepts{{end}}
     </div>
+    {{if .VerifyStats}}
+      <div class="verify-stats" title="Verify pass: cached verdicts skip the LLM and return instantly. Hit rate climbs as repeat queries land.">
+        verify: {{.VerifyStats.Total}} candidates · {{.VerifyStats.Cached}} cached · {{.VerifyStats.LLM}} LLM · <span class="hit">{{.VerifyStats.HitRate}} hit</span>
+      </div>
+    {{end}}
   {{end}}
 
   {{if .Results}}

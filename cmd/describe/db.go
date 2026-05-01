@@ -9,7 +9,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const schemaVersion = 6 // v6: chunks.embedding switched to halfvec(2560) for Qwen3-Embedding-4B
+const schemaVersion = 7 // v7: verify_cache table for the LLM yes/no verdict cache (Phase 4)
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
@@ -84,6 +84,11 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("v6: %w", err)
 		}
 	}
+	if maxVersion < 7 {
+		if err := migrateV7(db); err != nil {
+			return fmt.Errorf("v7: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -145,6 +150,30 @@ func migrateV6(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding halfvec_cosine_ops)`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateV7 adds the verify_cache table — the persistent LLM yes/no verdict
+// cache for the verify pass. PK includes verify_model so SEARCH_MODEL swaps
+// don't cross-contaminate cached verdicts. Idempotent on existing libraries
+// because schemaSQL also declares the table CREATE … IF NOT EXISTS — this
+// migration is here for symmetry and to make the version bump explicit.
+func migrateV7(db *sql.DB) error {
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS verify_cache (
+		    query         TEXT NOT NULL,
+		    photo_id      TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+		    verify_model  TEXT NOT NULL,
+		    verdict       BOOLEAN NOT NULL,
+		    verified_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+		    PRIMARY KEY (query, photo_id, verify_model)
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_verify_cache_query ON verify_cache(query, verify_model)`); err != nil {
 		return err
 	}
 	return nil

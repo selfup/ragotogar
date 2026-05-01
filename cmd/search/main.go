@@ -94,11 +94,12 @@ func run(dsn, query string, retrieve, precise, hybrid, verify bool, cosine, fts 
 
 	if verify && (retrieve || precise || hybrid) {
 		fmt.Fprintf(os.Stderr, "\n--- Verifying %d candidate(s) with LLM ---\n", len(results))
-		verdicts, err := searcher.VerifyFilter(ctx, query, results)
+		verdicts, stats, err := searcher.VerifyFilter(ctx, query, results)
 		if err != nil {
 			return err
 		}
 		library.LogVerdicts(os.Stderr, verdicts)
+		library.LogVerifyStats(os.Stderr, stats)
 		kept := library.KeptNames(verdicts)
 		fmt.Printf("\n--- Verified Sources (%d/%d kept) ---\n", len(kept), len(results))
 		for i, name := range kept {

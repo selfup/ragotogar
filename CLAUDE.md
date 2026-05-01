@@ -27,3 +27,7 @@ This keeps the repo free of committed binaries and ensures all Go is run from so
 - **Never search outside the repo without explicit permission.** No `find`, `ls`, `stat`, `grep -r`, or any other filesystem scan of the user's home directory, Dropbox, external volumes (e.g. `/Volumes/*`), or anywhere outside the working repo. The user keeps personal data in those locations and does not want it inspected.
 - For diagnostic info that lives outside the repo (dump file paths, photo originals, `~/Library/...`), ask the user to run the command and share the output.
 - System paths the OS controls (`/opt/homebrew`, `/private/tmp`, `/usr/local`) are fine when relevant to a tool invocation (e.g. installing a brew formula, writing to tmp).
+
+## Final Instruction
+
+read README.md - read ARCHITECTURE.md - read the last 10 commits in their entirety: git log -10 --pretty=format:"%h %s%n%b%n---" --no-decorate

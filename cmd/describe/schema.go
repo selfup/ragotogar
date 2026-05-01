@@ -171,4 +171,20 @@ CREATE TABLE IF NOT EXISTS chunks (
     PRIMARY KEY (photo_id, idx)
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding halfvec_cosine_ops);
+
+-- v7: persistent cache for the LLM yes/no verify pass. Lookup is
+-- (query, photo_id, verify_model); the verify_model column means swapping
+-- SEARCH_MODEL (e.g. ministral-3-3b → devstral-small-2-2512) doesn't poison
+-- cached verdicts from a different model. Stale rows are filtered at lookup
+-- time by comparing verified_at against inference.described_at — re-describing
+-- a photo bypasses any older cached verdict without an explicit invalidation.
+CREATE TABLE IF NOT EXISTS verify_cache (
+    query         TEXT NOT NULL,
+    photo_id      TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    verify_model  TEXT NOT NULL,
+    verdict       BOOLEAN NOT NULL,
+    verified_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (query, photo_id, verify_model)
+);
+CREATE INDEX IF NOT EXISTS idx_verify_cache_query ON verify_cache(query, verify_model);
 `

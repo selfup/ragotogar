@@ -23,13 +23,24 @@ type result struct {
 }
 
 type pageData struct {
-	Q                Q
-	Mode             string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify"
-	CosineThreshold  string // formatted for the slider's value attribute
-	FTSThresholdRel  string
-	Latency          string // formatted "234 ms" / "1.2 s"; empty when no search ran
-	Total            int    // total photos in library; 0 = don't show
-	Results          []result
+	Q               Q
+	Mode            string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify"
+	CosineThreshold string // formatted for the slider's value attribute
+	FTSThresholdRel string
+	Latency         string // formatted "234 ms" / "1.2 s"; empty when no search ran
+	Total           int    // total photos in library; 0 = don't show
+	Results         []result
+	VerifyStats     *verifyStatsView // nil when no verify pass ran; non-nil enables the cache footer
+}
+
+// verifyStatsView is the template-friendly projection of library.VerifyStats.
+// HitRate is pre-formatted as a percentage string so the template doesn't have
+// to do arithmetic.
+type verifyStatsView struct {
+	Total   int
+	Cached  int
+	LLM     int
+	HitRate string // "60%" / "0%" — formatted at the boundary
 }
 
 // countPhotos returns the total photo count for the status-line denominator.
@@ -143,24 +154,36 @@ func main() {
 		cosine := parseThreshold(r.URL.Query().Get("cosine"), library.CosineThreshold)
 		ftsRel := parseThreshold(r.URL.Query().Get("fts"), library.FTSRelativeThreshold)
 
-		var results []result
-		var latency string
-		var total int
+		var (
+			results     []result
+			latency     string
+			total       int
+			verifyView  *verifyStatsView
+		)
 		if q != "" {
-			r, d := search(db, q, mode, cosine, ftsRel)
-			results = r
-			latency = formatLatency(d)
+			res := search(db, q, mode, cosine, ftsRel)
+			results = res.Results
+			latency = formatLatency(res.Elapsed)
 			total = countPhotos(db)
+			if res.Stats != nil {
+				verifyView = &verifyStatsView{
+					Total:   res.Stats.Total,
+					Cached:  res.Stats.Cached,
+					LLM:     res.Stats.LLM,
+					HitRate: fmt.Sprintf("%.0f%%", res.Stats.HitRate()*100),
+				}
+			}
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := indexTmpl.Execute(w, pageData{
-			Q:                Q(q),
-			Mode:             mode,
-			CosineThreshold:  fmt.Sprintf("%.2f", cosine),
-			FTSThresholdRel:  fmt.Sprintf("%.2f", ftsRel),
-			Latency:          latency,
-			Total:            total,
-			Results:          results,
+			Q:               Q(q),
+			Mode:            mode,
+			CosineThreshold: fmt.Sprintf("%.2f", cosine),
+			FTSThresholdRel: fmt.Sprintf("%.2f", ftsRel),
+			Latency:         latency,
+			Total:           total,
+			Results:         results,
+			VerifyStats:     verifyView,
 		}); err != nil {
 			log.Printf("template: %v", err)
 		}

@@ -262,23 +262,62 @@ answer YES. Only answer NO if the photo is clearly unrelated to the query.
 Reply with exactly one word: YES or NO.`
 
 // Verdict carries the LLM's per-photo answer plus the raw response (used for
-// the ✓/✗ stderr stream so callers can show progress).
+// the ✓/✗ stderr stream so callers can show progress). FromCache flags the
+// rows that came back from verify_cache without an LLM call — used by the
+// per-row ✓/✗ stream to mark cached rows and by VerifyStats aggregation.
 type Verdict struct {
-	Result Result
-	YES    bool
-	Raw    string // LLM response, truncated by the caller for display
+	Result    Result
+	YES       bool
+	Raw       string // LLM response, truncated by the caller for display
+	FromCache bool
 }
 
 // VerifyFilter runs the LLM yes/no check on each candidate's BuildDocument
-// text. Concurrency is bounded by VerifyConcurrency. Verdicts come back in
-// the original retrieval order so callers can display them in rank order.
-func (s *Searcher) VerifyFilter(ctx context.Context, query string, candidates []Result) ([]Verdict, error) {
+// text, consulting verify_cache before each LLM call. Concurrency is bounded
+// by VerifyConcurrency. Verdicts come back in the original retrieval order
+// so callers can display them in rank order. The returned VerifyStats counts
+// cache hits vs LLM calls — caller surfaces the hit rate to UI / logs.
+//
+// Cache lookup is one batch query keyed on (canonical_query, photo_ids,
+// verify_model). Rows where the photo has been re-described after the verdict
+// was written are silently skipped (see verify_cache.go) so a re-describe
+// transparently invalidates stale cache entries without explicit teardown.
+//
+// Errors (LoadPhoto failure, LLM failure) produce verdicts with YES=false but
+// are NOT cached — only successful LLM responses become persistent rows.
+func (s *Searcher) VerifyFilter(ctx context.Context, query string, candidates []Result) ([]Verdict, VerifyStats, error) {
 	model := SearchModel()
+	canonical := CanonicalQuery(query)
 	verdicts := make([]Verdict, len(candidates))
+	stats := VerifyStats{Total: len(candidates)}
+
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.Name
+	}
+	cached, err := lookupVerifyCache(ctx, s.db, canonical, ids, model)
+	if err != nil {
+		// Cache lookup failure is non-fatal — fall through to LLM-only
+		// behavior. Logging is the caller's job.
+		cached = map[string]bool{}
+	}
 
 	sem := make(chan struct{}, VerifyConcurrency)
-	var wg sync.WaitGroup
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex // guards stats.Cached / stats.LLM
+	)
 	for i, c := range candidates {
+		if v, hit := cached[c.Name]; hit {
+			mark := "yes"
+			if !v {
+				mark = "no"
+			}
+			verdicts[i] = Verdict{Result: c, YES: v, Raw: "(cached " + mark + ")", FromCache: true}
+			stats.Cached++
+			continue
+		}
+
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
@@ -302,27 +341,54 @@ func (s *Searcher) VerifyFilter(ctx context.Context, query string, candidates []
 			}
 			ok := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(resp)), "Y")
 			verdicts[i] = Verdict{Result: c, YES: ok, Raw: resp}
+			mu.Lock()
+			stats.LLM++
+			mu.Unlock()
+
+			// Best-effort cache write — failure here doesn't poison the
+			// verdict, just means the next identical query will re-run
+			// the LLM.
+			if err := writeVerifyCache(ctx, s.db, canonical, c.Name, model, ok); err != nil {
+				fmt.Fprintf(os.Stderr, "verify_cache write %q/%s: %v\n", canonical, c.Name, err)
+			}
 		}()
 	}
 	wg.Wait()
-	return verdicts, nil
+	return verdicts, stats, nil
 }
 
 // LogVerdicts streams the per-photo ✓/✗ verdict line to w (typically
 // os.Stderr). Pulled out so callers can opt in or out of the progress
 // chatter — cmd/search prints it; cmd/web suppresses it for HTTP responses.
+// Cached verdicts get a [c] tag so the user can eyeball cache hit density
+// without parsing the trailing stats line.
 func LogVerdicts(w *os.File, verdicts []Verdict) {
 	for _, v := range verdicts {
 		marker := "✓"
 		if !v.YES {
 			marker = "✗"
 		}
+		tag := ""
+		if v.FromCache {
+			tag = " [c]"
+		}
 		display := v.Raw
 		if len(display) > 80 {
 			display = display[:80]
 		}
-		fmt.Fprintf(w, "  %s %s: %s\n", marker, v.Result.Name, display)
+		fmt.Fprintf(w, "  %s%s %s: %s\n", marker, tag, v.Result.Name, display)
 	}
+}
+
+// LogVerifyStats prints the one-line cache summary to w. Format matches the
+// telemetry the cmd/web template renders, so the CLI and UI stay legible the
+// same way.
+func LogVerifyStats(w *os.File, stats VerifyStats) {
+	if stats.Total == 0 {
+		return
+	}
+	fmt.Fprintf(w, "verify: %d candidates · %d cached · %d LLM · %.0f%% hit\n",
+		stats.Total, stats.Cached, stats.LLM, stats.HitRate()*100)
 }
 
 // KeptNames extracts just the YES verdicts' names in retrieval order. Most

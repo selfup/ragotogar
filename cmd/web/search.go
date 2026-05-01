@@ -25,7 +25,16 @@ import (
 // ?cosine= and ?fts=). Both default to library.CosineThreshold /
 // library.FTSRelativeThreshold when the caller passes the package
 // defaults.
-func search(db *sql.DB, query, mode string, cosine, ftsRel float64) ([]result, time.Duration) {
+// searchResult bundles everything cmd/web's HTTP handler renders for a single
+// query — the matching photos, the wall-clock duration, and (when the verify
+// pass ran) the verify_cache stats so the template can show the hit rate.
+type searchResult struct {
+	Results []result
+	Elapsed time.Duration
+	Stats   *library.VerifyStats // nil when verify didn't run
+}
+
+func search(db *sql.DB, query, mode string, cosine, ftsRel float64) searchResult {
 	start := time.Now()
 	ctx := context.Background()
 	searcher := library.NewSearcher(db)
@@ -51,21 +60,26 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) ([]result, t
 	}
 	if err != nil {
 		log.Printf("search %q (mode=%s): %v", query, mode, err)
-		return nil, time.Since(start)
+		return searchResult{Elapsed: time.Since(start)}
 	}
 
 	verify := mode == "naive-verify" || mode == "fts-vector-verify"
 
-	var names []string
+	var (
+		names []string
+		stats *library.VerifyStats
+	)
 	if verify && len(candidates) > 0 {
 		fmt.Fprintf(os.Stderr, "\n--- Verifying %d candidate(s) with LLM ---\n", len(candidates))
-		verdicts, err := searcher.VerifyFilter(ctx, query, candidates)
+		verdicts, s, err := searcher.VerifyFilter(ctx, query, candidates)
 		if err != nil {
 			log.Printf("verify %q: %v", query, err)
-			return nil, time.Since(start)
+			return searchResult{Elapsed: time.Since(start)}
 		}
 		library.LogVerdicts(os.Stderr, verdicts)
+		library.LogVerifyStats(os.Stderr, s)
 		names = library.KeptNames(verdicts)
+		stats = &s
 	} else {
 		names = make([]string, len(candidates))
 		for i, c := range candidates {
@@ -77,5 +91,5 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) ([]result, t
 	for _, name := range names {
 		results = append(results, result{Name: name})
 	}
-	return results, time.Since(start)
+	return searchResult{Results: results, Elapsed: time.Since(start), Stats: stats}
 }

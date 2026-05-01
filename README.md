@@ -159,6 +159,7 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 | `thumbnails` | 1024px JPG bytes as a `BYTEA` BLOB. Generated from the same magick output sent to the vision model — no second resize. |
 | `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
 | `chunks` | One row per chunk per photo. `text TEXT` + `embedding halfvec(2560)` (Qwen3-Embedding-4B GGUF). HNSW index on `embedding halfvec_cosine_ops`. Owned by the indexer (`cmd/index`). |
+| `verify_cache` | Persistent LLM yes/no cache for the verify pass. Keyed on `(query, photo_id, verify_model)`; `verified_at > inference.described_at` is the freshness check, so re-describing a photo silently invalidates older cached verdicts. Written by `library.VerifyFilter`; consulted by both `cmd/web` and `cmd/search`. |
 | `schema_version` | Single-row marker for migrations |
 
 `cmd/describe` itself never touches `chunks` — that's the indexer's table. Re-describing a photo overwrites its photos / exif / descriptions / inference / thumbnails rows but leaves chunks alone; re-running `./scripts/index.sh` regenerates chunks from the fresh description.
@@ -331,6 +332,8 @@ Then open `http://localhost:8080`.
 | `hybrid` | `-retrieve` | (legacy LightRAG concept; same as vector) |
 
 All pills use `--retrieve` (vector retrieval, no LLM synthesis). Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when chunks reference a basename that's since been deleted from the library).
+
+The verify pass (both verify-mode pills above) consults `verify_cache` before each LLM call. Hit rate is shown directly above the result grid — `verify: 30 candidates · 18 cached · 12 LLM · 60% hit` — so you can watch the rate climb as you iterate on a query. Cache rows for a photo are silently invalidated when the photo is re-described (`verified_at > inference.described_at` freshness check).
 
 **Requirements:** A populated `chunks` table (see [Photo Search](#photo-search--pgvector-tools)) and a populated library (run `cmd/describe` first).
 

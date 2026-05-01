@@ -96,7 +96,7 @@ func TestOpenDBCreatesSchema(t *testing.T) {
 
 	expected := []string{
 		"schema_version", "photos", "exif", "descriptions",
-		"thumbnails", "inference", "chunks",
+		"thumbnails", "inference", "chunks", "verify_cache",
 	}
 	for _, name := range expected {
 		var found int
@@ -116,6 +116,7 @@ func TestOpenDBCreatesSchema(t *testing.T) {
 		"idx_exif_year_month", "idx_exif_iso", "idx_exif_aperture",
 		"idx_exif_focal", "idx_exif_artist",
 		"idx_descriptions_fts", "idx_chunks_embedding",
+		"idx_verify_cache_query",
 	}
 	for _, name := range expectedIdx {
 		var found int
