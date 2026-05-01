@@ -40,7 +40,7 @@ At 30K+ photos:
 | Re-describe wall-clock | Single-stream Qwen3-VL 8B ≈ 6s/photo → ~50 hours for 30K. Per-shard fanout cuts this proportionally. |
 | Single HNSW over 30K | Works, but per-shard indexes give faster incremental re-indexing and bound the noise floor per-query |
 | Path-as-key fragility | `photos.id = name` today — file moves/renames break references that propagate through chunks and classified |
-| Long-tail of natural-language filters | Vector + verify already handles enum-shaped queries (`indoor`, `from a plane`) because `BuildDocument` writes the canonical enums into the indexed text. What it can't do is range / numerical filters (`f/2.8 or wider`, `April 2024`) — those need structured filters. Open question whether the LLM-parse approach (Phase 7) earns its keep against explicit UI controls (date range picker, aperture slider) |
+| Long-tail of natural-language filters | Vector + verify already handles enum-shaped queries (`indoor`, `from a plane`) because `BuildDocument` writes the canonical enums into the indexed text. v8 added `exif.fts` so FTS now reaches camera / lens / year / software / artist literals (`2024`, `X100VI`) — `searchFTS` concats `descriptions.fts ‖ exif.fts` at query time so prose tokens and metadata tokens co-match. Range / numerical filters (`f/2.8 or wider`, aperture/ISO bounds) still aren't reachable; Phase 7 is the open question for those |
 
 The remaining phases address each.
 

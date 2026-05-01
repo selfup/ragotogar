@@ -99,22 +99,39 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 	return out, rows.Err()
 }
 
-// searchFTS runs a Postgres full-text search against the descriptions.fts
-// generated tsvector column. Returns only results above the adaptive
-// FTSRelativeThreshold so the long tail of incidental token matches
-// doesn't pollute the RRF fusion.
+// searchFTS runs a Postgres full-text search across both descriptions.fts
+// (LLM prose) and exif.fts (camera/lens/year/software/artist metadata).
+// The two tsvectors are concatenated at query time (`d.fts || e.fts`) so a
+// multi-word query like "X100VI bedroom" — where one token lives in metadata
+// and the other in prose — matches via plainto_tsquery's implicit AND.
 //
-// Why adaptive: a query like "red truck" against this corpus produces real
-// matches at ts_rank ≈ 0.33 alongside noise at ≈ 0.0 (descriptions where
-// "red" and "truck" appear in unrelated sentences). A single-token query
-// like "X100VI" gives every match a uniform low ts_rank ≈ 0.08. A flat
-// cutoff over-prunes the latter; the relative cutoff handles both.
+// Why concat instead of `WHERE d.fts @@ q OR e.fts @@ q`: the OR form only
+// matches when a single column carries all query tokens. plainto_tsquery
+// AND's its terms, so a cross-column query collapses to zero hits under OR.
+// Concat fuses the two columns into one effective tsvector, restoring the
+// expected behavior. Trade-off: the per-table GIN indexes can't help the
+// concatenated expression, so this degrades to a sequential scan over
+// (descriptions ⨝ exif). At ~30K photos that's still <100 ms; if it ever
+// becomes the dominant cost, materialize the union onto photos.fts.
+//
+// Returns only results above the adaptive FTSRelativeThreshold so the long
+// tail of incidental token matches doesn't pollute the RRF fusion. Adaptive
+// because a query like "red truck" produces real matches at ts_rank ≈ 0.33
+// alongside noise at ≈ 0.0; a single-token query like "X100VI" gives every
+// match a uniform low ts_rank ≈ 0.08. A flat cutoff over-prunes the latter;
+// the relative cutoff handles both.
 func (s *Searcher) searchFTS(ctx context.Context, query string, topK int, relThreshold float64) ([]Result, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT p.name, ts_rank(d.fts, plainto_tsquery('english', $1)) AS rank
-		FROM descriptions d
-		JOIN photos p ON p.id = d.photo_id
-		WHERE d.fts @@ plainto_tsquery('english', $1)
+		SELECT p.name,
+		       ts_rank(
+		           COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector),
+		           plainto_tsquery('english', $1)
+		       ) AS rank
+		FROM photos p
+		LEFT JOIN descriptions d ON p.id = d.photo_id
+		LEFT JOIN exif e         ON p.id = e.photo_id
+		WHERE (COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector))
+		      @@ plainto_tsquery('english', $1)
 		ORDER BY rank DESC
 		LIMIT $2
 	`, query, topK)

@@ -9,7 +9,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const schemaVersion = 7 // v7: verify_cache table for the LLM yes/no verdict cache (Phase 4)
+const schemaVersion = 8 // v8: exif.fts generated tsvector — FTS arm now sees camera/lens/year/software/artist
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
@@ -89,6 +89,11 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("v7: %w", err)
 		}
 	}
+	if maxVersion < 8 {
+		if err := migrateV8(db); err != nil {
+			return fmt.Errorf("v8: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -150,6 +155,37 @@ func migrateV6(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding halfvec_cosine_ops)`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateV8 adds a generated tsvector on the exif table so the FTS search
+// arm can match against camera / lens / year / software / artist tokens —
+// before this, descriptions.fts was the only FTS surface and a query like
+// "2024" or "X100VI" got nothing because that text lived only in exif.
+//
+// Field selection is deliberate: camera_make / camera_model / lens_model /
+// lens_info / date_taken_year::text / software / artist are high-signal
+// (specific, distinguishing). exposure_mode / white_balance / flash are
+// excluded because their values ("Auto", "Did not fire") would land in
+// nearly every row and drown ranking signal.
+func migrateV8(db *sql.DB) error {
+	if _, err := db.Exec(`
+		ALTER TABLE exif ADD COLUMN IF NOT EXISTS fts tsvector GENERATED ALWAYS AS (
+			to_tsvector('english',
+				coalesce(camera_make,'')              || ' ' ||
+				coalesce(camera_model,'')             || ' ' ||
+				coalesce(lens_model,'')               || ' ' ||
+				coalesce(lens_info,'')                || ' ' ||
+				coalesce(date_taken_year::text,'')    || ' ' ||
+				coalesce(software,'')                 || ' ' ||
+				coalesce(artist,''))
+		) STORED
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_exif_fts ON exif USING gin(fts)`); err != nil {
 		return err
 	}
 	return nil

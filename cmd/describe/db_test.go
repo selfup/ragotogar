@@ -115,6 +115,7 @@ func TestOpenDBCreatesSchema(t *testing.T) {
 		"idx_photos_name", "idx_exif_camera", "idx_exif_make", "idx_exif_date",
 		"idx_exif_year_month", "idx_exif_iso", "idx_exif_aperture",
 		"idx_exif_focal", "idx_exif_artist",
+		"idx_exif_fts",
 		"idx_descriptions_fts", "idx_chunks_embedding",
 		"idx_verify_cache_query",
 	}

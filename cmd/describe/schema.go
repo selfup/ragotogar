@@ -64,7 +64,22 @@ CREATE TABLE IF NOT EXISTS exif (
     gps_latitude          DOUBLE PRECISION,
     gps_longitude         DOUBLE PRECISION,
     artist                TEXT,
-    software              TEXT
+    software              TEXT,
+    -- v8: generated tsvector over high-signal text columns. Lets FTS+vector
+    -- match queries like "2024", "X100VI", "Lightroom" against metadata that
+    -- the descriptions.fts column never sees. Skips the generic-valued
+    -- columns (exposure_mode, white_balance, flash) on purpose — values like
+    -- "Auto" or "Did not fire" would drown rank signal otherwise.
+    fts                   tsvector GENERATED ALWAYS AS (
+                            to_tsvector('english',
+                              coalesce(camera_make,'')              || ' ' ||
+                              coalesce(camera_model,'')             || ' ' ||
+                              coalesce(lens_model,'')               || ' ' ||
+                              coalesce(lens_info,'')                || ' ' ||
+                              coalesce(date_taken_year::text,'')    || ' ' ||
+                              coalesce(software,'')                 || ' ' ||
+                              coalesce(artist,''))
+                          ) STORED
 );
 CREATE INDEX IF NOT EXISTS idx_exif_camera     ON exif(camera_model);
 CREATE INDEX IF NOT EXISTS idx_exif_make       ON exif(camera_make);
@@ -74,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_exif_iso        ON exif(iso);
 CREATE INDEX IF NOT EXISTS idx_exif_aperture   ON exif(f_number);
 CREATE INDEX IF NOT EXISTS idx_exif_focal      ON exif(focal_length_mm);
 CREATE INDEX IF NOT EXISTS idx_exif_artist     ON exif(artist);
+CREATE INDEX IF NOT EXISTS idx_exif_fts        ON exif USING gin(fts);
 
 -- Generated tsvector replaces SQLite FTS5 — same recall, native to the JOINs
 -- the search path uses. Indexed for keyword queries via @@.

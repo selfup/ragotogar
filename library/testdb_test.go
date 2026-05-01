@@ -122,6 +122,8 @@ CREATE TABLE exif (
     lens_model            TEXT,
     lens_info             TEXT,
     date_taken            TEXT,
+    date_taken_year       INTEGER,
+    date_taken_month      INTEGER,
     focal_length_mm       DOUBLE PRECISION,
     focal_length_35mm     DOUBLE PRECISION,
     f_number              DOUBLE PRECISION,
@@ -132,8 +134,19 @@ CREATE TABLE exif (
     white_balance         TEXT,
     flash                 TEXT,
     software              TEXT,
-    artist                TEXT
+    artist                TEXT,
+    fts                   tsvector GENERATED ALWAYS AS (
+                            to_tsvector('english',
+                              coalesce(camera_make,'')              || ' ' ||
+                              coalesce(camera_model,'')             || ' ' ||
+                              coalesce(lens_model,'')               || ' ' ||
+                              coalesce(lens_info,'')                || ' ' ||
+                              coalesce(date_taken_year::text,'')    || ' ' ||
+                              coalesce(software,'')                 || ' ' ||
+                              coalesce(artist,''))
+                          ) STORED
 );
+CREATE INDEX idx_exif_fts ON exif USING gin(fts);
 
 CREATE TABLE descriptions (
     photo_id          TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
@@ -144,8 +157,20 @@ CREATE TABLE descriptions (
     composition       TEXT,
     vantage           TEXT,
     ground_truth      TEXT,
-    full_description  TEXT
+    full_description  TEXT,
+    fts               tsvector GENERATED ALWAYS AS (
+                        to_tsvector('english',
+                          coalesce(subject,'')          || ' ' ||
+                          coalesce(setting,'')          || ' ' ||
+                          coalesce(light,'')            || ' ' ||
+                          coalesce(colors,'')           || ' ' ||
+                          coalesce(composition,'')      || ' ' ||
+                          coalesce(vantage,'')          || ' ' ||
+                          coalesce(ground_truth,'')     || ' ' ||
+                          coalesce(full_description,''))
+                      ) STORED
 );
+CREATE INDEX idx_descriptions_fts ON descriptions USING gin(fts);
 
 CREATE TABLE classified (
     photo_id              TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
