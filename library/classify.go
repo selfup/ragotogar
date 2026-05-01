@@ -82,6 +82,56 @@ var AllowedArray = map[string][]string{
 	"framing":          {"through_window", "through_door", "through_foliage", "through_fence", "through_glass", "unobstructed", "unclear"},
 }
 
+// classifyScalarOrder fixes the field order for the schema's required[] so
+// the schema is deterministic across runs (Go map iteration isn't). The
+// list mirrors the prompt and column order in cmd/describe/schema.go.
+var classifyScalarOrder = []string{
+	"pov_container", "pov_altitude", "pov_angle",
+	"subject_altitude", "subject_distance",
+	"subject_count", "animal_count",
+	"scene_time_of_day", "scene_indoor_outdoor", "scene_weather",
+	"motion", "color_palette",
+}
+
+var classifyArrayOrder = []string{"subject_category", "framing"}
+
+// ClassifySchema returns the JSON schema describing the Classification
+// shape, in OpenAI strict-mode form. Enum lists are sourced from
+// AllowedScalar / AllowedArray so the schema and post-validation stay
+// locked together — adding a new allowed enum value or field updates both
+// in a single edit. With strict mode enforcing the same enum membership
+// the runtime cannot emit invalid values, so ValidateClassification
+// becomes a defense-in-depth pass rather than the primary filter.
+func ClassifySchema() map[string]any {
+	properties := make(map[string]any, len(classifyScalarOrder)+len(classifyArrayOrder))
+	required := make([]string, 0, len(classifyScalarOrder)+len(classifyArrayOrder))
+
+	for _, f := range classifyScalarOrder {
+		properties[f] = map[string]any{
+			"type": "string",
+			"enum": AllowedScalar[f],
+		}
+		required = append(required, f)
+	}
+	for _, f := range classifyArrayOrder {
+		properties[f] = map[string]any{
+			"type": "array",
+			"items": map[string]any{
+				"type": "string",
+				"enum": AllowedArray[f],
+			},
+		}
+		required = append(required, f)
+	}
+
+	return map[string]any{
+		"type":                 "object",
+		"properties":           properties,
+		"required":             required,
+		"additionalProperties": false,
+	}
+}
+
 // BuildClassifyPrompt formats the classifier instruction with the photo
 // description substituted in. The schema lines mirror the column definitions
 // in cmd/describe/schema.go — keep them in sync.
@@ -401,7 +451,7 @@ func ClassifyOne(ctx context.Context, db *sql.DB, name, model string) error {
 	if doc == "" {
 		return fmt.Errorf("empty description")
 	}
-	raw, err := LLMComplete(ctx, model, BuildClassifyPrompt(doc))
+	raw, err := LLMCompleteSchema(ctx, model, BuildClassifyPrompt(doc), "classification", ClassifySchema())
 	if err != nil {
 		return fmt.Errorf("llm: %w", err)
 	}

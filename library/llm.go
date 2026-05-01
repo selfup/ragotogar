@@ -11,10 +11,35 @@ import (
 var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	MaxTokens   int           `json:"max_tokens"`
-	Temperature float64       `json:"temperature"`
+	Model          string          `json:"model"`
+	Messages       []chatMessage   `json:"messages"`
+	MaxTokens      int             `json:"max_tokens"`
+	Temperature    float64         `json:"temperature"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+}
+
+// responseFormat mirrors OpenAI's structured-outputs response_format field.
+// Type "json_schema" enables grammar-constrained sampling: the runtime
+// enforces that every emitted token keeps the output a valid instance of the
+// supplied schema. The model can't drift to YAML / markdown / prose, can't
+// invent fields, and can't emit enum values outside the allowed set —
+// regardless of instruction-following quality. Supported by LM Studio,
+// vLLM, OpenAI, and most OpenAI-compatible servers.
+//
+// LM Studio specifically rejects type "json_object" (the looser JSON-only
+// constraint OpenAI also supports); only "json_schema" or "text" are valid.
+type responseFormat struct {
+	Type       string         `json:"type"`
+	JSONSchema *jsonSchemaDef `json:"json_schema,omitempty"`
+}
+
+// jsonSchemaDef is the OpenAI strict-mode wrapper around an actual JSON
+// schema. Strict mode requires every property appear in required, every
+// object set additionalProperties=false, and no $ref / allOf / anyOf.
+type jsonSchemaDef struct {
+	Name   string         `json:"name"`
+	Strict bool           `json:"strict"`
+	Schema map[string]any `json:"schema"`
 }
 
 type chatMessage struct {
@@ -44,6 +69,31 @@ type chatResponse struct {
 // on 429 responses, which is what cloud APIs (OpenAI, Anthropic, Together,
 // Groq) all use to signal rate limits.
 func LLMComplete(ctx context.Context, model, prompt string) (string, error) {
+	return llmComplete(ctx, model, prompt, nil)
+}
+
+// LLMCompleteSchema is LLMComplete with a JSON-schema constraint on the
+// output. The runtime grammar-constrains every emitted token to keep the
+// output a valid instance of the supplied schema in OpenAI strict mode —
+// required keys present, scalar values within their enums, array members
+// within their enums, no extra fields, no prose drift. Works reliably
+// across model sizes (gemma-2B class through 30B+) because the constraint
+// is enforced at the sampler, not via prompt instruction.
+//
+// schemaName must match the regex [a-zA-Z0-9_-]+ (OpenAI / LM Studio
+// requirement). schema is the JSON schema as a map ready to marshal.
+func LLMCompleteSchema(ctx context.Context, model, prompt, schemaName string, schema map[string]any) (string, error) {
+	return llmComplete(ctx, model, prompt, &responseFormat{
+		Type: "json_schema",
+		JSONSchema: &jsonSchemaDef{
+			Name:   schemaName,
+			Strict: true,
+			Schema: schema,
+		},
+	})
+}
+
+func llmComplete(ctx context.Context, model, prompt string, format *responseFormat) (string, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:       model,
 		MaxTokens:   -1, // let the server pick (LM Studio: full context window)
@@ -51,6 +101,7 @@ func LLMComplete(ctx context.Context, model, prompt string) (string, error) {
 		Messages: []chatMessage{
 			{Role: "user", Content: prompt},
 		},
+		ResponseFormat: format,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal chat request: %w", err)

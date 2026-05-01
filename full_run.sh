@@ -123,7 +123,7 @@ brew services start postgresql@18
 for d in "${DIRS[@]}"; do
     echo "=== describe + classify: $d ==="
     # shellcheck disable=SC2086 # word-split intentional — flags don't contain spaces
-    LM_MODEL="${LM_MODEL:-gemma-4-31b-it}" CLASSIFY_MODEL="${CLASSIFY_MODEL:-nvidia/nemotron-3-nano-4b}" ./scripts/photo_describe.sh $describe_force -classify --preview-workers 8 --inference-workers 4 "$d"
+    LM_MODEL="${LM_MODEL:-mistralai/ministral-3-3b}" CLASSIFY_MODEL="${CLASSIFY_MODEL:-mistralai/ministral-3-3b}" ./scripts/photo_describe.sh $describe_force -classify --preview-workers 8 --inference-workers 2 "$d"
 done
 
 # Safety-net catch-up: run cmd/classify standalone for any photo whose inline
@@ -131,7 +131,7 @@ done
 # needs a clean TRUNCATE. Cheap when nothing's to do (single SELECT).
 echo "=== classify catch-up ==="
 # shellcheck disable=SC2086
-CLASSIFY_MODEL="${CLASSIFY_MODEL:-nvidia/nemotron-3-nano-4b}" ./scripts/classify.sh $classify_reclassify
+CLASSIFY_MODEL="${CLASSIFY_MODEL:-mistralai/ministral-3-3b}" ./scripts/classify.sh $classify_reclassify
 
 echo "=== index ==="
 # shellcheck disable=SC2086
