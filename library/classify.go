@@ -365,11 +365,11 @@ func filterArray(values, allowed []string) []string {
 // wrote, falling back to full_description if the structured fields are all
 // empty. Used as the LLM input for classification.
 func LoadClassifyInput(db *sql.DB, name string) (string, error) {
-	var subject, setting, light, colors, composition, vantage, gt, full sql.NullString
+	var subject, setting, light, colors, composition, vantage, gt, condition, full sql.NullString
 	err := db.QueryRow(`
-		SELECT subject, setting, light, colors, composition, vantage, ground_truth, full_description
+		SELECT subject, setting, light, colors, composition, vantage, ground_truth, condition, full_description
 		FROM descriptions WHERE photo_id = $1
-	`, name).Scan(&subject, &setting, &light, &colors, &composition, &vantage, &gt, &full)
+	`, name).Scan(&subject, &setting, &light, &colors, &composition, &vantage, &gt, &condition, &full)
 	if err != nil {
 		return "", err
 	}
@@ -381,6 +381,7 @@ func LoadClassifyInput(db *sql.DB, name string) (string, error) {
 		{"Composition", composition.String},
 		{"Vantage", vantage.String},
 		{"Ground truth", gt.String},
+		{"Condition", condition.String},
 	}
 	var lines []string
 	for _, p := range parts {

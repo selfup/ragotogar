@@ -119,6 +119,9 @@ func BuildDocument(p *Photo) string {
 	if p.GroundTruth != "" {
 		w("Ground truth: " + p.GroundTruth)
 	}
+	if p.Condition != "" {
+		w("Condition: " + p.Condition)
+	}
 
 	// Typed classification (from cmd/classify) — canonical enum names give
 	// the vector layer a cleaner signal than prose alone. Skipped fields

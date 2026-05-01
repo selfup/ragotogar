@@ -40,6 +40,7 @@ type Photo struct {
 	Composition     string
 	Vantage         string
 	GroundTruth     string
+	Condition       string
 	FullDescription string
 
 	// Typed enum fields produced by cmd/classify. Empty/nil when the photo
@@ -67,7 +68,7 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	var (
 		make_, model, lensModel, lensInfo                                   sql.NullString
 		dateTaken, exposureMode, whiteBalance, flash, software, artist      sql.NullString
-		subject, setting, light, colors, composition, vantage, gt, fullDesc sql.NullString
+		subject, setting, light, colors, composition, vantage, gt, condition, fullDesc sql.NullString
 		focalMM, focal35, fnum, shutter, ec                                 sql.NullFloat64
 		iso                                                                 sql.NullInt64
 		fileBasename                                                        sql.NullString
@@ -85,7 +86,7 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		       e.f_number, e.exposure_time_seconds, e.iso, e.exposure_compensation,
 		       e.exposure_mode, e.white_balance, e.flash, e.software, e.artist,
 		       d.subject, d.setting, d.light, d.colors, d.composition,
-		       d.vantage, d.ground_truth, d.full_description,
+		       d.vantage, d.ground_truth, d.condition, d.full_description,
 		       c.pov_container, c.pov_altitude, c.pov_angle,
 		       c.subject_altitude, c.subject_category, c.subject_distance,
 		       c.subject_count, c.animal_count,
@@ -102,7 +103,7 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		&dateTaken, &focalMM, &focal35,
 		&fnum, &shutter, &iso, &ec,
 		&exposureMode, &whiteBalance, &flash, &software, &artist,
-		&subject, &setting, &light, &colors, &composition, &vantage, &gt, &fullDesc,
+		&subject, &setting, &light, &colors, &composition, &vantage, &gt, &condition, &fullDesc,
 		&povContainer, &povAltitude, &povAngle,
 		&subjectAltitude, pq.Array(&subjectCategory), &subjectDistance,
 		&subjectCount, &animalCount,
@@ -155,6 +156,7 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	p.Composition = composition.String
 	p.Vantage = vantage.String
 	p.GroundTruth = gt.String
+	p.Condition = condition.String
 	p.FullDescription = fullDesc.String
 
 	p.POVContainer = povContainer.String

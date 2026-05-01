@@ -377,7 +377,7 @@ func describeWithRetry(cfg config, b64, exif string) (string, error) {
 }
 
 func describeImage(cfg config, b64, exif string) (string, error) {
-	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame\n- Setting: specific location type, surfaces, objects; explicitly note indoor or outdoor\n- Light: direction, color, source (window/lamp/sun/etc); time of day suggested; weather (clear, overcast, rain, snow, fog)\n- Colors: dominant palette\n- Composition: framing, camera angle (eye level, looking up, looking down), depth of field, distance to the main subject\n- Vantage: where the camera is physically located. Is the photographer on the ground, elevated (balcony, rooftop, hill), inside a vehicle, inside a plane, on a drone, or shooting through a window/foliage/fence? If from a plane, is it on the ground or in flight? If from a vehicle, moving or stopped? Use 'unclear' if there is no evidence either way.\n- Ground truth: how many people are visible (none / one / two / a few / a group / a crowd); how many animals; is anything in motion (subject moving, camera moving, both, or static).\n\nCamera metadata for context:\n" + exif
+	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame\n- Setting: specific location type, surfaces, objects; explicitly note indoor or outdoor\n- Light: direction, color, source (window/lamp/sun/etc); time of day suggested; weather (clear, overcast, rain, snow, fog)\n- Colors: dominant palette\n- Composition: framing, camera angle (eye level, looking up, looking down), depth of field, distance to the main subject\n- Vantage: where the camera is physically located. Is the photographer on the ground, elevated (balcony, rooftop, hill), inside a vehicle, inside a plane, on a drone, or shooting through a window/foliage/fence? If from a plane, is it on the ground or in flight? If from a vehicle, moving or stopped? Use 'unclear' if there is no evidence either way.\n- Ground truth: how many people are visible (none / one / two / a few / a group / a crowd); how many animals; is anything in motion (subject moving, camera moving, both, or static).\n- Condition: physical state visible in the frame — under construction (scaffolding, exposed framing, partial walls, work in progress), worn (visible damage, rust, peeling paint, weathering), aged or old, new or recent, pristine or well-maintained, clean, dirty, cluttered, abandoned, freshly renovated. State what you actually see; use 'unclear' if condition isn't legible from the photo.\n\nCamera metadata for context:\n" + exif
 
 	sessionID := fmt.Sprintf("photo-describe-%d-%d", time.Now().UnixNano(), rand.Int64())
 
@@ -752,6 +752,7 @@ type descriptionFields struct {
 	Composition string `json:"composition"`
 	Vantage     string `json:"vantage"`
 	GroundTruth string `json:"ground_truth"`
+	Condition   string `json:"condition"`
 }
 
 // parseDescriptionFields extracts structured sections from the model output.
@@ -770,6 +771,7 @@ func parseDescriptionFields(description string) descriptionFields {
 		"composition":  &fields.Composition,
 		"vantage":      &fields.Vantage,
 		"ground truth": &fields.GroundTruth,
+		"condition":    &fields.Condition,
 	}
 
 	lines := strings.Split(description, "\n")

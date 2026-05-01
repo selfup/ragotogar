@@ -98,7 +98,7 @@ Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutine
 
 ## Photo Describer (`cmd/describe`)
 
-Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual description via LM Studio's vision API. All output (typed EXIF columns, parsed `subject/setting/light/colors/composition` fields, full description, thumbnail BLOB, model + timing) writes directly to the Postgres library. The `photos` table is the source of truth — no JSON sidecars, no MD/HTML files.
+Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual description via LM Studio's vision API. All output (typed EXIF columns, parsed `subject/setting/light/colors/composition/vantage/ground_truth/condition` fields, full description, thumbnail BLOB, model + timing) writes directly to the Postgres library. The `photos` table is the source of truth — no JSON sidecars, no MD/HTML files.
 
 **Usage:**
 
@@ -155,7 +155,7 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 |-------|-------|
 | `photos` | `id`, `name`, `file_path` (original on disk), `file_basename`, timestamps |
 | `exif` | Typed columns from EXIF: `camera_make`, `camera_model`, `lens_model`, `date_taken` (ISO 8601 + decomposed year/month), `focal_length_mm`, `f_number`, `exposure_time_seconds`, `iso`, `exposure_compensation`, `gps_latitude/longitude`, etc. Plus a generated `fts tsvector` column over camera/lens/year/software/artist so FTS+vector mode can match queries like `2024` or `X100VI` that live only in metadata (v8). |
-| `descriptions` | Parsed `subject / setting / light / colors / composition`, `full_description` (the raw LLM output), and a generated `fts tsvector` column (English stemmer) for keyword recall. `cmd/search`'s FTS arm concatenates this with `exif.fts` at query time so prose tokens and metadata tokens can co-match. |
+| `descriptions` | Parsed `subject / setting / light / colors / composition / vantage / ground_truth / condition`, `full_description` (the raw LLM output), and a generated `fts tsvector` column (English stemmer) for keyword recall. `cmd/search`'s FTS arm concatenates this with `exif.fts` at query time so prose tokens and metadata tokens can co-match. The `condition` column captures wear/age/cleanliness/construction state so queries like "construction site" or "abandoned building" reach the right photos. |
 | `thumbnails` | 1024px JPG bytes as a `BYTEA` BLOB. Generated from the same magick output sent to the vision model — no second resize. |
 | `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
 | `chunks` | One row per chunk per photo. `text TEXT` + `embedding halfvec(2560)` (Qwen3-Embedding-4B GGUF). HNSW index on `embedding halfvec_cosine_ops`. Owned by the indexer (`cmd/index`). |

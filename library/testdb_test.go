@@ -157,6 +157,7 @@ CREATE TABLE descriptions (
     composition       TEXT,
     vantage           TEXT,
     ground_truth      TEXT,
+    condition         TEXT,
     full_description  TEXT,
     fts               tsvector GENERATED ALWAYS AS (
                         to_tsvector('english',
@@ -167,6 +168,7 @@ CREATE TABLE descriptions (
                           coalesce(composition,'')      || ' ' ||
                           coalesce(vantage,'')          || ' ' ||
                           coalesce(ground_truth,'')     || ' ' ||
+                          coalesce(condition,'')        || ' ' ||
                           coalesce(full_description,''))
                       ) STORED
 );

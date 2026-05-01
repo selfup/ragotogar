@@ -9,7 +9,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const schemaVersion = 8 // v8: exif.fts generated tsvector — FTS arm now sees camera/lens/year/software/artist
+const schemaVersion = 9 // v9: descriptions.condition prose column — wear/age/cleanliness/construction state
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
@@ -94,6 +94,11 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("v8: %w", err)
 		}
 	}
+	if maxVersion < 9 {
+		if err := migrateV9(db); err != nil {
+			return fmt.Errorf("v9: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -155,6 +160,41 @@ func migrateV6(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding halfvec_cosine_ops)`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateV9 adds the descriptions.condition prose column for state-of-the-
+// frame descriptors (under construction, worn, pristine, etc.). The fts
+// generated column is dropped and recreated to fold condition into its
+// to_tsvector input — same pattern as migrateV4: generated columns can't be
+// ALTER'd in place but the fts column has no source-of-truth data of its
+// own (GENERATED ALWAYS … STORED), so the drop/recreate is non-lossy.
+func migrateV9(db *sql.DB) error {
+	if _, err := db.Exec(`ALTER TABLE descriptions ADD COLUMN IF NOT EXISTS condition TEXT`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE descriptions DROP COLUMN IF EXISTS fts`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		ALTER TABLE descriptions ADD COLUMN fts tsvector GENERATED ALWAYS AS (
+			to_tsvector('english',
+				coalesce(subject,'')          || ' ' ||
+				coalesce(setting,'')          || ' ' ||
+				coalesce(light,'')            || ' ' ||
+				coalesce(colors,'')           || ' ' ||
+				coalesce(composition,'')      || ' ' ||
+				coalesce(vantage,'')          || ' ' ||
+				coalesce(ground_truth,'')     || ' ' ||
+				coalesce(condition,'')        || ' ' ||
+				coalesce(full_description,''))
+		) STORED
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_descriptions_fts ON descriptions USING gin(fts)`); err != nil {
 		return err
 	}
 	return nil
@@ -330,8 +370,8 @@ func insertPhoto(
 	}
 
 	if _, err := tx.Exec(`
-		INSERT INTO descriptions (photo_id, subject, setting, light, colors, composition, vantage, ground_truth, full_description)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO descriptions (photo_id, subject, setting, light, colors, composition, vantage, ground_truth, condition, full_description)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT(photo_id) DO UPDATE SET
 			subject          = EXCLUDED.subject,
 			setting          = EXCLUDED.setting,
@@ -340,6 +380,7 @@ func insertPhoto(
 			composition      = EXCLUDED.composition,
 			vantage          = EXCLUDED.vantage,
 			ground_truth     = EXCLUDED.ground_truth,
+			condition        = EXCLUDED.condition,
 			full_description = EXCLUDED.full_description
 	`,
 		name,
@@ -350,6 +391,7 @@ func insertPhoto(
 		nullIfEmpty(fields.Composition),
 		nullIfEmpty(fields.Vantage),
 		nullIfEmpty(fields.GroundTruth),
+		nullIfEmpty(fields.Condition),
 		nullIfEmpty(desc),
 	); err != nil {
 		return fmt.Errorf("upsert descriptions: %w", err)
