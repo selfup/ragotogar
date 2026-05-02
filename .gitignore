@@ -16,6 +16,8 @@ tools/.rag_index
 tools/.sql_index
 .DS_Store
 ._*
+.claude/*
+!.claude/settings.local.json
 descriptions
 mistralai
 001-*
