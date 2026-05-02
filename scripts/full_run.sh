@@ -43,6 +43,15 @@ set -euo pipefail
 # Override the vision model: LM_MODEL=qwen/qwen3-vl-8b ./full_run.sh /path
 # Override the classifier:   CLASSIFY_MODEL=mistralai/devstral-small-2-2512 ./full_run.sh /path
 #
+# Worker counts (all per-stage; defaults are tuned for local LM Studio):
+#   PREVIEW_WORKERS    cmd/describe preview (ImageMagick + exiftool)   default 8
+#   INFERENCE_WORKERS  cmd/describe vision LLM                          default 3
+#   CLASSIFY_WORKERS   cmd/classify catch-up text LLM                   default 8
+#   INDEX_WORKERS      cmd/index embed (1 for local; 8–16 for cloud)    default 1
+#
+# Example — fan everything out for an OpenRouter run:
+#   (source openrouter.env && INFERENCE_WORKERS=16 INDEX_WORKERS=16 ./scripts/full_run.sh /path)
+#
 # Prereq: ./scripts/bootstrap.sh (one-time, sets up Postgres + pgvector)
 
 REBUILD=0
@@ -134,11 +143,12 @@ done
 # needs a clean TRUNCATE. Cheap when nothing's to do (single SELECT).
 echo "=== classify catch-up ==="
 # shellcheck disable=SC2086
-CLASSIFY_MODEL="${CLASSIFY_MODEL:-mistralai/ministral-3-3b}" ./scripts/classify.sh $classify_reclassify
+CLASSIFY_MODEL="${CLASSIFY_MODEL:-mistralai/ministral-3-3b}" \
+    ./scripts/classify.sh $classify_reclassify -workers "${CLASSIFY_WORKERS:-8}"
 
 echo "=== index ==="
 # shellcheck disable=SC2086
-./scripts/index.sh $index_reindex
-\
+./scripts/index.sh $index_reindex -workers "${INDEX_WORKERS:-1}"
+
 echo "=== web ==="
 ./scripts/web.sh
