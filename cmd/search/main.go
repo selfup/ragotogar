@@ -58,7 +58,7 @@ func run(dsn, query string, retrieve, precise, hybrid, verify bool, cosine, fts 
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		return fmt.Errorf("connect %s: %w", dsn, err)
+		return fmt.Errorf("connect %s: %w", library.MaskDSN(dsn), err)
 	}
 
 	var n int

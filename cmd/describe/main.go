@@ -159,7 +159,7 @@ func initOnly(cfg config) error {
 		return fmt.Errorf("open library: %w", err)
 	}
 	defer db.Close()
-	fmt.Printf("Schema applied to %s\n", cfg.dsn)
+	fmt.Printf("Schema applied to %s\n", library.MaskDSN(cfg.dsn))
 	return nil
 }
 
@@ -180,7 +180,7 @@ func run(cfg config) error {
 	}
 
 	fmt.Printf("Found %d image(s) in '%s'\n", len(files), cfg.inputDir)
-	fmt.Printf("Library: %s\n", cfg.dsn)
+	fmt.Printf("Library: %s\n", library.MaskDSN(cfg.dsn))
 	fmt.Printf("Model:   %s @ %s\n", cfg.model, cfg.lmBase)
 	fmt.Printf("Retries: %d (delay %s)\n", cfg.maxRetries, cfg.retryDelay)
 	fmt.Printf("Preview workers: %d\n", cfg.previewWorkers)
@@ -235,7 +235,7 @@ func run(cfg config) error {
 
 	if len(jobs) == 0 {
 		fmt.Printf("\nDone. Processed: 0, Errors: 0, Skipped: %d\n", skipped)
-		fmt.Printf("Library: %s\n", cfg.dsn)
+		fmt.Printf("Library: %s\n", library.MaskDSN(cfg.dsn))
 		return nil
 	}
 
@@ -349,7 +349,7 @@ func run(cfg config) error {
 	wg.Wait()
 
 	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed.Load(), errors.Load(), skipped)
-	fmt.Printf("Library: %s\n", cfg.dsn)
+	fmt.Printf("Library: %s\n", library.MaskDSN(cfg.dsn))
 	return nil
 }
 

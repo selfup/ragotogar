@@ -155,7 +155,7 @@ func main() {
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		log.Fatalf("ping db (%s): %v", *dsn, err)
+		log.Fatalf("ping db (%s): %v", library.MaskDSN(*dsn), err)
 	}
 
 	indexTmpl := template.Must(template.New("index").Parse(indexHTML))
@@ -223,7 +223,7 @@ func main() {
 		http.ServeFile(w, r, filepath.Join(absRepo, "styles.css"))
 	})
 
-	log.Printf("library: %s", *dsn)
+	log.Printf("library: %s", library.MaskDSN(*dsn))
 	log.Printf("repo:    %s", absRepo)
 	log.Printf("listening on http://localhost%s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))

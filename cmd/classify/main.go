@@ -53,7 +53,7 @@ func run(dsn string, reclassify bool, workers int) error {
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		return fmt.Errorf("connect %s: %w", dsn, err)
+		return fmt.Errorf("connect %s: %w", library.MaskDSN(dsn), err)
 	}
 
 	ctx := context.Background()
@@ -70,12 +70,12 @@ func run(dsn string, reclassify bool, workers int) error {
 		return err
 	}
 	if len(todo) == 0 {
-		fmt.Printf("Nothing to classify in %s.\n", dsn)
+		fmt.Printf("Nothing to classify in %s.\n", library.MaskDSN(dsn))
 		return nil
 	}
 
 	model := library.ClassifyModel()
-	fmt.Printf("Classifying %d photo(s) in %s\n", len(todo), dsn)
+	fmt.Printf("Classifying %d photo(s) in %s\n", len(todo), library.MaskDSN(dsn))
 	fmt.Printf("Model: %s @ %s\n", model, library.TextEndpoint())
 	fmt.Printf("Workers: %d\n\n", workers)
 

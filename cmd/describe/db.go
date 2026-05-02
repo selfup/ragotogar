@@ -7,6 +7,8 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"ragotogar/library"
 )
 
 const schemaVersion = 9 // v9: descriptions.condition prose column — wear/age/cleanliness/construction state
@@ -23,7 +25,7 @@ func openDB(dsn string) (*sql.DB, error) {
 	}
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("connect %s: %w", dsn, err)
+		return nil, fmt.Errorf("connect %s: %w", library.MaskDSN(dsn), err)
 	}
 	if err := initSchema(db); err != nil {
 		db.Close()

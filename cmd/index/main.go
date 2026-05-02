@@ -46,7 +46,7 @@ func run(dsn string, reindex bool) error {
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		return fmt.Errorf("connect %s: %w", dsn, err)
+		return fmt.Errorf("connect %s: %w", library.MaskDSN(dsn), err)
 	}
 
 	ctx := context.Background()
@@ -72,7 +72,7 @@ func run(dsn string, reindex bool) error {
 	}
 	rows.Close()
 	if len(allNames) == 0 {
-		fmt.Printf("No photos in %s. Run cmd/describe first.\n", dsn)
+		fmt.Printf("No photos in %s. Run cmd/describe first.\n", library.MaskDSN(dsn))
 		return nil
 	}
 
@@ -101,7 +101,7 @@ func run(dsn string, reindex bool) error {
 	}
 	skipped := len(allNames) - len(todo)
 
-	fmt.Printf("Found %d photo(s) in %s (skipping %d already indexed)\n", len(allNames), dsn, skipped)
+	fmt.Printf("Found %d photo(s) in %s (skipping %d already indexed)\n", len(allNames), library.MaskDSN(dsn), skipped)
 	fmt.Printf("Embed: %s @ %s\n\n", library.EmbedModel(), library.EmbedEndpoint())
 
 	totalChunks := 0
