@@ -36,6 +36,19 @@ func endpointFor(specificVar string) string {
 	return "http://localhost:1234"
 }
 
+// LLMAPIKey returns the bearer token used in the Authorization header for
+// every OpenAI-shaped endpoint we hit (vision chat, text chat, embeddings).
+// Driven by LLM_API_KEY; the fallback is the literal "lm-studio" because
+// LM Studio ignores the token entirely and any non-empty string passes
+// through. Set LLM_API_KEY when pointing any *_ENDPOINT at a cloud
+// provider (OpenRouter, OpenAI, Together, etc.).
+func LLMAPIKey() string {
+	if v := os.Getenv("LLM_API_KEY"); v != "" {
+		return v
+	}
+	return "lm-studio"
+}
+
 // retryConfig controls the exponential-backoff behavior of postJSONWithRetry.
 // Defaults are tuned for local LM Studio (where transient errors are rare and
 // retries should resolve quickly) but stretch comfortably for cloud APIs that

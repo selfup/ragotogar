@@ -413,7 +413,7 @@ func describeImage(cfg config, b64, exif string) (string, error) {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer lm-studio")
+	httpReq.Header.Set("Authorization", "Bearer "+library.LLMAPIKey())
 
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(httpReq)

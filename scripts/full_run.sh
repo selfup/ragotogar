@@ -123,7 +123,10 @@ brew services start postgresql@18
 for d in "${DIRS[@]}"; do
     echo "=== describe + classify: $d ==="
     # shellcheck disable=SC2086 # word-split intentional — flags don't contain spaces
-    LM_MODEL="${LM_MODEL:-mistralai/ministral-3-3b}" CLASSIFY_MODEL="${CLASSIFY_MODEL:-mistralai/ministral-3-3b}" ./scripts/photo_describe.sh $describe_force -classify --preview-workers 8 --inference-workers 3 "$d"
+    LM_MODEL="${LM_MODEL:-mistralai/ministral-3-3b}" \
+        CLASSIFY_MODEL="${CLASSIFY_MODEL:-mistralai/ministral-3-3b}" \
+        ./scripts/photo_describe.sh $describe_force -classify \
+        --preview-workers "${PREVIEW_WORKERS:-8}" --inference-workers "${INFERENCE_WORKERS:-3}" "$d"
 done
 
 # Safety-net catch-up: run cmd/classify standalone for any photo whose inline

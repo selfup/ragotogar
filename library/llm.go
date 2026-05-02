@@ -110,7 +110,7 @@ func llmComplete(ctx context.Context, model, prompt string, format *responseForm
 	raw, err := postJSONWithRetry(ctx,
 		TextEndpoint()+"/v1/chat/completions",
 		body,
-		map[string]string{"Authorization": "Bearer lm-studio"},
+		map[string]string{"Authorization": "Bearer " + LLMAPIKey()},
 	)
 	if err != nil {
 		return "", fmt.Errorf("chat request: %w", err)

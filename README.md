@@ -141,6 +141,7 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 | `LIBRARY_DSN` | `postgres:///ragotogar` | Postgres connection string (shared by all components) |
 | `VISION_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the vision model. Set to a cloud provider when you outgrow local LM Studio. |
 | `LM_STUDIO_BASE` | `http://localhost:1234` | Legacy single-endpoint fallback used when none of `VISION_ENDPOINT` / `TEXT_ENDPOINT` / `EMBED_ENDPOINT` is set |
+| `LLM_API_KEY` | `lm-studio` | Bearer token sent on every chat / embeddings request. Default works against LM Studio (which ignores it); set to an OpenRouter / OpenAI / Together key when any `*_ENDPOINT` points at a cloud provider. |
 | `LM_MODEL` | `qwen/qwen3-vl-8b` | Vision model name (see `STRATEGIES.md` for model comparison) |
 | `CLASSIFY_MODEL` | `mistralai/ministral-3-3b` | Text model for the inline `-classify` flag (only used when `-classify` is passed) |
 | `TEXT_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the classifier text model when `-classify` is on |
@@ -277,6 +278,7 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./scripts/search.sh -retrieve -ve
 | `TEXT_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the verify-pass text model |
 | `EMBED_ENDPOINT` | falls back to `LM_STUDIO_BASE` | OpenAI-compatible URL for the embedding model |
 | `LM_STUDIO_BASE` | `http://localhost:1234` | Legacy single-endpoint fallback when neither of the above is set |
+| `LLM_API_KEY` | `lm-studio` | Bearer token sent to verify and embed endpoints; default ignores LM Studio's auth, set when pointing at a cloud provider |
 | `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for the verify pass |
 | `EMBED_MODEL` | `text-embedding-qwen3-embedding-4b` | 2560-dim embedding model — changing it requires re-indexing |
 

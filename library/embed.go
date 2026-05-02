@@ -89,7 +89,7 @@ func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	raw, err := postJSONWithRetry(ctx,
 		EmbedEndpoint()+"/v1/embeddings",
 		body,
-		map[string]string{"Authorization": "Bearer lm-studio"},
+		map[string]string{"Authorization": "Bearer " + LLMAPIKey()},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("embed request: %w", err)

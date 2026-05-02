@@ -45,6 +45,24 @@ func TestEndpointForFallsBackToLocalhost(t *testing.T) {
 	}
 }
 
+// ── api key env precedence ────────────────────────────────────────────
+
+func TestLLMAPIKeyReadsEnv(t *testing.T) {
+	t.Setenv("LLM_API_KEY", "sk-or-v1-cloudtoken")
+	if got := LLMAPIKey(); got != "sk-or-v1-cloudtoken" {
+		t.Errorf("LLMAPIKey = %q, want sk-or-v1-cloudtoken", got)
+	}
+}
+
+func TestLLMAPIKeyDefaultsToLMStudioLiteral(t *testing.T) {
+	// Empty env should fall back to the lm-studio literal so local
+	// LM Studio (which ignores the token) keeps working without setup.
+	t.Setenv("LLM_API_KEY", "")
+	if got := LLMAPIKey(); got != "lm-studio" {
+		t.Errorf("LLMAPIKey = %q, want lm-studio fallback", got)
+	}
+}
+
 // ── retry behavior ─────────────────────────────────────────────────────
 
 // fastRetry overrides the slow defaults so tests run in ms.
