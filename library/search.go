@@ -14,9 +14,15 @@ import (
 
 // Search defaults — exported so cmd/search and cmd/web both pull from the
 // same source of truth instead of redefining magic numbers.
+//
+// TopK = 0 is the "unbounded" sentinel: Search / searchFTS skip the LIMIT
+// clause entirely and SearchHybrid skips the post-fusion cap. The cosine
+// threshold (and, for FTS, FTSRelativeThreshold) becomes the only bound on
+// result size. cmd/web and cmd/search's -retrieve/-precise/-hybrid paths
+// rely on this — they want every match above the cutoff, not an arbitrary
+// truncation.
 const (
 	DefaultTopK       = 30
-	StrictTopK        = 500
 	CosineThreshold   = 0.5 // applied in retrieve / precise modes
 	VerifyConcurrency = 8
 
@@ -66,6 +72,12 @@ func NewSearcher(db *sql.DB) *Searcher {
 // table, and returns the per-photo best-chunk similarity in descending order.
 // Filters by Threshold when non-nil. Caller decides whether to feed the
 // results into VerifyFilter.
+//
+// opts.TopK <= 0 means unbounded — the LIMIT clause is dropped and the only
+// cap on the result set is the optional Threshold. Otherwise LIMIT $2 is
+// appended. The branch keeps the SQL static (no string interpolation of
+// untrusted values) while still letting "give me everything above 0.5" be
+// expressible.
 func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
 	embeddings, err := EmbedTexts(ctx, []string{query})
 	if err != nil {
@@ -73,13 +85,17 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 	}
 	vec := pgvector.NewHalfVector(embeddings[0])
 
-	rows, err := s.db.QueryContext(ctx, `
+	const baseSQL = `
 		SELECT name, MAX(1 - (embedding <=> $1)) AS similarity
 		FROM chunks JOIN photos ON photos.id = chunks.photo_id
 		GROUP BY name
-		ORDER BY similarity DESC
-		LIMIT $2
-	`, vec, opts.TopK)
+		ORDER BY similarity DESC`
+	var rows *sql.Rows
+	if opts.TopK > 0 {
+		rows, err = s.db.QueryContext(ctx, baseSQL+" LIMIT $2", vec, opts.TopK)
+	} else {
+		rows, err = s.db.QueryContext(ctx, baseSQL, vec)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("vector query: %w", err)
 	}
@@ -121,7 +137,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 // match a uniform low ts_rank ≈ 0.08. A flat cutoff over-prunes the latter;
 // the relative cutoff handles both.
 func (s *Searcher) searchFTS(ctx context.Context, query string, topK int, relThreshold float64) ([]Result, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	const baseSQL = `
 		SELECT p.name,
 		       ts_rank(
 		           COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector),
@@ -132,9 +148,16 @@ func (s *Searcher) searchFTS(ctx context.Context, query string, topK int, relThr
 		LEFT JOIN exif e         ON p.id = e.photo_id
 		WHERE (COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector))
 		      @@ plainto_tsquery('english', $1)
-		ORDER BY rank DESC
-		LIMIT $2
-	`, query, topK)
+		ORDER BY rank DESC`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if topK > 0 {
+		rows, err = s.db.QueryContext(ctx, baseSQL+" LIMIT $2", query, topK)
+	} else {
+		rows, err = s.db.QueryContext(ctx, baseSQL, query)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("fts query: %w", err)
 	}
@@ -191,19 +214,15 @@ func (s *Searcher) SearchHybrid(ctx context.Context, query string, opts SearchOp
 		vecCh <- lane{r, err}
 	}()
 	go func() {
-		// FTS doesn't honor opts.Threshold (different score space) but
-		// does honor opts.TopK as the cap on per-lane retrieval before
-		// fusion. opts.FTSThresholdRel = 0 means "use the package
-		// default" so callers can leave it unset.
-		topK := opts.TopK
-		if topK <= 0 {
-			topK = StrictTopK
-		}
+		// FTS honors opts.TopK as a per-lane cap; 0 propagates as
+		// "unbounded" the same way Search treats it. opts.FTSThresholdRel
+		// = 0 means "use the package default" so callers can leave it
+		// unset.
 		relThreshold := opts.FTSThresholdRel
 		if relThreshold <= 0 {
 			relThreshold = FTSRelativeThreshold
 		}
-		r, err := s.searchFTS(ctx, query, topK, relThreshold)
+		r, err := s.searchFTS(ctx, query, opts.TopK, relThreshold)
 		ftsCh <- lane{r, err}
 	}()
 
@@ -216,11 +235,9 @@ func (s *Searcher) SearchHybrid(ctx context.Context, query string, opts SearchOp
 		return nil, fts.err
 	}
 
-	final := opts.TopK
-	if final <= 0 {
-		final = DefaultTopK
-	}
-	return rrfFuse([][]Result{vec.results, fts.results}, RRFK, final), nil
+	// opts.TopK <= 0 → no post-fusion cap; rrfFuse already handles that
+	// via its own topK<=0 branch.
+	return rrfFuse([][]Result{vec.results, fts.results}, RRFK, opts.TopK), nil
 }
 
 // rrfFuse implements Reciprocal Rank Fusion (Cormack et al. 2009).

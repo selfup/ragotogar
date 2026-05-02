@@ -25,9 +25,9 @@ import (
 func main() {
 	var (
 		dsn      = flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
-		retrieve = flag.Bool("retrieve", false, "Top-500 vector retrieval, no LLM synthesis")
+		retrieve = flag.Bool("retrieve", false, "Unbounded vector retrieval (every match above the cosine cutoff), no LLM synthesis")
 		precise  = flag.Bool("precise", false, "Strict retrieval; alias for -retrieve")
-		hybrid   = flag.Bool("hybrid", false, "Vector retrieval + Postgres FTS, fused via Reciprocal Rank Fusion")
+		hybrid   = flag.Bool("hybrid", false, "Vector retrieval + Postgres FTS, fused via Reciprocal Rank Fusion (unbounded above the cosine cutoff)")
 		verify   = flag.Bool("verify", false, "With -retrieve/-precise/-hybrid: run an LLM yes/no check per candidate, keep only YES")
 		cosine   = flag.Float64("cosine", library.CosineThreshold, "Vector cosine cutoff (0..1). Applied in -retrieve/-precise/-hybrid modes.")
 		fts      = flag.Float64("fts", library.FTSRelativeThreshold, "FTS adaptive threshold ratio (0..1). 0 = no FTS filter; 1 = only the top-ranked FTS match.")
@@ -71,7 +71,9 @@ func run(dsn, query string, retrieve, precise, hybrid, verify bool, cosine, fts 
 
 	opts := library.SearchOptions{TopK: library.DefaultTopK, FTSThresholdRel: fts}
 	if retrieve || precise || hybrid {
-		opts.TopK = library.StrictTopK
+		// Strict-retrieval modes drop the LIMIT entirely — the cosine
+		// threshold is the only bound. cmd/web does the same.
+		opts.TopK = 0
 		t := cosine
 		opts.Threshold = &t
 	}

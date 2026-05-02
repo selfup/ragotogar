@@ -112,6 +112,17 @@ const indexHTML = `<!doctype html>
           <input type="radio" name="mode" value="fts-vector-verify" {{if eq .Mode "fts-vector-verify"}}checked{{end}} onchange="this.form.submit()">FTS+vector+verify
         </label>
       </div>
+      <div class="modes" title="Sort order — applied after retrieval. NULL date_taken always at the end.">
+        <label class="{{if eq .Sort "relevance"}}active{{end}}" title="Keep retrieval ordering (cosine / RRF / verify).">
+          <input type="radio" name="sort" value="relevance" {{if eq .Sort "relevance"}}checked{{end}} onchange="this.form.submit()">as returned
+        </label>
+        <label class="{{if eq .Sort "date-desc"}}active{{end}}" title="Newest first by EXIF date_taken.">
+          <input type="radio" name="sort" value="date-desc" {{if eq .Sort "date-desc"}}checked{{end}} onchange="this.form.submit()">newest first
+        </label>
+        <label class="{{if eq .Sort "date-asc"}}active{{end}}" title="Oldest first by EXIF date_taken.">
+          <input type="radio" name="sort" value="date-asc" {{if eq .Sort "date-asc"}}checked{{end}} onchange="this.form.submit()">oldest first
+        </label>
+      </div>
       <div class="sliders" title="Tune the precision/recall floor for each retrieval arm. Default cosine 0.50, FTS ratio 0.30.">
         <label>
           <span>cosine ≥</span>

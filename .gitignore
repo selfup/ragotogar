@@ -5,7 +5,6 @@ cmd/cashier/cashier
 cmd/web/web
 cmd/index/index
 cmd/search/search
-
 .test_log.txt
 .env
 describe_test*
@@ -17,11 +16,8 @@ tools/.rag_index
 tools/.sql_index
 .DS_Store
 ._*
-.claude
-
 descriptions
 mistralai
-
 001-*
-
 full_run.log
+auth.env

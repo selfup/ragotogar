@@ -25,6 +25,7 @@ type result struct {
 type pageData struct {
 	Q               Q
 	Mode            string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify"
+	Sort            string // "relevance" (default) | "date-desc" | "date-asc"
 	CosineThreshold string // formatted for the slider's value attribute
 	FTSThresholdRel string
 	Latency         string // formatted "234 ms" / "1.2 s"; empty when no search ran
@@ -108,6 +109,23 @@ func resolveMode(m string) string {
 	return "naive"
 }
 
+// validSorts — three orderings the UI exposes.
+//   relevance : keep the order returned by retrieval (cosine / RRF / verify)
+//   date-desc : exif.date_taken DESC, NULL last
+//   date-asc  : exif.date_taken ASC,  NULL last
+var validSorts = map[string]bool{
+	"relevance": true,
+	"date-desc": true,
+	"date-asc":  true,
+}
+
+func resolveSort(s string) string {
+	if validSorts[s] {
+		return s
+	}
+	return "relevance"
+}
+
 func defaultDSN() string {
 	if v := os.Getenv("LIBRARY_DSN"); v != "" {
 		return v
@@ -151,18 +169,19 @@ func main() {
 		}
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
 		mode := resolveMode(r.URL.Query().Get("mode"))
+		sortBy := resolveSort(r.URL.Query().Get("sort"))
 		cosine := parseThreshold(r.URL.Query().Get("cosine"), library.CosineThreshold)
 		ftsRel := parseThreshold(r.URL.Query().Get("fts"), library.FTSRelativeThreshold)
 
 		var (
-			results     []result
-			latency     string
-			total       int
-			verifyView  *verifyStatsView
+			results    []result
+			latency    string
+			total      int
+			verifyView *verifyStatsView
 		)
 		if q != "" {
 			res := search(db, q, mode, cosine, ftsRel)
-			results = res.Results
+			results = applySort(db, res.Results, sortBy)
 			latency = formatLatency(res.Elapsed)
 			total = countPhotos(db)
 			if res.Stats != nil {
@@ -178,6 +197,7 @@ func main() {
 		if err := indexTmpl.Execute(w, pageData{
 			Q:               Q(q),
 			Mode:            mode,
+			Sort:            sortBy,
 			CosineThreshold: fmt.Sprintf("%.2f", cosine),
 			FTSThresholdRel: fmt.Sprintf("%.2f", ftsRel),
 			Latency:         latency,

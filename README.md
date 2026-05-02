@@ -247,7 +247,7 @@ lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 # Query — pure vector similarity, top 30 by default
 ./scripts/search.sh "bedroom photos with warm light"
 
-# Retrieval only — top-500, cosine ≥ 0.5, no LLM synthesis
+# Retrieval only — every match above cosine ≥ 0.5, no LLM synthesis
 ./scripts/search.sh -retrieve "shallow depth of field"
 
 # Strict retrieval — alias for -retrieve
@@ -265,7 +265,7 @@ SEARCH_MODEL="mistralai/devstral-small-2-2512" ./scripts/search.sh -retrieve -ve
 | Flag | Description |
 |------|-------------|
 | *(default)* | Top-30 vector retrieval, no LLM |
-| `-retrieve` | Top-500 vector retrieval, cosine ≥ 0.5, no LLM (used by cmd/web; output parses cleanly via the `[N] name` regex) |
+| `-retrieve` | Unbounded vector retrieval — every chunk match with cosine ≥ 0.5, no LLM (used by cmd/web; output parses cleanly via the `[N] name` regex) |
 | `-precise` | Same as `-retrieve` (kept for parity with the old Python tool's `--precise`) |
 | `-verify` | Composes with `-retrieve`/`-precise`: runs an LLM yes/no relevance check on each candidate's `BuildDocument` text in an 8-way goroutine pool, keeps only YES matches |
 
@@ -324,14 +324,24 @@ Then open `http://localhost:8080`.
 
 **Mode toggle:**
 
-| Pill | cmd/search invocation | Behavior |
-|------|------------------------|----------|
-| `vector` | `-retrieve` | Pure vector similarity (cosine ≥ 0.5, top 500). **Default and recommended** — sub-second on small corpora. |
-| `naive-verify` | `-retrieve -verify` | Vector retrieval + an LLM yes/no check on each candidate (text pulled from SQL). ~1–6s per query. Use for tighter precision when "red truck" returns too much red and too much truck-shaped. |
-| `graph` | `-retrieve` | (legacy LightRAG concept; no graph backend after Phase 2 — same as vector) |
-| `hybrid` | `-retrieve` | (legacy LightRAG concept; same as vector) |
+| Pill | cmd/search equivalent | Behavior |
+|------|-----------------------|----------|
+| `vector` | `-retrieve` | Pure vector similarity, every match above the cosine cutoff (default 0.50). **Default and recommended** — sub-second on small corpora. |
+| `vector+verify` | `-retrieve -verify` | Vector retrieval + an LLM yes/no check on each candidate (text pulled from SQL). ~1–6s per query. Use for tighter precision when "red truck" returns too much red and too much truck-shaped. |
+| `FTS+vector` | `-retrieve -hybrid` | Vector ∪ Postgres full-text search, fused via Reciprocal Rank Fusion (RRF). FTS reaches `descriptions.fts` (LLM prose) plus `exif.fts` (camera / lens / year / software / artist) so queries like `2024` or `X100VI` match metadata literals vector can't rank. |
+| `FTS+vector+verify` | `-retrieve -hybrid -verify` | RRF fusion + LLM yes/no per candidate. Tightest precision; slowest. |
 
-All pills use `--retrieve` (vector retrieval, no LLM synthesis). Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when chunks reference a basename that's since been deleted from the library).
+All pills bound by the same cosine slider (vector arm) and FTS slider (FTS arm); the search has no top-N cap, only the threshold floors. Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when chunks reference a basename that's since been deleted from the library).
+
+**Sort toggle:**
+
+A second pill row controls result ordering — applied after retrieval (and after verify):
+
+| Pill | Behavior |
+|------|----------|
+| `as returned` | Keep retrieval order — cosine for vector, RRF score for FTS+vector, retrieval order preserved through verify. **Default.** |
+| `newest first` | `exif.date_taken` DESC, NULL last. |
+| `oldest first` | `exif.date_taken` ASC, NULL last. |
 
 The verify pass (both verify-mode pills above) consults `verify_cache` before each LLM call. Hit rate is shown directly above the result grid — `verify: 30 candidates · 18 cached · 12 LLM · 60% hit` — so you can watch the rate climb as you iterate on a query. Cache rows for a photo are silently invalidated when the photo is re-described (`verified_at > inference.described_at` freshness check).
 

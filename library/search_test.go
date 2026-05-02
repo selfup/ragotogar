@@ -51,6 +51,19 @@ func TestRRFFuseTopKCap(t *testing.T) {
 	}
 }
 
+func TestRRFFuseTopKZeroIsUnbounded(t *testing.T) {
+	// topK=0 is the "unbounded" sentinel — every unique doc across all
+	// input lists should reach the output. SearchHybrid relies on this
+	// when the caller leaves opts.TopK at 0 to mean "every match above
+	// the cosine cutoff."
+	vec := []Result{{Name: "A"}, {Name: "B"}, {Name: "C"}, {Name: "D"}, {Name: "E"}}
+	fts := []Result{{Name: "F"}, {Name: "G"}, {Name: "H"}}
+	out := rrfFuse([][]Result{vec, fts}, 60, 0)
+	if len(out) != 8 {
+		t.Errorf("topK=0 should return all 8 unique docs, got %d", len(out))
+	}
+}
+
 func TestRRFFuseSingleListPassthrough(t *testing.T) {
 	// One empty list shouldn't break the fusion or affect ranks.
 	vec := []Result{{Name: "A"}, {Name: "B"}}
