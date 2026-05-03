@@ -150,5 +150,4 @@ echo "=== index ==="
 # shellcheck disable=SC2086
 ./scripts/index.sh $index_reindex -workers "${INDEX_WORKERS:-1}"
 
-echo "=== web ==="
-./scripts/web.sh
+echo "==> all done!"
