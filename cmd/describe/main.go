@@ -54,11 +54,13 @@ type config struct {
 
 // LM Studio chat completion request/response types.
 type chatRequest struct {
-	Model    string        `json:"model"`
-	User     string        `json:"user"`
-	Messages []chatMessage `json:"messages"`
-	MaxToks  int           `json:"max_tokens"`
-	Temp     float64       `json:"temperature"`
+	Model    string                   `json:"model"`
+	User     string                   `json:"user"`
+	Messages []chatMessage            `json:"messages"`
+	MaxToks  int                      `json:"max_tokens"`
+	Temp     float64                  `json:"temperature"`
+	Provider *library.ProviderRouting `json:"provider,omitempty"`
+	ZDR      bool                     `json:"zdr,omitempty"`
 }
 
 type chatMessage struct {
@@ -431,8 +433,10 @@ func describeImage(cfg config, b64, exif string) (string, error) {
 				},
 			},
 		},
-		MaxToks: 16384,
-		Temp:    0.3,
+		MaxToks:  16384,
+		Temp:     0.3,
+		Provider: library.DefaultProvider,
+		ZDR:      library.DefaultZDR,
 	}
 
 	body, err := json.Marshal(req)

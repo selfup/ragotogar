@@ -49,6 +49,29 @@ func LLMAPIKey() string {
 	return "lm-studio"
 }
 
+// ProviderRouting mirrors OpenRouter's `provider` request field. Other
+// OpenAI-compatible servers (LM Studio, OpenAI proper, vLLM, Together)
+// ignore unknown top-level body fields, so the fields below ride along
+// on every request without provider-specific branching — they take
+// effect when (and only when) the endpoint is OpenRouter.
+type ProviderRouting struct {
+	// DataCollection="deny" tells OpenRouter to route only to upstream
+	// providers whose policies declare no request-data retention. Combined
+	// with ZDR=true on the request itself, this is the strongest privacy
+	// posture OpenRouter exposes.
+	DataCollection string `json:"data_collection,omitempty"`
+}
+
+// Privacy defaults applied to every chat / embed / vision request body.
+// data_collection=deny + zdr=true is the strongest privacy combination
+// OpenRouter accepts: only zero-retention upstreams are eligible for
+// routing AND the request itself is flagged ZDR. Local LM Studio and
+// most other OpenAI-compatible servers ignore both fields.
+var (
+	DefaultProvider = &ProviderRouting{DataCollection: "deny"}
+	DefaultZDR      = true
+)
+
 // retryConfig controls the exponential-backoff behavior of postJSONWithRetry.
 // Defaults are tuned for local LM Studio (where transient errors are rare and
 // retries should resolve quickly) but stretch comfortably for cloud APIs that

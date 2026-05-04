@@ -11,11 +11,13 @@ import (
 var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 type chatRequest struct {
-	Model          string          `json:"model"`
-	Messages       []chatMessage   `json:"messages"`
-	MaxTokens      int             `json:"max_tokens"`
-	Temperature    float64         `json:"temperature"`
-	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	Model          string           `json:"model"`
+	Messages       []chatMessage    `json:"messages"`
+	MaxTokens      int              `json:"max_tokens"`
+	Temperature    float64          `json:"temperature"`
+	ResponseFormat *responseFormat  `json:"response_format,omitempty"`
+	Provider       *ProviderRouting `json:"provider,omitempty"`
+	ZDR            bool             `json:"zdr,omitempty"`
 }
 
 // responseFormat mirrors OpenAI's structured-outputs response_format field.
@@ -102,6 +104,8 @@ func llmComplete(ctx context.Context, model, prompt string, format *responseForm
 			{Role: "user", Content: prompt},
 		},
 		ResponseFormat: format,
+		Provider:       DefaultProvider,
+		ZDR:            DefaultZDR,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal chat request: %w", err)
