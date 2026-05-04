@@ -11,7 +11,7 @@ import (
 	"ragotogar/library"
 )
 
-const schemaVersion = 9 // v9: descriptions.condition prose column — wear/age/cleanliness/construction state
+const schemaVersion = 11 // v11: classify_filter_cache — saved post-retrieval LLM drop verdicts keyed on (nl_query, photo_id, classify_model)
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
@@ -99,6 +99,16 @@ func migrate(db *sql.DB) error {
 	if maxVersion < 9 {
 		if err := migrateV9(db); err != nil {
 			return fmt.Errorf("v9: %w", err)
+		}
+	}
+	if maxVersion < 10 {
+		if err := migrateV10(db); err != nil {
+			return fmt.Errorf("v10: %w", err)
+		}
+	}
+	if maxVersion < 11 {
+		if err := migrateV11(db); err != nil {
+			return fmt.Errorf("v11: %w", err)
 		}
 	}
 	return nil
@@ -200,6 +210,44 @@ func migrateV9(db *sql.DB) error {
 		return err
 	}
 	return nil
+}
+
+// migrateV11 adds the classify_filter_cache table — saved LLM drop verdicts
+// from the post-retrieval classifier filter, keyed on (nl_query, photo_id,
+// classify_model). Verdicts are filtered for freshness at lookup time
+// (cfc.filtered_at > classified.classified_at), so re-classifying a photo
+// silently invalidates older verdicts. Idempotent on existing libraries.
+func migrateV11(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS classify_filter_cache (
+		    nl_query        TEXT NOT NULL,
+		    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+		    classify_model  TEXT NOT NULL,
+		    drop_verdict    BOOLEAN NOT NULL,
+		    filtered_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+		    PRIMARY KEY (nl_query, photo_id, classify_model)
+		)
+	`)
+	return err
+}
+
+// migrateV10 adds the query_rewrite_cache table — persistent NL→boolean
+// query rewrite cache for the auto search mode. PK includes rewrite_model
+// so swapping CLASSIFY_MODEL (or whatever rewrite model env var lands here)
+// doesn't cross-contaminate cached rewrites from a different vocabulary
+// or capability tier. Idempotent on existing libraries because schemaSQL
+// also declares the table CREATE … IF NOT EXISTS.
+func migrateV10(db *sql.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS query_rewrite_cache (
+		    nl_query       TEXT NOT NULL,
+		    rewrite_model  TEXT NOT NULL,
+		    rewritten      TEXT NOT NULL,
+		    rewritten_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+		    PRIMARY KEY (nl_query, rewrite_model)
+		)
+	`)
+	return err
 }
 
 // migrateV8 adds a generated tsvector on the exif table so the FTS search

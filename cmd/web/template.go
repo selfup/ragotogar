@@ -78,6 +78,18 @@ const indexHTML = `<!doctype html>
       font-variant-numeric: tabular-nums;
     }
     .verify-stats .hit { color: var(--fg); }
+    .rewrite-line {
+      color: var(--mute); font-size: 0.8rem; margin: -0.5rem 0 0.5rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .rewrite-line .body { color: var(--fg); }
+    .rewrite-line .saved { color: #6a9955; margin-left: 0.5rem; }
+    .save-toggle {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: 0.8rem; color: var(--mute); cursor: pointer;
+      margin-top: 0.25rem; user-select: none;
+    }
+    .save-toggle input { accent-color: var(--fg); cursor: pointer; }
     .grid {
       display: grid; gap: 1rem;
       grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -110,6 +122,12 @@ const indexHTML = `<!doctype html>
         </label>
         <label class="{{if eq .Mode "fts-vector-verify"}}active{{end}}" title="Vector ∪ FTS fused via RRF, then LLM yes/no per candidate. Tightest precision; slowest.">
           <input type="radio" name="mode" value="fts-vector-verify" {{if eq .Mode "fts-vector-verify"}}checked{{end}} onchange="this.form.submit()">FTS+vector+verify
+        </label>
+        <label class="{{if eq .Mode "auto"}}active{{end}}" title="LLM rewrites your natural-language query into boolean form, then runs FTS+vector. Tick 'save rewrite' to cache it.">
+          <input type="radio" name="mode" value="auto" {{if eq .Mode "auto"}}checked{{end}} onchange="this.form.submit()">auto
+        </label>
+        <label class="{{if eq .Mode "auto-verify"}}active{{end}}" title="LLM rewrite + FTS+vector + LLM verify. Tightest auto path.">
+          <input type="radio" name="mode" value="auto-verify" {{if eq .Mode "auto-verify"}}checked{{end}} onchange="this.form.submit()">auto+verify
         </label>
       </div>
       <div class="modes" title="Sort order — applied after retrieval. NULL date_taken always at the end.">
@@ -148,6 +166,20 @@ const indexHTML = `<!doctype html>
           value="{{.Q}}">
         <button type="submit">search</button>
       </div>
+      <div style="display: flex; gap: 1.25rem; flex-wrap: wrap;">
+        <label class="save-toggle" title="When checked, the rewritten boolean query is cached so repeat searches with the same NL query hit instantly. Off by default — leave it off while iterating, tick when satisfied.">
+          <input type="checkbox" name="save" value="1" {{if .Save}}checked{{end}}>
+          <span>save rewrite</span>
+        </label>
+        <label class="save-toggle" title="After retrieval, ask the LLM to drop candidates whose classifier verdict (typed enums from cmd/classify) contradicts your request. Catches cases where the prose contains a negated lexeme but the photo's classification rules it out (e.g. a sky-plane photo with subject_altitude=in_air for a 'planes on the ground' query).">
+          <input type="checkbox" name="class" value="1" {{if .Classify}}checked{{end}}>
+          <span>classifier filter</span>
+        </label>
+        <label class="save-toggle" title="When checked, classifier filter verdicts are cached per (NL query, photo, model) — same iterate-then-save pattern as 'save rewrite'.">
+          <input type="checkbox" name="save_class" value="1" {{if .SaveClassify}}checked{{end}}>
+          <span>save classifier filter</span>
+        </label>
+      </div>
     </form>
   </header>
 
@@ -160,6 +192,17 @@ const indexHTML = `<!doctype html>
       {{if .Latency}}<span class="latency">({{.Latency}})</span>{{end}}
       {{if not .Results}} — try different words or broader concepts{{end}}
     </div>
+    {{if .Rewrite}}
+      <div class="rewrite-line" title="The boolean query the search actually ran. Edit the box to override; switch off auto mode to run your edit verbatim.">
+        rewritten: <span class="body">{{.Rewrite.Rewritten}}</span>
+        {{if .Rewrite.Cached}}<span class="saved">· saved</span>{{else}}<span class="latency">({{.Rewrite.Elapsed}})</span>{{end}}
+      </div>
+    {{end}}
+    {{if .ClassifyStats}}
+      <div class="verify-stats" title="Classifier filter: LLM compared each candidate's classifier verdict against your NL query and dropped contradictions. Cached verdicts skip the LLM call.">
+        classifier filter: {{.ClassifyStats.Total}} candidates · <span class="hit">{{.ClassifyStats.Dropped}} dropped</span> · {{.ClassifyStats.Cached}} cached · {{.ClassifyStats.LLM}} LLM <span class="latency">({{.ClassifyStats.Elapsed}})</span>
+      </div>
+    {{end}}
     {{if .VerifyStats}}
       <div class="verify-stats" title="Verify pass: cached verdicts skip the LLM and return instantly. Hit rate climbs as repeat queries land.">
         verify: {{.VerifyStats.Total}} candidates · {{.VerifyStats.Cached}} cached · {{.VerifyStats.LLM}} LLM · <span class="hit">{{.VerifyStats.HitRate}} hit</span>

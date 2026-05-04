@@ -205,4 +205,34 @@ CREATE TABLE IF NOT EXISTS verify_cache (
     PRIMARY KEY (query, photo_id, verify_model)
 );
 CREATE INDEX IF NOT EXISTS idx_verify_cache_query ON verify_cache(query, verify_model);
+
+-- query_rewrite_cache stores LLM-rewritten boolean queries keyed on the
+-- canonical (lowercased / trimmed) natural-language input. Hit on repeat
+-- queries skips the LLM round-trip entirely; misses fall through to a live
+-- LLMComplete call. PK includes rewrite_model so swapping the rewrite model
+-- doesn't cross-contaminate cached output from a different vocabulary or
+-- capability tier.
+CREATE TABLE IF NOT EXISTS query_rewrite_cache (
+    nl_query       TEXT NOT NULL,
+    rewrite_model  TEXT NOT NULL,
+    rewritten      TEXT NOT NULL,
+    rewritten_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (nl_query, rewrite_model)
+);
+
+-- classify_filter_cache stores saved drop/keep verdicts from the post-
+-- retrieval classifier-aware LLM filter. One row per (canonical NL query,
+-- photo_id, classify_model). The filter takes a candidate's classifier
+-- enums plus the user's NL request and decides whether the verdict
+-- contradicts the request. Stored verdicts are checked for freshness
+-- against classified.classified_at at lookup — re-classifying a photo
+-- silently invalidates older verdicts.
+CREATE TABLE IF NOT EXISTS classify_filter_cache (
+    nl_query        TEXT NOT NULL,
+    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    classify_model  TEXT NOT NULL,
+    drop_verdict    BOOLEAN NOT NULL,
+    filtered_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (nl_query, photo_id, classify_model)
+);
 `

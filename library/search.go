@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/lib/pq"
 	"github.com/pgvector/pgvector-go"
 )
 
@@ -51,9 +52,89 @@ type Result struct {
 
 // SearchOptions controls Search and SearchHybrid behavior.
 type SearchOptions struct {
-	TopK             int
-	Threshold        *float64 // vector cosine cutoff. nil = return everything up to TopK; non-nil = post-filter on similarity
-	FTSThresholdRel  float64  // FTS adaptive threshold ratio for SearchHybrid. 0 = use FTSRelativeThreshold (the package default)
+	TopK            int
+	Threshold       *float64 // vector cosine cutoff. nil = return everything up to TopK; non-nil = post-filter on similarity
+	FTSThresholdRel float64  // FTS adaptive threshold ratio for SearchHybrid. 0 = use FTSRelativeThreshold (the package default)
+	// VectorQuery overrides the string passed to the embedder in Search.
+	// SearchHybrid propagates it through to the vector arm; the FTS arm
+	// always uses the main query unchanged. When the user types boolean
+	// syntax like `red truck -monochrome`, FTS wants the original string
+	// but the embedder treats `-` as a regular token, not Boolean NOT —
+	// passing the boolean form unchanged biases the embedding toward the
+	// negated word. The caller computes the positive residual via
+	// StripNegation and sets it here. Empty = use the main query for
+	// both arms (the historical default).
+	VectorQuery string
+}
+
+// StripNegation removes websearch_to_tsquery NOT operators (`-term` and
+// `-"foo bar"`) from a query string and returns the positive residual
+// suitable for the vector embedder. Other websearch operators (OR,
+// quoted phrases) are left in place — the embedder reads them as plain
+// text without harm; only negation produces opposite-of-intended bias
+// when embedded.
+//
+// strings.Fields splits on whitespace without respecting quotes, so a
+// quoted negation like -"black and white" lands across multiple
+// tokens; the loop consumes them until the closing quote.
+func StripNegation(q string) string {
+	positive, _ := splitNegation(q)
+	return positive
+}
+
+// ExtractNegation returns the websearch NOT operators from a query string
+// (with the leading `-` preserved on each token), suitable for use as a
+// standalone websearch_to_tsquery filter. Inverse of StripNegation —
+// together they partition the query into positive and negative halves.
+//
+// Used by Search to enforce negation on the vector arm: the embed input
+// is the positive residual (no `-` tokens to confuse the embedder),
+// and the vector results are post-filtered against the negation tsquery.
+// FTS already honors negation natively via websearch_to_tsquery; this
+// closes the same loop on the vector lane.
+func ExtractNegation(q string) string {
+	_, negative := splitNegation(q)
+	return negative
+}
+
+// splitNegation walks the query once and returns (positive, negative)
+// halves so the two public helpers don't duplicate the parser. Quoted
+// negations like -"foo bar" can span multiple whitespace-split tokens;
+// the inner loop consumes them until the closing quote (or end-of-input
+// on an unmatched quote — degenerate input, but bounded).
+func splitNegation(q string) (positive, negative string) {
+	fields := strings.Fields(q)
+	pos := make([]string, 0, len(fields))
+	neg := make([]string, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		switch {
+		case strings.HasPrefix(f, `-"`):
+			// Single-token form -"foo" (closing quote on the same token).
+			if strings.HasSuffix(f, `"`) && len(f) > 2 {
+				neg = append(neg, f)
+				continue
+			}
+			// Multi-token form -"foo bar baz" — consume until the
+			// closing quote, or to the end on an unmatched quote.
+			var b strings.Builder
+			b.WriteString(f)
+			for j := i + 1; j < len(fields); j++ {
+				b.WriteByte(' ')
+				b.WriteString(fields[j])
+				i = j
+				if strings.HasSuffix(fields[j], `"`) {
+					break
+				}
+			}
+			neg = append(neg, b.String())
+		case strings.HasPrefix(f, "-") && len(f) > 1:
+			neg = append(neg, f)
+		default:
+			pos = append(pos, f)
+		}
+	}
+	return strings.Join(pos, " "), strings.Join(neg, " ")
 }
 
 // Searcher wraps a *sql.DB for the vector retrieval + verify pipeline. It's
@@ -79,7 +160,12 @@ func NewSearcher(db *sql.DB) *Searcher {
 // untrusted values) while still letting "give me everything above 0.5" be
 // expressible.
 func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
-	embeddings, err := EmbedTexts(ctx, []string{query})
+	embedInput := query
+	if opts.VectorQuery != "" {
+		embedInput = opts.VectorQuery
+	}
+	negation := ExtractNegation(query)
+	embeddings, err := EmbedTexts(ctx, []string{embedInput})
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
@@ -112,18 +198,85 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if negation != "" && len(out) > 0 {
+		out, err = s.filterByNegation(ctx, out, negation)
+		if err != nil {
+			return nil, fmt.Errorf("negation filter: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// filterByNegation drops vector results whose description / exif text
+// matches the negation portion of the query. The vector embedder doesn't
+// honor websearch NOT operators, so without this step a query like
+// `red truck -monochrome` would still surface monochrome photos via the
+// vector lane (they're geometrically close to "red truck on road" in
+// embedding space). FTS already enforces negation natively in its own
+// retrieval; this method closes the loop on the vector lane against the
+// same FTS surface.
+//
+// The websearch_to_tsquery of `-foo -"bar baz"` is `!foo & !"bar baz"`,
+// which evaluates true for documents that *don't* contain those terms.
+// So `WHERE fts @@ <negation>` keeps the names we want; the survivors
+// list is reapplied to preserve the original retrieval order.
+func (s *Searcher) filterByNegation(ctx context.Context, results []Result, negation string) ([]Result, error) {
+	names := make([]string, len(results))
+	for i, r := range results {
+		names[i] = r.Name
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.name FROM photos p
+		LEFT JOIN descriptions d ON p.id = d.photo_id
+		LEFT JOIN exif e         ON p.id = e.photo_id
+		WHERE p.name = ANY($1)
+		  AND (COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector))
+		      @@ websearch_to_tsquery('english', $2)
+	`, pq.Array(names), negation)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keep := make(map[string]struct{}, len(results))
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		keep[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	filtered := results[:0]
+	for _, r := range results {
+		if _, ok := keep[r.Name]; ok {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered, nil
 }
 
 // searchFTS runs a Postgres full-text search across both descriptions.fts
 // (LLM prose) and exif.fts (camera/lens/year/software/artist metadata).
 // The two tsvectors are concatenated at query time (`d.fts || e.fts`) so a
 // multi-word query like "X100VI bedroom" — where one token lives in metadata
-// and the other in prose — matches via plainto_tsquery's implicit AND.
+// and the other in prose — matches via websearch_to_tsquery's implicit AND.
+//
+// Query parser is websearch_to_tsquery so users can write boolean syntax
+// directly in the search box: bare terms AND, "double quotes" phrase-match,
+// `OR` between terms, and a leading `-` negates ("truck -monochrome"). This
+// makes attribute-binding queries like `red truck -"black and white"`
+// expressible — plainto_tsquery used to ignore operators and just AND
+// every lexeme, which was responsible for B&W highway shots ranking high
+// for "red truck on road" (red brake lights + truck + road all matched).
 //
 // Why concat instead of `WHERE d.fts @@ q OR e.fts @@ q`: the OR form only
-// matches when a single column carries all query tokens. plainto_tsquery
-// AND's its terms, so a cross-column query collapses to zero hits under OR.
+// matches when a single column carries all query tokens. websearch_to_tsquery
+// AND's bare terms, so a cross-column query collapses to zero hits under OR.
 // Concat fuses the two columns into one effective tsvector, restoring the
 // expected behavior. Trade-off: the per-table GIN indexes can't help the
 // concatenated expression, so this degrades to a sequential scan over
@@ -141,13 +294,13 @@ func (s *Searcher) searchFTS(ctx context.Context, query string, topK int, relThr
 		SELECT p.name,
 		       ts_rank(
 		           COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector),
-		           plainto_tsquery('english', $1)
+		           websearch_to_tsquery('english', $1)
 		       ) AS rank
 		FROM photos p
 		LEFT JOIN descriptions d ON p.id = d.photo_id
 		LEFT JOIN exif e         ON p.id = e.photo_id
 		WHERE (COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector))
-		      @@ plainto_tsquery('english', $1)
+		      @@ websearch_to_tsquery('english', $1)
 		ORDER BY rank DESC`
 	var (
 		rows *sql.Rows

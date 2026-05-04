@@ -32,15 +32,44 @@ import (
 // query — the matching photos, the wall-clock duration, and (when the verify
 // pass ran) the verify_cache stats so the template can show the hit rate.
 type searchResult struct {
-	Results []result
-	Elapsed time.Duration
-	Stats   *library.VerifyStats // nil when verify didn't run
+	Results  []result
+	Elapsed  time.Duration
+	Stats    *library.VerifyStats // nil when verify didn't run
+	Rewrite  *rewriteView         // nil when no rewrite happened (mode wasn't auto, or input bypassed)
+	Classify *classifyStatsView   // nil when the classifier filter didn't run (toggle off)
 }
 
-func search(db *sql.DB, query, mode string, cosine, ftsRel float64) searchResult {
+func search(db *sql.DB, query, mode string, cosine, ftsRel float64, save, classify, saveClassify bool) searchResult {
 	start := time.Now()
 	ctx := context.Background()
 	searcher := library.NewSearcher(db)
+
+	// Auto modes run the LLM rewrite first. The boolean output replaces the
+	// original query for both retrieval arms; the result is surfaced in the
+	// UI so the user can see what actually ran. save=true lets the cache
+	// kick in (read existing, write new); save=false skips cache entirely
+	// so the user can iterate to a good rewrite without sticky bad output.
+	effectiveQuery := query
+	var rwView *rewriteView
+	if modeUsesRewrite(mode) {
+		rw, err := library.RewriteQuery(ctx, db, query, library.ClassifyModel(), save)
+		if err != nil {
+			// Advisory — log and fall back to raw query. Search continues.
+			log.Printf("rewrite %q (save=%v): %v", query, save, err)
+		}
+		if rw.Rewritten != "" && rw.Rewritten != query {
+			effectiveQuery = rw.Rewritten
+			rwView = &rewriteView{
+				Rewritten: rw.Rewritten,
+				Cached:    rw.Cached,
+				Elapsed:   formatLatency(rw.Elapsed),
+			}
+		}
+		// Auto modes always retrieve through the FTS+vector path — the
+		// rewrite produces FTS-shaped output and vector-only would waste
+		// the operators.
+		mode = modeAfterRewrite(mode)
+	}
 
 	cosineCopy := cosine
 	opts := library.SearchOptions{
@@ -49,9 +78,14 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) searchResult
 		// (and FTSRelativeThreshold for the FTS arm) is the bound.
 		Threshold:       &cosineCopy,
 		FTSThresholdRel: ftsRel,
+		// VectorQuery is the query with websearch NOT operators stripped —
+		// the FTS arm sees the original string (boolean form intact) but
+		// the embedder gets just the positive residual so `-monochrome`
+		// doesn't bias the embedding toward monochrome.
+		VectorQuery: library.StripNegation(effectiveQuery),
 	}
 
-	fmt.Fprintf(os.Stderr, "search: q=%q mode=%s cosine=%.2f fts=%.2f\n", query, mode, cosine, ftsRel)
+	fmt.Fprintf(os.Stderr, "search: q=%q mode=%s cosine=%.2f fts=%.2f\n", effectiveQuery, mode, cosine, ftsRel)
 
 	var (
 		candidates []library.Result
@@ -59,13 +93,38 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) searchResult
 	)
 	switch mode {
 	case "fts-vector", "fts-vector-verify":
-		candidates, err = searcher.SearchHybrid(ctx, query, opts)
+		candidates, err = searcher.SearchHybrid(ctx, effectiveQuery, opts)
 	default:
-		candidates, err = searcher.Search(ctx, query, opts)
+		candidates, err = searcher.Search(ctx, effectiveQuery, opts)
 	}
 	if err != nil {
-		log.Printf("search %q (mode=%s): %v", query, mode, err)
-		return searchResult{Elapsed: time.Since(start)}
+		log.Printf("search %q (mode=%s): %v", effectiveQuery, mode, err)
+		return searchResult{Elapsed: time.Since(start), Rewrite: rwView}
+	}
+
+	// Classifier filter — runs BEFORE verify so the prose verify (if it runs)
+	// only sees survivors. Cheap structured-input LLM call vs. per-candidate
+	// prose check; doing classifier first reduces the verify-pass workload.
+	// Uses the ORIGINAL NL query so the LLM judges intent, not boolean form.
+	var classifyView *classifyStatsView
+	if classify && len(candidates) > 0 {
+		fmt.Fprintf(os.Stderr, "\n--- Classifier filter on %d candidate(s) ---\n", len(candidates))
+		filtered, cstats, err := library.FilterByClassification(ctx, db, query, candidates, library.ClassifyModel(), saveClassify)
+		if err != nil {
+			// Advisory — log and proceed with unfiltered candidates.
+			log.Printf("classify filter %q: %v", query, err)
+		} else {
+			candidates = filtered
+		}
+		fmt.Fprintf(os.Stderr, "classify filter: %d candidates · %d dropped · %d cached · %d LLM (%v)\n",
+			cstats.Total, cstats.Dropped, cstats.Cached, cstats.LLM, cstats.Elapsed)
+		classifyView = &classifyStatsView{
+			Total:   cstats.Total,
+			Dropped: cstats.Dropped,
+			Cached:  cstats.Cached,
+			LLM:     cstats.LLM,
+			Elapsed: formatLatency(cstats.Elapsed),
+		}
 	}
 
 	verify := mode == "naive-verify" || mode == "fts-vector-verify"
@@ -75,11 +134,15 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) searchResult
 		stats *library.VerifyStats
 	)
 	if verify && len(candidates) > 0 {
+		// Verify uses the ORIGINAL natural-language query, not the boolean
+		// rewrite. The rewrite is a retrieval mechanism; the source of
+		// truth for "does this photo match what the user wanted" is what
+		// they actually typed.
 		fmt.Fprintf(os.Stderr, "\n--- Verifying %d candidate(s) with LLM ---\n", len(candidates))
 		verdicts, s, err := searcher.VerifyFilter(ctx, query, candidates)
 		if err != nil {
 			log.Printf("verify %q: %v", query, err)
-			return searchResult{Elapsed: time.Since(start)}
+			return searchResult{Elapsed: time.Since(start), Rewrite: rwView, Classify: classifyView}
 		}
 		library.LogVerdicts(os.Stderr, verdicts)
 		library.LogVerifyStats(os.Stderr, s)
@@ -96,7 +159,7 @@ func search(db *sql.DB, query, mode string, cosine, ftsRel float64) searchResult
 	for _, name := range names {
 		results = append(results, result{Name: name})
 	}
-	return searchResult{Results: results, Elapsed: time.Since(start), Stats: stats}
+	return searchResult{Results: results, Elapsed: time.Since(start), Stats: stats, Rewrite: rwView, Classify: classifyView}
 }
 
 // applySort reorders results by exif.date_taken when sort is "date-desc" or

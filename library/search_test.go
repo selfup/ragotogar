@@ -79,3 +79,82 @@ func TestRRFFuseEmptyEverything(t *testing.T) {
 		t.Errorf("empty input should yield empty result, got %v", out)
 	}
 }
+
+func TestStripNegation(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"no operators", "red truck on road", "red truck on road"},
+		{"trailing -term", "red truck on road -monochrome", "red truck on road"},
+		{"leading -term", "-monochrome red truck", "red truck"},
+		{"middle -term", "red truck -monochrome on road", "red truck on road"},
+		{"multiple -terms", "red truck on road -monochrome -grayscale -desaturated", "red truck on road"},
+		{"single-token quoted neg", `red truck -"monochrome"`, "red truck"},
+		{"multi-token quoted neg", `red truck on road -"black and white"`, "red truck on road"},
+		{"quoted neg in middle", `red -"black and white" truck on road`, "red truck on road"},
+		{"compound dashed word survives", "truck-driver on road", "truck-driver on road"},
+		{"bare dash survives", "red truck - road", "red truck - road"},
+		{"OR untouched", "red OR maroon truck", "red OR maroon truck"},
+		{"positive quoted phrase untouched", `"red truck" on road`, `"red truck" on road`},
+		{"only-negation collapses to empty", "-monochrome -grayscale", ""},
+		{"unmatched quote in negation consumes rest", `red -"foo bar baz`, "red"},
+		{"runs of whitespace collapsed", "red   truck    -monochrome", "red truck"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := StripNegation(tt.in)
+			if got != tt.want {
+				t.Errorf("StripNegation(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractNegation(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"no operators", "red truck on road", ""},
+		{"single -term", "red truck -monochrome", "-monochrome"},
+		{"multiple -terms", "red truck -monochrome -grayscale -desaturated",
+			"-monochrome -grayscale -desaturated"},
+		{"single-token quoted neg", `red -"monochrome"`, `-"monochrome"`},
+		{"multi-token quoted neg", `red truck on road -"black and white"`, `-"black and white"`},
+		{"mixed -term and quoted", `red truck -monochrome -"black and white" -grayscale`,
+			`-monochrome -"black and white" -grayscale`},
+		{"compound dashed word ignored", "truck-driver on road -cloud", "-cloud"},
+		{"only-negation echoes back", "-monochrome -grayscale", "-monochrome -grayscale"},
+		{"unmatched quote consumes rest as one neg",
+			`red -"foo bar baz`, `-"foo bar baz`},
+		{"OR untouched (no negation)", "red OR maroon truck", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractNegation(tt.in)
+			if got != tt.want {
+				t.Errorf("ExtractNegation(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSplitNegationPartition(t *testing.T) {
+	// StripNegation + ExtractNegation should together account for every
+	// non-whitespace token of the input, modulo quoted-phrase reassembly.
+	// Spot-check a representative case.
+	q := `red truck on road -monochrome -"black and white" -grayscale`
+	pos := StripNegation(q)
+	neg := ExtractNegation(q)
+	if pos != "red truck on road" {
+		t.Errorf("positive: got %q", pos)
+	}
+	if neg != `-monochrome -"black and white" -grayscale` {
+		t.Errorf("negative: got %q", neg)
+	}
+}

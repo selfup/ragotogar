@@ -218,19 +218,51 @@ func run(cfg config) error {
 		err      error
 	}
 
-	// Build job list up front, applying skip-exists serially so we don't
-	// spawn preview workers for photos we won't process.
+	// Build job list up front, applying skip-exists before spawning the
+	// preview / inference pools — no point heating up workers for photos
+	// already in the DB. The skip check needs the canonical safeName,
+	// which is derived from EXIF, so every file pays one exiftool cost
+	// even if it ends up skipped. That cost is parallelized here using
+	// the same -preview-workers knob (exiftool is the same tool the
+	// preview pool uses) so a directory that's 100% already-described
+	// finishes in N/workers × exiftool-time instead of sequentially.
+	type prep struct {
+		exif     exifData
+		safeName string
+	}
+	preps := make([]prep, len(files))
+	prepWorkers := max(min(cfg.previewWorkers, len(files)), 1)
+	prepCh := make(chan int, len(files))
+	var prepWG sync.WaitGroup
+	for range prepWorkers {
+		prepWG.Go(func() {
+			for i := range prepCh {
+				exif := extractEXIF(files[i])
+				preps[i] = prep{
+					exif:     exif,
+					safeName: safeOutputName(cfg.inputDir, files[i], exif),
+				}
+			}
+		})
+	}
+	for i := range files {
+		prepCh <- i
+	}
+	close(prepCh)
+	prepWG.Wait()
+
+	// Sequential decision pass — preserves file-order output for the
+	// [skip] lines and keeps `jobs` deterministic.
 	var jobs []job
 	var skipped int
-	for _, file := range files {
-		exif := extractEXIF(file)
-		safeName := safeOutputName(cfg.inputDir, file, exif)
-		if !cfg.force && existing[safeName] {
-			fmt.Printf("  [skip] %s (already in DB)\n", safeName)
+	for i, file := range files {
+		p := preps[i]
+		if !cfg.force && existing[p.safeName] {
+			fmt.Printf("  [skip] %s (already in DB)\n", p.safeName)
 			skipped++
 			continue
 		}
-		jobs = append(jobs, job{file: file, exif: exif, safeName: safeName})
+		jobs = append(jobs, job{file: file, exif: p.exif, safeName: p.safeName})
 	}
 
 	if len(jobs) == 0 {
@@ -377,7 +409,7 @@ func describeWithRetry(cfg config, b64, exif string) (string, error) {
 }
 
 func describeImage(cfg config, b64, exif string) (string, error) {
-	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame\n- Setting: specific location type, surfaces, objects; explicitly note indoor or outdoor\n- Light: direction, color, source (window/lamp/sun/etc); time of day suggested; weather (clear, overcast, rain, snow, fog)\n- Colors: dominant palette\n- Composition: framing, camera angle (eye level, looking up, looking down), depth of field, distance to the main subject\n- Vantage: where the camera is physically located. Is the photographer on the ground, elevated (balcony, rooftop, hill), inside a vehicle, inside a plane, on a drone, or shooting through a window/foliage/fence? If from a plane, is it on the ground or in flight? If from a vehicle, moving or stopped? Use 'unclear' if there is no evidence either way.\n- Ground truth: how many people are visible (none / one / two / a few / a group / a crowd); how many animals; is anything in motion (subject moving, camera moving, both, or static).\n- Condition: physical state visible in the frame — under construction (scaffolding, exposed framing, partial walls, work in progress), worn (visible damage, rust, peeling paint, weathering), aged or old, new or recent, pristine or well-maintained, clean, dirty, cluttered, abandoned, freshly renovated. State what you actually see; use 'unclear' if condition isn't legible from the photo.\n\nCamera metadata for context:\n" + exif
+	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame AND what they're doing (verbs, motion, state). Identify type/category specifically — \"airplane\" is not enough; say \"single-engine propeller airplane in flight, climbing\" or \"twin-engine jetliner parked at gate\". For people: action (walking, sitting, running, looking at camera). For vehicles: state (parked, moving, in flight, taxiing, taking off, climbing, descending). For animals: activity (running, eating, sleeping, standing). Cover both nouns and verbs in this field.\n- Setting: specific location type, surfaces, objects; explicitly note indoor or outdoor\n- Light: direction, color, source (window/lamp/sun/etc); time of day suggested; weather (clear, overcast, rain, snow, fog)\n- Colors: dominant palette\n- Composition: framing, camera angle (eye level, looking up, looking down), depth of field, distance to the main subject\n- Vantage: where the camera is physically located. Is the photographer on the ground, elevated (balcony, rooftop, hill), inside a vehicle, inside a plane, on a drone, or shooting through a window/foliage/fence? If from a plane, is it on the ground or in flight? If from a vehicle, moving or stopped? Use 'unclear' if there is no evidence either way.\n- Ground truth: how many people are visible (none / one / two / a few / a group / a crowd); how many animals; is anything in motion (subject moving, camera moving, both, or static).\n- Condition: physical state visible in the frame — under construction (scaffolding, exposed framing, partial walls, work in progress), worn (visible damage, rust, peeling paint, weathering), aged or old, new or recent, pristine or well-maintained, clean, dirty, cluttered, abandoned, freshly renovated. State what you actually see; use 'unclear' if condition isn't legible from the photo.\n\nCamera metadata for context:\n" + exif
 
 	sessionID := fmt.Sprintf("photo-describe-%d-%d", time.Now().UnixNano(), rand.Int64())
 

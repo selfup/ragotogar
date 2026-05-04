@@ -8,7 +8,7 @@ This is a living document — update when a phase ships or a decision changes.
 
 ## Current state (snapshot)
 
-Four-stage Go pipeline against a single Postgres database with pgvector:
+Four-stage Go pipeline against a single Postgres database with pgvector, plus three optional LLM steps in the search path:
 
 ```
 photos on disk
@@ -19,15 +19,32 @@ photos on disk
     ↓
 [3] cmd/index         embedder   → chunks (halfvec(2560) + HNSW)
     ↓
-[4] cmd/web           pgvector   → search UI (vector / vector+verify / FTS+vector / FTS+vector+verify)
-    cmd/search        pgvector   → CLI for the same search path
+[4] cmd/web           search UI  → six modes × optional classifier filter × optional sort
+    cmd/search        CLI        → same retrieval path
+
+Search-time pipeline (cmd/web):
+   (auto-mode only)  rewrite NL → boolean       [LLM, ~250 tokens, query_rewrite_cache opt-in]
+                                ↓
+                     retrieve   (vector / FTS / RRF)
+                                ↓
+   (toggle)          classifier filter           [LLM batched, classify_filter_cache opt-in]
+                                ↓
+   (verify modes)    prose verify per-candidate  [LLM 8-way pool, verify_cache always-on]
+                                ↓
+                     results
 ```
 
-All four `cmd/*` binaries plus the `library/` package run against one DSN (`LIBRARY_DSN`, default `postgres:///ragotogar`). Per-stage HTTP endpoints (`VISION_ENDPOINT`, `TEXT_ENDPOINT`, `EMBED_ENDPOINT`) let each pillar hit a different LLM provider; `LM_STUDIO_BASE` is the legacy shared fallback. All LLM calls go through `library/http.go`'s retry+backoff layer (5 attempts, exponential jitter, honors `Retry-After`, ctx-cancel aware).
+Six search modes: `vector`, `vector+verify`, `FTS+vector`, `FTS+vector+verify`, `auto`, `auto+verify`. The classifier filter (`?class=1`) is an orthogonal post-retrieval LLM step that composes with any mode — drops candidates whose `classified.*` enums contradict the user's NL request.
 
-Schema is Go-const + idempotent migrations (`migrate()` / `migrateV4()` / `migrateV6()` / `migrateV7()`) applied at process start by `cmd/describe` (the schema authority). Other binaries open the DB and assume tables exist.
+All `cmd/*` binaries plus the `library/` package run against one DSN (`LIBRARY_DSN`, default `postgres:///ragotogar`). Per-stage HTTP endpoints (`VISION_ENDPOINT`, `TEXT_ENDPOINT`, `EMBED_ENDPOINT`) let each pillar hit a different LLM provider; `LM_STUDIO_BASE` is the legacy shared fallback. All LLM calls go through `library/http.go`'s retry+backoff layer (5 attempts, exponential jitter, honors `Retry-After`, ctx-cancel aware). Prompt templates live in `prompts/` and are embedded into binaries via `//go:embed` so there's a single source of truth.
 
-The verify pass consults `verify_cache(query, photo_id, verify_model, verdict, verified_at)` before each LLM round-trip. Lookup is one batch SQL roundtrip; rows where `verified_at > inference.described_at` count as fresh. Re-describing a photo silently invalidates older cached verdicts without explicit teardown. Cache hit rate is logged to stderr by `cmd/search` and surfaced in the `cmd/web` results header so the user can watch it climb across repeat queries.
+Schema is Go-const + idempotent migrations (`migrate()` / `migrateV4..V11()`) applied at process start by `cmd/describe` (the schema authority). Other binaries open the DB and assume tables exist. Three LLM-result caches all use the same shape (canonical query as PK component, model in PK, freshness via `*_at > source_at`):
+
+- `verify_cache(query, photo_id, verify_model, …)` — prose verify verdicts, freshness vs `inference.described_at`. Always-on.
+- `query_rewrite_cache(nl_query, rewrite_model, …)` — auto-mode NL→boolean rewrites, no per-photo dependency. Opt-in via `?save=1` so iterating to a good rewrite isn't sticky.
+- `classify_filter_cache(nl_query, photo_id, classify_model, …)` — post-retrieval drop verdicts, freshness vs `classified.classified_at`. Opt-in via `?save_class=1`.
+
+FTS uses `websearch_to_tsquery` so the search box accepts boolean operators (phrase binding, OR, leading-`-` negation). Negation reaches both arms: FTS natively, vector via `library.StripNegation` on the embed input plus a post-filter `library.ExtractNegation` against `descriptions.fts || exif.fts`.
 
 ---
 
@@ -40,7 +57,8 @@ At 30K+ photos:
 | Re-describe wall-clock | Single-stream Qwen3-VL 8B ≈ 6s/photo → ~50 hours for 30K. Per-shard fanout cuts this proportionally. |
 | Single HNSW over 30K | Works, but per-shard indexes give faster incremental re-indexing and bound the noise floor per-query |
 | Path-as-key fragility | `photos.id = name` today — file moves/renames break references that propagate through chunks and classified |
-| Long-tail of natural-language filters | Vector + verify already handles enum-shaped queries (`indoor`, `from a plane`) because `BuildDocument` writes the canonical enums into the indexed text. v8 added `exif.fts` so FTS now reaches camera / lens / year / software / artist literals (`2024`, `X100VI`) — `searchFTS` concats `descriptions.fts ‖ exif.fts` at query time so prose tokens and metadata tokens co-match. Range / numerical filters (`f/2.8 or wider`, aperture/ISO bounds) still aren't reachable; Phase 7 is the open question for those |
+| Long-tail of natural-language filters | `auto` mode (Now) rewrites NL → websearch boolean via an LLM, so `red trucks no monochrome` becomes `"red truck" -monochrome -"black and white" -grayscale -desaturated`. v8's `exif.fts` lets FTS reach camera / lens / year / software / artist literals (`2024`, `X100VI`) via `descriptions.fts ‖ exif.fts`. The classifier filter (Now) drops candidates whose `classified.*` enums contradict the NL request, closing the prose-vs-verdict gap (e.g. a photo whose prose says "no taxiway visible" but classifier verdict is `subject_altitude=in_air`). Range / numerical filters (`f/2.8 or wider`, aperture bounds) still aren't reachable; Phase 7 is the open question for those |
+| Short / shallow describer prose | The Subject field demands both nouns AND verbs (`single-engine propeller airplane in flight, climbing` rather than `airplane silhouette`) so action and state land in the prose alongside the object. Forward-only — old descriptions stay terse until `-force` re-describe. |
 
 The remaining phases address each.
 
@@ -53,13 +71,19 @@ The remaining phases address each.
               │  Search UI (web / CLI)       │
               └──────────────┬───────────────┘
                              ↓
+              ┌──────────────────────────────┐  ← (auto modes only)
+              │  LLM rewrite NL → boolean    │     query_rewrite_cache (opt-in via ?save=1)
+              └──────────────┬───────────────┘
+                             ↓
               ┌──────────────────────────────┐
               │  Postgres + pgvector         │
               │  • photos / exif / inference / thumbnails
               │  • descriptions (prose + generated tsvector)
               │  • classified (typed enums from cmd/classify)
               │  • chunks (halfvec(2560), HNSW)
-              │  • verify_cache (query × photo_id × model → verdict)  ← Now
+              │  • verify_cache             ← Now (always-on)
+              │  • query_rewrite_cache      ← Now (opt-in)
+              │  • classify_filter_cache    ← Now (opt-in)
               └──────────────┬───────────────┘
                   ┌──────────┼──────────┐
                   ↓          ↓          ↓
@@ -67,12 +91,17 @@ The remaining phases address each.
               .chunks    .chunks    .chunks      cross-shard query = UNION ALL
                   └──────────┼──────────┘
                              ↓
-              ┌──────────────────────────────┐
-              │  LLM verify (8-way parallel) │  ← cached in verify_cache (Now)
+              ┌──────────────────────────────┐  ← (toggle ?class=1)
+              │  Classifier filter           │     batched LLM, structured input
+              │  (NL × classifier verdicts)  │     classify_filter_cache (opt-in)
+              └──────────────┬───────────────┘
+                             ↓
+              ┌──────────────────────────────┐  ← (verify modes only)
+              │  LLM prose verify (8-way)    │     verify_cache
               └──────────────────────────────┘
 ```
 
-### Six design pillars
+### Eight design pillars
 
 `When` column reads "Now" if the implementation runs in tree today, or `Phase N` if it ships in a future phase.
 
@@ -80,10 +109,13 @@ The remaining phases address each.
 |--------|----------------|----------------|------|
 | 1. Bounded-complexity vector indexes | Recall stability + per-shard re-index cost | Per-camera schemas keep each HNSW ~3-10K rows; cross-camera search via `UNION ALL` | Phase 5 |
 | 2. Incremental re-indexing | Wall-clock cost of adding photos | `cmd/index` skip-if-exists by default; `-reindex` truncates and rebuilds | Now (per-photo); Phase 5 (per-shard) |
-| 3. Forced parallel workloads | Throughput before LLM is involved | `library.VerifyConcurrency = 8`; `UNION ALL` across shards compounds the parallelism | Now (verify); Phase 5 (shards) |
-| 4. Cache layer | Repeat-query cost | `verify_cache(query, photo_id, verify_model, verdict, verified_at)`; freshness check via `verified_at > inference.described_at` invalidates cached verdicts when a photo is re-described | Now |
-| 5. Structured filters from prose | Range / numerical predicates vector can't do (`f/2.8 or wider`, `April 2024`) | Optional LLM-parse step emits `{filters, residual}` against a json_schema sourced from `AllowedScalar`/`AllowedArray`; results cache-keyed off the same query string the verify cache uses | Phase 7 |
-| 6. Single store for everything | Cache, portable moves, deep analysis | One Postgres DB holds all photo data including BLOB thumbnails; `pg_dump`/`pg_restore` (`scripts/db_dump.sh`, `scripts/db_restore.sh`) is the multi-machine sync workflow | Now |
+| 3. Forced parallel workloads | Throughput before LLM is involved | `library.VerifyConcurrency = 8`; `UNION ALL` across shards compounds the parallelism; `cmd/describe` skip-exists pass also fans out across `PREVIEW_WORKERS` so all-skip runs scale linearly with worker count instead of sequentially through `exiftool` | Now (verify, prep); Phase 5 (shards) |
+| 4. Cache layer | Repeat-query cost; iteration without stickiness | Three caches, all (canonical_query, …, model) keyed: `verify_cache` (always-on, freshness vs `inference.described_at`); `query_rewrite_cache` (opt-in via `?save=1` so iterating to a good rewrite doesn't memorialize bad output); `classify_filter_cache` (opt-in via `?save_class=1`, freshness vs `classified.classified_at`) | Now |
+| 5. Boolean operators in the FTS lane | Attribute binding and exclusion the embedder can't express on its own | `websearch_to_tsquery` parses the search box: `"red truck"` for adjacency, `OR`, leading-`-` negation. Negation reaches the vector arm too via `library.StripNegation` on the embed input + post-filter `library.ExtractNegation` against `descriptions.fts ‖ exif.fts` | Now |
+| 6. LLM query rewriter | Bridges user NL vocabulary to describer prose vocabulary so users don't need to learn boolean syntax | `library.RewriteQuery` calls a small text model with the embedded `prompts/query.md` template; output is one boolean line. Composes with FTS+vector retrieval as `auto` / `auto+verify` modes. Cache opt-in (default off) | Now |
+| 7. Classifier-aware post-retrieval filter | Prose-vs-verdict gap — when a photo's description contains a negated lexeme but its classifier enum says otherwise (or vice versa) | `library.FilterByClassification` sends one batched LLM call per query: NL request + each candidate's compact classifier row → strict `{drop_ids:[…]}` json_schema. Domain-agnostic semantic mapping (no static aliases). Cache opt-in | Now |
+| 8. Structured filters from prose | Range / numerical predicates vector can't do (`f/2.8 or wider`, `April 2024`) | Optional LLM-parse step emits `{filters, residual}` against a json_schema sourced from `AllowedScalar`/`AllowedArray`; results cache-keyed off the same query string the verify cache uses | Phase 7 |
+| 9. Single store for everything | Cache, portable moves, deep analysis | One Postgres DB holds all photo data including BLOB thumbnails; `pg_dump`/`pg_restore` (`scripts/db_dump.sh`, `scripts/db_restore.sh`) is the multi-machine sync workflow | Now |
 
 ---
 
@@ -136,10 +168,10 @@ Each phase delivers value independently. No phase is gated on a later one, but t
 |-------|----------|--------|
 | **5. Camera-sharded chunks** | `x100vi.chunks`, `xt5.chunks`, …; cross-shard search = `UNION ALL`; per-shard re-index = `TRUNCATE shard.chunks; INSERT …` | small |
 | **6. Stable photo IDs** | Composite hash on `photos.id`; move/rename safe; dedup detection | medium |
-| **7. Structured filters from prose** | LLM-parse the query against a json_schema sourced from `AllowedScalar`/`AllowedArray`; emit `{filters, residual}`; cache parses against the canonical query (same key shape as verify cache) | small (parse) + small (UI chips) |
+| **7. Structured filters extension to auto rewrite** | Extend the existing `prompts/query.md` LLM-parse step to also emit `{filters: {...}}` against a json_schema sourced from `AllowedScalar`/`AllowedArray`; reuse `query_rewrite_cache` keying | small (parse) + small (UI chips) |
 | **8. Cross-shard analysis tooling** | `cmd/analyze` subcommands — lens diversity, aperture distribution, time-of-day heatmap, classifier vocabulary | small |
 
-Highest near-term leverage: **Phase 5** — wall-clock cost of incremental re-indexing dominates everything else once the corpus crosses ~10K photos. Phase 7 is gated on evidence that vector + verify isn't enough; defer until the hit-rate UI surfaces a real recall gap.
+Highest near-term leverage: **Phase 5** — wall-clock cost of incremental re-indexing dominates everything else once the corpus crosses ~10K photos. Phase 7 is gated on evidence that the auto rewrite + classifier filter combo still misses real queries; defer until the in-UI stats surface a real recall gap.
 
 ---
 
@@ -163,13 +195,15 @@ The `photos` / `exif` / `descriptions` / `classified` / `inference` / `thumbnail
 
 ### Phase 7: Structured filters via LLM-parse
 
-Only justified once vector + verify is shown to miss on real queries (e.g. "f/2.8 or wider", "April 2024 only"). Sketch:
+Pillar 6 (`auto` mode) already ships the LLM-parse primitive — it produces `{rewritten: "boolean string"}`. Phase 7 extends the same primitive to also emit numerical / range filters that pgvector + FTS can't express. Sketch:
 
 1. Build a json_schema from `AllowedScalar` / `AllowedArray` plus a sibling `exif` block with year, month, f-number range fields. Same construction `cmd/classify` already does — reuse the helper.
-2. Single `LLMCompleteSchema` call per query → `{filters: {...}, residual: "..."}`
-3. Cache the parse output against `(canonical_query)` in a sibling table `query_parse_cache` (same shape as `verify_cache`, just keyed on query alone). The verify cache's freshness primitive (`verified_at > inference.described_at`) doesn't apply here — query parses are independent of any photo's state, so the cache key is just the canonical query string.
-4. WHERE predicates plug into the same SQL the existing search uses; residual is the embed query
+2. Single `LLMCompleteSchema` call per query → `{boolean: "...", filters: {...}}`. Replaces or extends the current `prompts/query.md` rewrite output.
+3. Cache the parse output against `(canonical_query, rewrite_model)` — same shape as the existing `query_rewrite_cache`, possibly the same table with an additional column. Opt-in like the rewrite cache.
+4. WHERE predicates plug into the same SQL the existing search uses; boolean field is the existing rewrite output
 5. Removable chip UI in `cmd/web` — "Filtering: f/≤2.8 · 2024" with `×` to drop a chip
+
+The rewrite cache table (already in v10) has the right shape — extension is incremental. Gated on evidence that vector + verify + classifier filter still misses real queries; defer until the in-UI stats surface a real recall gap.
 
 ### Phase 8: Cross-shard analysis tooling
 

@@ -69,7 +69,13 @@ func run(dsn, query string, retrieve, precise, hybrid, verify bool, cosine, fts 
 		return fmt.Errorf("no chunks in library — run cmd/index first")
 	}
 
-	opts := library.SearchOptions{TopK: library.DefaultTopK, FTSThresholdRel: fts}
+	opts := library.SearchOptions{
+		TopK:            library.DefaultTopK,
+		FTSThresholdRel: fts,
+		// Strip websearch NOT operators for the embedder; FTS still sees
+		// the original boolean form. See library.StripNegation.
+		VectorQuery: library.StripNegation(query),
+	}
 	if retrieve || precise || hybrid {
 		// Strict-retrieval modes drop the LIMIT entirely — the cosine
 		// threshold is the only bound. cmd/web does the same.

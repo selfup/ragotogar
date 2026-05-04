@@ -51,6 +51,8 @@ Steps are independent — you can run search without ever organizing, or describ
 | Vector Search | `cmd/search` | pgvector cosine similarity over chunks; optional LLM verify pass |
 | Web Server | `cmd/web` | Search UI + per-photo HTML pages rendered on-demand from SQL; thumbnail BLOBs streamed from SQL |
 | Cashier (markdown) | `cmd/cashier` | General-purpose markdown → HTML renderer with the cashier design system. Not in the photo pipeline; kept for ad-hoc use. |
+| Prompt templates | `prompts/` | LLM prompt templates embedded into binaries via `//go:embed`. `query.md` (auto-mode NL→boolean rewrite, used by `library.RewriteQuery`); `classify_filter.md` (post-retrieval drop oracle, used by `library.FilterByClassification`). Edit these files; the next build picks up changes. |
+| Search playbook | `skills/search_skill.md` | Human-facing guide for writing effective queries — operators, patterns (phrase binding, vocabulary stacking), tuning thresholds, anti-patterns. Pair to the README's Query syntax reference. |
 
 Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (`.files.env`) as the single source of truth for extension mappings.
 
@@ -99,6 +101,8 @@ Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutine
 ## Photo Describer (`cmd/describe`)
 
 Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual description via LM Studio's vision API. All output (typed EXIF columns, parsed `subject/setting/light/colors/composition/vantage/ground_truth/condition` fields, full description, thumbnail BLOB, model + timing) writes directly to the Postgres library. The `photos` table is the source of truth — no JSON sidecars, no MD/HTML files.
+
+The Subject field demands both nouns AND verbs ("single-engine propeller airplane in flight, climbing" rather than "airplane silhouette") so action and state land in the prose alongside the object — searchable directly via FTS without depending on the classifier verdict alone.
 
 **Usage:**
 
@@ -160,7 +164,9 @@ Extracts EXIF metadata, generates a 1024px thumbnail, and produces an LLM visual
 | `thumbnails` | 1024px JPG bytes as a `BYTEA` BLOB. Generated from the same magick output sent to the vision model — no second resize. |
 | `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
 | `chunks` | One row per chunk per photo. `text TEXT` + `embedding halfvec(2560)` (Qwen3-Embedding-4B GGUF). HNSW index on `embedding halfvec_cosine_ops`. Owned by the indexer (`cmd/index`). |
-| `verify_cache` | Persistent LLM yes/no cache for the verify pass. Keyed on `(query, photo_id, verify_model)`; `verified_at > inference.described_at` is the freshness check, so re-describing a photo silently invalidates older cached verdicts. Written by `library.VerifyFilter`; consulted by both `cmd/web` and `cmd/search`. |
+| `verify_cache` | Persistent LLM yes/no cache for the verify pass. Keyed on `(query, photo_id, verify_model)`; `verified_at > inference.described_at` is the freshness check, so re-describing a photo silently invalidates older cached verdicts. Written by `library.VerifyFilter`; consulted by both `cmd/web` and `cmd/search`. **Always-on.** |
+| `query_rewrite_cache` | Persistent NL→boolean rewrite cache for `auto` mode. Keyed on `(nl_query, rewrite_model)` — no per-photo dependency. **Opt-in** via the `save rewrite` checkbox so iterating to a good rewrite doesn't memorialize bad output (v10). |
+| `classify_filter_cache` | Persistent drop-verdict cache for the post-retrieval classifier filter. Keyed on `(nl_query, photo_id, classify_model)`; `filtered_at > classified.classified_at` is the freshness check. **Opt-in** via the `save classifier filter` checkbox (v11). |
 | `schema_version` | Single-row marker for migrations |
 
 `cmd/describe` itself never touches `chunks` — that's the indexer's table. Re-describing a photo overwrites its photos / exif / descriptions / inference / thumbnails rows but leaves chunks alone; re-running `./scripts/index.sh` regenerates chunks from the fresh description.
@@ -259,7 +265,14 @@ lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 
 # Use a different model for the verify pass
 SEARCH_MODEL="mistralai/devstral-small-2-2512" ./scripts/search.sh -retrieve -verify "..."
+
+# Boolean operators work here too — same parser as the web UI (-hybrid uses
+# both arms; -retrieve uses only the vector arm + the negation post-filter)
+./scripts/search.sh -retrieve -hybrid '"red truck" on road -monochrome -"black and white"'
+./scripts/search.sh -retrieve -hybrid 'planes "aircraft on taxiways" -car -flying'
 ```
+
+See [Query syntax](#query-syntax) for the full operator set.
 
 **Output flags:**
 
@@ -312,14 +325,14 @@ Then open `http://localhost:8080`.
 |------|---------|-------------|
 | `-addr` | `:8080` | Listen address |
 | `-dsn` | `postgres:///ragotogar` | Postgres library DSN (overrides `LIBRARY_DSN` env) |
-| `-repo` | `.` | Repo root (where `scripts/search.sh` and `styles.css` live) |
+| `-repo` | `.` | Repo root (where `styles.css` lives) |
 
 **Routes:**
 
 | Route | Behavior |
 |-------|----------|
 | `GET /` | Search box + a four-pill mode toggle + result grid |
-| `GET /?q=<query>&mode=<mode>` | Shells out to `./scripts/search.sh -retrieve [-verify] "<query>"`, parses the file list, validates each name against `photos.name`, renders thumbnails |
+| `GET /?q=<query>&mode=<mode>` | Calls `library.Searcher` in-process — `Search` for vector modes, `SearchHybrid` for FTS+vector modes, `VerifyFilter` when the mode includes verify. Returns the matching photo names, validated against `photos.name`, then rendered as a thumbnail grid. |
 | `GET /photos/<name>` | HTML page rendered from a Go template against the photos / exif / descriptions / inference tables. Uses the cashier design system (hero / dual-pillars / built photo-meta sections). |
 | `GET /photos/<name>.jpg` | Streams the thumbnail BLOB from `thumbnails.bytes` with `Content-Type: image/jpeg` and `Cache-Control: max-age=86400` |
 | `GET /styles.css` | Serves the cashier design system from the repo root |
@@ -330,8 +343,18 @@ Then open `http://localhost:8080`.
 |------|-----------------------|----------|
 | `vector` | `-retrieve` | Pure vector similarity, every match above the cosine cutoff (default 0.50). **Default and recommended** — sub-second on small corpora. |
 | `vector+verify` | `-retrieve -verify` | Vector retrieval + an LLM yes/no check on each candidate (text pulled from SQL). ~1–6s per query. Use for tighter precision when "red truck" returns too much red and too much truck-shaped. |
-| `FTS+vector` | `-retrieve -hybrid` | Vector ∪ Postgres full-text search, fused via Reciprocal Rank Fusion (RRF). FTS reaches `descriptions.fts` (LLM prose) plus `exif.fts` (camera / lens / year / software / artist) so queries like `2024` or `X100VI` match metadata literals vector can't rank. |
+| `FTS+vector` | `-retrieve -hybrid` | Vector ∪ Postgres full-text search, fused via Reciprocal Rank Fusion (RRF). FTS reaches `descriptions.fts` (LLM prose) plus `exif.fts` (camera / lens / year / software / artist) so queries like `2024` or `X100VI` match metadata literals vector can't rank. The search box accepts boolean operators on **both** arms — see [Query syntax](#query-syntax) below. |
 | `FTS+vector+verify` | `-retrieve -hybrid -verify` | RRF fusion + LLM yes/no per candidate. Tightest precision; slowest. |
+| `auto` | (web only) | LLM rewrites your natural-language query into the boolean form (phrase binding, negations, vocabulary expansion against the describer's vocabulary tail) using `prompts/query.md`, then runs FTS+vector. The rewritten query is shown above the result grid; tick `save rewrite` to cache it. Off-by-default save means you can iterate to a good rewrite without sticky bad output. |
+| `auto+verify` | (web only) | Auto-rewrite + FTS+vector + per-candidate prose verify. Tightest auto path. |
+
+**Independent post-retrieval toggles** (compose with any mode above):
+
+| Toggle | URL param | Behavior |
+|--------|-----------|----------|
+| `classifier filter` | `?class=1` | After retrieval, sends the user's NL query plus each candidate's `classified.*` enums to a small text LLM in one batched call. The LLM returns IDs to drop — domain-agnostic semantic match (`subject_altitude=in_air` is recognized as "in flight" / "airborne" / "flying" without aliases). Catches the prose-vs-verdict gap (a sky-plane photo whose prose mentions "no taxiway visible" gets dropped because its classifier verdict is `subject_altitude=in_air`). |
+| `save classifier filter` | `?save_class=1` | Caches drop verdicts in `classify_filter_cache` keyed on `(canonical NL query, photo_id, classify_model)`. Freshness checked against `classified.classified_at` so re-classifying invalidates. |
+| `save rewrite` | `?save=1` | Caches the auto-mode boolean rewrite in `query_rewrite_cache` keyed on `(canonical NL query, rewrite_model)`. |
 
 All pills bound by the same cosine slider (vector arm) and FTS slider (FTS arm); the search has no top-N cap, only the threshold floors. Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when chunks reference a basename that's since been deleted from the library).
 
@@ -346,6 +369,53 @@ A second pill row controls result ordering — applied after retrieval (and afte
 | `oldest first` | `exif.date_taken` ASC, NULL last. |
 
 The verify pass (both verify-mode pills above) consults `verify_cache` before each LLM call. Hit rate is shown directly above the result grid — `verify: 30 candidates · 18 cached · 12 LLM · 60% hit` — so you can watch the rate climb as you iterate on a query. Cache rows for a photo are silently invalidated when the photo is re-described (`verified_at > inference.described_at` freshness check).
+
+### Query syntax
+
+The search box parses queries as Postgres `websearch_to_tsquery` — the FTS arm uses it directly, and the vector arm honors negation via a post-filter against the same FTS surface.
+
+**Operators:**
+
+| Syntax | Meaning |
+|--------|---------|
+| `red truck` | bare AND — both lexemes required, anywhere in the indexed text |
+| `"red truck"` | phrase — adjacent, in order. Use for attribute binding (`"red truck"` only matches photos whose prose has those two words next to each other; sloppy `red truck` also catches "red brake lights … truck on road"). |
+| `red OR maroon` | disjunction (uppercase `OR`; lowercase `or` is a stopword and ignored) |
+| `-truck` | exclude. Drops photos whose prose contains `truck`. |
+| `-"black and white"` | exclude phrase. Drops photos whose prose contains the adjacent phrase. |
+
+Common English stopwords (`and`, `the`, `on`, `is`, `a`, …) are dropped during parsing. So `planes AND aircraft` parses identically to `planes aircraft` — bare terms already AND by default; the literal word `AND` adds nothing.
+
+**How negation reaches the vector arm.** The embedder treats `-` as a regular token, not as Boolean NOT. Two-step fix in `library/search.go`:
+
+1. **Embed input is the positive residual.** `library.StripNegation(query)` removes `-foo` and `-"foo bar"` tokens before embedding so a query like `red truck -monochrome` doesn't bias the embedding *toward* monochrome (the original problem — `red brake lights + truck + road` B&W shots were ranking high in vector).
+2. **Post-filter on retrieval.** `library.ExtractNegation(query)` extracts the negation portion (`-monochrome -"black and white"` etc.). After cosine retrieval, vector candidates are filtered by one batched query against `descriptions.fts || exif.fts` — anything matching the negated terms is dropped before RRF fusion.
+
+Other operators (`OR`, positive quoted phrases) pass through unchanged to the embedder; they read as plain text and don't damage the embedding. The FTS arm sees the original query verbatim — phrase binding, OR, negation all parsed natively.
+
+**Worked examples:**
+
+| Query | Reasoning |
+|-------|-----------|
+| `"red truck" on road` | Phrase-bound `red truck` — only photos whose prose has those words adjacent. Bare `on road` is loose AND. |
+| `"red truck" -monochrome -"black and white" -grayscale -desaturated` | Phrase binding + negation against describer vocabulary for B&W. The vector lane drops candidates whose prose contains any of those tokens. |
+| `planes "aircraft on taxiways" "aircraft on the ground" -car -vehicle -flying -"in the air"` | Two phrase bindings AND'd with bare `planes`. Excludes ground-vehicle collisions and airborne shots. |
+| `X100VI 2024 "indoor scene" -night` | Mixes `exif.fts` metadata (`X100VI`, `2024`), prose phrase, and a prose negation. |
+| `red OR maroon truck "on road"` | Either color, plus `truck`, plus the adjacent phrase `on road`. |
+| `truck-driver -truck` | Compound dashed words survive — only standalone `-truck` is stripped. The embedder still sees `truck-driver`. |
+
+**What's not yet reachable:**
+
+- **Classifier enums** (`scene_weather`, `pov_container`, `motion`, etc.) live in the `classified` table and in `chunks.text` (vector lane), but not in `descriptions.fts` or `exif.fts`. So `-overcast` only matches photos whose prose literally stem-matches `overcast`, not photos the classifier verdict labeled overcast. A `classified.fts` generated column would close this; see `library/classify.go:74` for the canonical enum vocabulary that would land in such an index. Deferred until needed.
+- **Numerical / range filters** (`f/2.8 or wider`, `April 2024 only`, `ISO ≥ 1600`) — pgvector + FTS can't express these. See `ARCHITECTURE.md` Phase 7 for the LLM-parse sketch.
+
+### Tuning thresholds
+
+`cosine ≥` (vector arm) is a flat absolute floor — only chunks with similarity ≥ this value pass. Default `0.50`. Raise to tighten; lower to broaden.
+
+`fts ≥` (FTS arm) is a relative floor — `value × max(ts_rank)` for the query. Default `0.30`. Adaptive: a single-token query like `X100VI` produces uniformly low ranks, while `red truck on road` produces a few high ranks plus noise; the relative cutoff handles both without over-pruning the former.
+
+When pure `vector` mode returns 0 hits but `FTS+vector` returns many, that's almost always the cosine floor pruning the long tail (the FTS arm catches what was just below 0.50). Drop the slider to confirm before assuming a bug.
 
 **Requirements:** A populated `chunks` table (see [Photo Search](#photo-search--pgvector-tools)) and a populated library (run `cmd/describe` first).
 

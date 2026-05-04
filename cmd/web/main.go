@@ -24,7 +24,7 @@ type result struct {
 
 type pageData struct {
 	Q               Q
-	Mode            string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify"
+	Mode            string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify" | "auto" | "auto-verify"
 	Sort            string // "relevance" (default) | "date-desc" | "date-asc"
 	CosineThreshold string // formatted for the slider's value attribute
 	FTSThresholdRel string
@@ -32,6 +32,33 @@ type pageData struct {
 	Total           int    // total photos in library; 0 = don't show
 	Results         []result
 	VerifyStats     *verifyStatsView // nil when no verify pass ran; non-nil enables the cache footer
+	Rewrite         *rewriteView     // nil unless an auto-mode rewrite ran
+	Save            bool             // checkbox state — true means cache the rewrite
+	Classify        bool             // checkbox state — true means run the classifier filter
+	SaveClassify    bool             // checkbox state — true means cache classifier filter verdicts
+	ClassifyStats   *classifyStatsView // nil unless the classifier filter ran
+}
+
+// classifyStatsView projects library.ClassifyFilterStats for the template.
+// Cached / LLM counts surface how much of the verdict came from cache vs.
+// a live LLM call so the user can watch hits accumulate as they re-run
+// the same NL query.
+type classifyStatsView struct {
+	Total   int
+	Dropped int
+	Cached  int
+	LLM     int
+	Elapsed string // "412 ms" / "1.2 s"
+}
+
+// rewriteView is the template projection of library.RewriteResult. Empty
+// Rewritten means no rewrite happened (mode wasn't auto, or the input
+// already looked boolean and bypassed the LLM); the template skips the
+// status line in that case.
+type rewriteView struct {
+	Rewritten string // boolean form the search actually ran with
+	Cached    bool   // served from query_rewrite_cache; UI shows "saved"
+	Elapsed   string // "412 ms" / "1.2 s"
 }
 
 // verifyStatsView is the template-friendly projection of library.VerifyStats.
@@ -87,16 +114,39 @@ func parseThreshold(raw string, fallback float64) float64 {
 	return v
 }
 
-// validModes — four pills the UI exposes.
+// validModes — six pills the UI exposes.
 //   naive             : pure vector cosine, cosine ≥ 0.5
 //   naive-verify      : vector + LLM yes/no verify
 //   fts-vector        : vector ∪ FTS via Reciprocal Rank Fusion
 //   fts-vector-verify : RRF fusion + LLM yes/no verify
+//   auto              : LLM rewrites NL → boolean, then fts-vector
+//   auto-verify       : LLM rewrites, then fts-vector-verify
 var validModes = map[string]bool{
 	"naive":             true,
 	"naive-verify":      true,
 	"fts-vector":        true,
 	"fts-vector-verify": true,
+	"auto":              true,
+	"auto-verify":       true,
+}
+
+// modeUsesRewrite reports whether the LLM rewrite step runs for this mode.
+func modeUsesRewrite(m string) bool {
+	return m == "auto" || m == "auto-verify"
+}
+
+// modeAfterRewrite returns the underlying retrieval mode an auto-mode
+// query falls through to once the rewrite is done. auto → fts-vector;
+// auto-verify → fts-vector-verify; non-auto modes pass through unchanged.
+func modeAfterRewrite(m string) string {
+	switch m {
+	case "auto":
+		return "fts-vector"
+	case "auto-verify":
+		return "fts-vector-verify"
+	default:
+		return m
+	}
 }
 
 func resolveMode(m string) string {
@@ -137,7 +187,7 @@ func main() {
 	var (
 		addr     = flag.String("addr", ":8080", "listen address")
 		dsn      = flag.String("dsn", defaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
-		repoRoot = flag.String("repo", ".", "repo root (where tools/search.sh lives)")
+		repoRoot = flag.String("repo", ".", "repo root (where styles.css lives)")
 	)
 	flag.Parse()
 
@@ -172,15 +222,20 @@ func main() {
 		sortBy := resolveSort(r.URL.Query().Get("sort"))
 		cosine := parseThreshold(r.URL.Query().Get("cosine"), library.CosineThreshold)
 		ftsRel := parseThreshold(r.URL.Query().Get("fts"), library.FTSRelativeThreshold)
+		save := r.URL.Query().Get("save") == "1"
+		classify := r.URL.Query().Get("class") == "1"
+		saveClassify := r.URL.Query().Get("save_class") == "1"
 
 		var (
-			results    []result
-			latency    string
-			total      int
-			verifyView *verifyStatsView
+			results       []result
+			latency       string
+			total         int
+			verifyView    *verifyStatsView
+			rewriteView   *rewriteView
+			classifyView  *classifyStatsView
 		)
 		if q != "" {
-			res := search(db, q, mode, cosine, ftsRel)
+			res := search(db, q, mode, cosine, ftsRel, save, classify, saveClassify)
 			results = applySort(db, res.Results, sortBy)
 			latency = formatLatency(res.Elapsed)
 			total = countPhotos(db)
@@ -191,6 +246,12 @@ func main() {
 					LLM:     res.Stats.LLM,
 					HitRate: fmt.Sprintf("%.0f%%", res.Stats.HitRate()*100),
 				}
+			}
+			if res.Rewrite != nil {
+				rewriteView = res.Rewrite
+			}
+			if res.Classify != nil {
+				classifyView = res.Classify
 			}
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -204,6 +265,11 @@ func main() {
 			Total:           total,
 			Results:         results,
 			VerifyStats:     verifyView,
+			Rewrite:         rewriteView,
+			Save:            save,
+			Classify:        classify,
+			SaveClassify:    saveClassify,
+			ClassifyStats:   classifyView,
 		}); err != nil {
 			log.Printf("template: %v", err)
 		}
