@@ -31,11 +31,11 @@ type pageData struct {
 	Latency         string // formatted "234 ms" / "1.2 s"; empty when no search ran
 	Total           int    // total photos in library; 0 = don't show
 	Results         []result
-	VerifyStats     *verifyStatsView // nil when no verify pass ran; non-nil enables the cache footer
-	Rewrite         *rewriteView     // nil unless an auto-mode rewrite ran
-	Save            bool             // checkbox state — true means cache the rewrite
-	Classify        bool             // checkbox state — true means run the classifier filter
-	SaveClassify    bool             // checkbox state — true means cache classifier filter verdicts
+	VerifyStats     *verifyStatsView   // nil when no verify pass ran; non-nil enables the cache footer
+	Rewrite         *rewriteView       // nil unless an auto-mode rewrite ran
+	Save            bool               // checkbox state — true means cache the rewrite
+	Classify        bool               // checkbox state — true means run the classifier filter
+	SaveClassify    bool               // checkbox state — true means cache classifier filter verdicts
 	ClassifyStats   *classifyStatsView // nil unless the classifier filter ran
 }
 
@@ -115,12 +115,13 @@ func parseThreshold(raw string, fallback float64) float64 {
 }
 
 // validModes — six pills the UI exposes.
-//   naive             : pure vector cosine, cosine ≥ 0.5
-//   naive-verify      : vector + LLM yes/no verify
-//   fts-vector        : vector ∪ FTS via Reciprocal Rank Fusion
-//   fts-vector-verify : RRF fusion + LLM yes/no verify
-//   auto              : LLM rewrites NL → boolean, then fts-vector
-//   auto-verify       : LLM rewrites, then fts-vector-verify
+//
+//	naive             : pure vector cosine, cosine ≥ 0.5
+//	naive-verify      : vector + LLM yes/no verify
+//	fts-vector        : vector ∪ FTS via Reciprocal Rank Fusion
+//	fts-vector-verify : RRF fusion + LLM yes/no verify
+//	auto              : LLM rewrites NL → boolean, then fts-vector
+//	auto-verify       : LLM rewrites, then fts-vector-verify
 var validModes = map[string]bool{
 	"naive":             true,
 	"naive-verify":      true,
@@ -160,9 +161,10 @@ func resolveMode(m string) string {
 }
 
 // validSorts — three orderings the UI exposes.
-//   relevance : keep the order returned by retrieval (cosine / RRF / verify)
-//   date-desc : exif.date_taken DESC, NULL last
-//   date-asc  : exif.date_taken ASC,  NULL last
+//
+//	relevance : keep the order returned by retrieval (cosine / RRF / verify)
+//	date-desc : exif.date_taken DESC, NULL last
+//	date-asc  : exif.date_taken ASC,  NULL last
 var validSorts = map[string]bool{
 	"relevance": true,
 	"date-desc": true,
@@ -227,12 +229,12 @@ func main() {
 		saveClassify := r.URL.Query().Get("save_class") == "1"
 
 		var (
-			results       []result
-			latency       string
-			total         int
-			verifyView    *verifyStatsView
-			rewriteView   *rewriteView
-			classifyView  *classifyStatsView
+			results      []result
+			latency      string
+			total        int
+			verifyView   *verifyStatsView
+			rewriteView  *rewriteView
+			classifyView *classifyStatsView
 		)
 		if q != "" {
 			res := search(db, q, mode, cosine, ftsRel, save, classify, saveClassify)
@@ -275,8 +277,14 @@ func main() {
 		}
 	})
 	mux.HandleFunc("/photos/", func(w http.ResponseWriter, r *http.Request) {
-		// Both /photos/<name> (HTML) and /photos/<name>.jpg (BLOB) live here.
+		// /photos/<name>          → HTML page
+		// /photos/<name>.jpg      → thumbnail BLOB
+		// /photos/<name>/open     → POST, launches DxO / Capture One / Finder
 		path := strings.TrimPrefix(r.URL.Path, "/photos/")
+		if before, ok := strings.CutSuffix(path, "/open"); ok {
+			servePhotoOpen(w, r, db, before)
+			return
+		}
 		if before, ok := strings.CutSuffix(path, ".jpg"); ok {
 			servePhotoJPG(w, r, db, before)
 			return

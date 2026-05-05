@@ -239,6 +239,22 @@ const photoHTML = `<!DOCTYPE html>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,200..900,0..100;1,9..144,200..900,0..100&family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
+<style>
+  .open-actions { background:#fff; padding:0 2rem 2rem; text-align:center; }
+  .open-actions button {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .78rem; letter-spacing: .05em; text-transform: uppercase;
+    padding: .55rem 1rem; margin: 0 .25rem;
+    background: #fff; border: 1px solid #222; color: #222; cursor: pointer;
+  }
+  .open-actions button:hover:not(:disabled) { background: #222; color: #fff; }
+  .open-actions button:disabled { opacity: .5; cursor: wait; }
+  .open-status {
+    margin-top: .75rem; min-height: 1em;
+    font-family: ui-sans-serif, system-ui, sans-serif; font-size: .8rem; color: #888;
+  }
+  .open-status.error { color: #c00; }
+</style>
 </head>
 <body>
 
@@ -247,6 +263,47 @@ const photoHTML = `<!DOCTYPE html>
     <img src="/photos/{{.Photo.Name}}.jpg" alt="{{.Photo.Name}}" style="max-width:100%;height:auto;">
   </a>
 </figure>
+
+{{if .Photo.FilePath}}
+<div class="open-actions">
+  <button type="button" data-app="dxo"    onclick="openOriginal(this)">Open in DxO PhotoLab</button>
+  <button type="button" data-app="c1"     onclick="openOriginal(this)">Open in Capture One</button>
+  <button type="button" data-app="finder" onclick="openOriginal(this)">Reveal in Finder</button>
+  <div class="open-status" aria-live="polite"></div>
+</div>
+<script>
+(function() {
+  var photoName = {{.Photo.Name}};
+  window.openOriginal = function(btn) {
+    var actions = btn.parentElement;
+    var status  = actions.querySelector('.open-status');
+    var orig    = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '…';
+    status.classList.remove('error');
+    status.textContent = '';
+    fetch('/photos/' + encodeURIComponent(photoName) + '/open?app=' + encodeURIComponent(btn.dataset.app), {method: 'POST'})
+      .then(function(r) { return r.text().then(function(t) { return {ok: r.ok, body: t}; }); })
+      .then(function(res) {
+        if (res.ok) {
+          status.textContent = orig + ' — opened';
+        } else {
+          status.classList.add('error');
+          status.textContent = 'error: ' + res.body;
+        }
+      })
+      .catch(function(e) {
+        status.classList.add('error');
+        status.textContent = 'error: ' + e;
+      })
+      .finally(function() {
+        btn.disabled = false;
+        btn.textContent = orig;
+      });
+  };
+})();
+</script>
+{{end}}
 
 <section class="hero" data-screen-label="00 Hero">
   <div class="hero-header">

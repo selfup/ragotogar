@@ -327,14 +327,24 @@ Then open `http://localhost:8080`.
 | `-dsn` | `postgres:///ragotogar` | Postgres library DSN (overrides `LIBRARY_DSN` env) |
 | `-repo` | `.` | Repo root (where `styles.css` lives) |
 
+**Environment variables (cmd/web specific):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DXO_APP_NAME` | `DxO PhotoLab 9` | macOS bundle name `open -a` matches when launching DxO from the per-photo page. DxO bumps the bundle name on every major release (`DxO PhotoLab 10.app`, etc.) so override after upgrading. |
+| `CAPTUREONE_APP_NAME` | `Capture One` | macOS bundle name for Capture One. Bundle is unversioned, so the default works across 16.x builds. |
+
+If `open` can't resolve the configured name, the error ("Unable to find application named 'X'") surfaces directly in the per-photo page status line — no log digging needed.
+
 **Routes:**
 
 | Route | Behavior |
 |-------|----------|
 | `GET /` | Search box + a four-pill mode toggle + result grid |
 | `GET /?q=<query>&mode=<mode>` | Calls `library.Searcher` in-process — `Search` for vector modes, `SearchHybrid` for FTS+vector modes, `VerifyFilter` when the mode includes verify. Returns the matching photo names, validated against `photos.name`, then rendered as a thumbnail grid. |
-| `GET /photos/<name>` | HTML page rendered from a Go template against the photos / exif / descriptions / inference tables. Uses the cashier design system (hero / dual-pillars / built photo-meta sections). |
+| `GET /photos/<name>` | HTML page rendered from a Go template against the photos / exif / descriptions / inference tables. Uses the cashier design system (hero / dual-pillars / built photo-meta sections). Three buttons under the hero figure (DxO PhotoLab / Capture One / Reveal in Finder) `fetch()` the open route below. |
 | `GET /photos/<name>.jpg` | Streams the thumbnail BLOB from `thumbnails.bytes` with `Content-Type: image/jpeg` and `Cache-Control: max-age=86400` |
+| `POST /photos/<name>/open?app=<dxo\|c1\|finder>` | Looks up `photos.file_path`, verifies the file is still on disk, then shells out to `/usr/bin/open -a "<AppName>" <path>` (or `open -R <path>` for `finder`). App names resolve via `DXO_APP_NAME` / `CAPTUREONE_APP_NAME` env vars; `open`'s error (e.g. "Unable to find application named 'DxO PhotoLab 9'") surfaces back to the UI as plain-text 500 so a stale env var is obvious. POST-only so a stray `<a href>` or link prefetch can't trigger a launch. macOS only — `cmd/web` must be running on the same Mac as the original files. |
 | `GET /styles.css` | Serves the cashier design system from the repo root |
 
 **Mode toggle:**
