@@ -60,7 +60,6 @@ type embedRequest struct {
 	Model    string           `json:"model"`
 	Input    []string         `json:"input"`
 	Provider *ProviderRouting `json:"provider,omitempty"`
-	ZDR      bool             `json:"zdr,omitempty"`
 }
 
 type embedResponse struct {
@@ -87,7 +86,6 @@ func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 		Model:    EmbedModel(),
 		Input:    texts,
 		Provider: DefaultProvider,
-		ZDR:      DefaultZDR,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w", err)

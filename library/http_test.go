@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -236,6 +237,73 @@ func TestPostJSONWithRetryRespectsContextCancellation(t *testing.T) {
 	_, err := postJSONWithRetryConfig(ctx, srv.URL, []byte(`{}`), nil, cfg)
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
+	}
+}
+
+// ── provider routing wire format ───────────────────────────────────────
+
+// DefaultProvider must marshal to exactly {"data_collection":"deny","zdr":true}.
+// OpenRouter rejects/ignores zdr at the top level — it has to live inside
+// the provider object. Keep this test as the wire-format canary so a
+// future struct edit can't silently regress to the old top-level shape.
+func TestDefaultProviderMarshalsZDRInsideProvider(t *testing.T) {
+	b, err := json.Marshal(DefaultProvider)
+	if err != nil {
+		t.Fatalf("marshal DefaultProvider: %v", err)
+	}
+	got := string(b)
+	want := `{"data_collection":"deny","zdr":true}`
+	if got != want {
+		t.Errorf("DefaultProvider JSON = %s, want %s", got, want)
+	}
+}
+
+func TestChatRequestPlacesZDRInsideProviderNotTopLevel(t *testing.T) {
+	body, err := json.Marshal(chatRequest{
+		Model:    "x",
+		Messages: []chatMessage{{Role: "user", Content: "hi"}},
+		Provider: DefaultProvider,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(body)
+	if !strings.Contains(s, `"provider":{"data_collection":"deny","zdr":true}`) {
+		t.Errorf("provider block missing or wrong shape: %s", s)
+	}
+	// A top-level "zdr" key would look like `,"zdr":` or `{"zdr":` —
+	// the inside-provider one is preceded by `,` after data_collection.
+	// Detect the top-level shape by checking for `,"zdr":` outside the
+	// provider object, which is hard to do with substring; the simpler
+	// canary is to decode generically and confirm no top-level zdr key.
+	var generic map[string]any
+	if err := json.Unmarshal(body, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := generic["zdr"]; ok {
+		t.Errorf("top-level zdr key present — must live inside provider only: %s", s)
+	}
+}
+
+func TestEmbedRequestPlacesZDRInsideProviderNotTopLevel(t *testing.T) {
+	body, err := json.Marshal(embedRequest{
+		Model:    "x",
+		Input:    []string{"hi"},
+		Provider: DefaultProvider,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(body)
+	if !strings.Contains(s, `"provider":{"data_collection":"deny","zdr":true}`) {
+		t.Errorf("provider block missing or wrong shape: %s", s)
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(body, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := generic["zdr"]; ok {
+		t.Errorf("top-level zdr key present — must live inside provider only: %s", s)
 	}
 }
 
