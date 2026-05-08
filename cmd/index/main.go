@@ -58,7 +58,7 @@ func parseReindex(raw string) (reindexSet, error) {
 		return reindexSet{}, nil
 	}
 	var rs reindexSet
-	for _, p := range strings.Split(raw, ",") {
+	for p := range strings.SplitSeq(raw, ",") {
 		switch strings.TrimSpace(p) {
 		case "":
 			// trailing comma — ignore.
@@ -185,11 +185,11 @@ func run(dsn string, reindex reindexSet, workers int) error {
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	var (
-		photosDone                          atomic.Int64
-		descRows, metaRows, queriesRows     atomic.Int64
-		descSkip, metaSkip, queriesSkip     atomic.Int64
-		descFail, metaFail, queriesFail     atomic.Int64
-		loadFail                            atomic.Int64
+		photosDone                      atomic.Int64
+		descRows, metaRows, queriesRows atomic.Int64
+		descSkip, metaSkip, queriesSkip atomic.Int64
+		descFail, metaFail, queriesFail atomic.Int64
+		loadFail                        atomic.Int64
 	)
 	var fatalOnce sync.Once
 	var fatalErr error
