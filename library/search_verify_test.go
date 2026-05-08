@@ -38,7 +38,7 @@ func TestVerifyFilterCacheMissCallsLLMAndWrites(t *testing.T) {
 	candidates := []Result{{Name: a, Similarity: 0.9}, {Name: b, Similarity: 0.8}}
 
 	s := NewSearcher(db)
-	verdicts, stats, err := s.VerifyFilter(context.Background(), "warm light", candidates)
+	verdicts, stats, err := s.VerifyFilterV2(context.Background(), "warm light", candidates, DefaultSearchOptionsV2())
 	if err != nil {
 		t.Fatalf("VerifyFilter: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestVerifyFilterCacheHitSkipsLLM(t *testing.T) {
 
 	candidates := []Result{{Name: a, Similarity: 0.9}, {Name: b, Similarity: 0.8}}
 	s := NewSearcher(db)
-	verdicts, stats, err := s.VerifyFilter(ctx, "indoor", candidates)
+	verdicts, stats, err := s.VerifyFilterV2(ctx, "indoor", candidates, DefaultSearchOptionsV2())
 	if err != nil {
 		t.Fatalf("VerifyFilter: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestVerifyFilterMixedCacheHitMissAccountsCorrectly(t *testing.T) {
 		{Name: missB, Similarity: 0.80},
 	}
 	s := NewSearcher(db)
-	_, stats, err := s.VerifyFilter(ctx, "q", candidates)
+	_, stats, err := s.VerifyFilterV2(ctx, "q", candidates, DefaultSearchOptionsV2())
 	if err != nil {
 		t.Fatalf("VerifyFilter: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestVerifyFilterCanonicalizesQuery(t *testing.T) {
 	ctx := context.Background()
 
 	// First call — populates cache under canonicalized "warm light bedroom".
-	_, _, err := s.VerifyFilter(ctx, "  Warm Light Bedroom  ", candidates)
+	_, _, err := s.VerifyFilterV2(ctx, "  Warm Light Bedroom  ", candidates, DefaultSearchOptionsV2())
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestVerifyFilterCanonicalizesQuery(t *testing.T) {
 
 	// Second call — different cosmetic shape, same semantic query. Should
 	// be a cache hit.
-	_, stats, err := s.VerifyFilter(ctx, "warm light bedroom", candidates)
+	_, stats, err := s.VerifyFilterV2(ctx, "warm light bedroom", candidates, DefaultSearchOptionsV2())
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}

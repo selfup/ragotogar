@@ -34,7 +34,7 @@ Each step feeds the next:
 |------|------|--------|
 | 1. **Organize** | Sort media into type folders (JPEG, RAW, MOV...) and date subfolders | `scripts/organize.sh` |
 | 2. **Describe** | Send each photo to a vision LLM, write photo + EXIF + parsed fields + 1024px thumbnail BLOB into Postgres | `scripts/photo_describe.sh` |
-| 3. **Index** | Read each photo from Postgres, chunk + embed via LM Studio, INSERT into the `chunks` table (pgvector) | `scripts/index.sh` |
+| 3. **Index** | Read each photo from Postgres, embed into three pgvector stores: `photo_descriptions` (chunked scene + classifier prose), `photo_metadata` (EXIF tokens, 1 row/photo), `photo_queries` (LLM-generated phrasings, N rows/photo) | `scripts/index.sh` |
 | 4. **Search** | pgvector cosine similarity (`ORDER BY embedding <=> $1`); optional LLM verify pass | `scripts/search.sh` |
 | 5. **Browse** | Web server — search box + thumbnail grid; per-photo pages render on-demand from SQL | `scripts/web.sh` |
 
@@ -47,8 +47,8 @@ Steps are independent — you can run search without ever organizing, or describ
 | Go Media Organizer | `cmd/organize` | Parallel file organizer: sorts media into type/date folders, reunites sidecars. macOS-only. |
 | Photo Describer | `cmd/describe` | Vision LLM descriptions + EXIF metadata + thumbnail JPG → Postgres |
 | NAS Sync | `scripts/clone.sh` | rclone-based sync with month/year filtering and `--no-videos` |
-| Vector Indexer | `cmd/index` | Chunks + embeds each photo's description, INSERTs into pgvector chunks table |
-| Vector Search | `cmd/search` | pgvector cosine similarity over chunks; optional LLM verify pass |
+| Vector Indexer | `cmd/index` | Embeds each photo into the three v12 stores (`photo_descriptions`, `photo_metadata`, `photo_queries`); per-store skip-if-exists keyed `(photo_id, schema_version)`; granular `-reindex=descriptions,metadata,queries` |
+| Vector Search | `cmd/search` | pgvector cosine similarity across the three stores merged per `-merge-strategy=union/intersect/weighted`; optional LLM verify pass with text composition mirroring the per-store toggles |
 | Web Server | `cmd/web` | Search UI + per-photo HTML pages rendered on-demand from SQL; thumbnail BLOBs streamed from SQL |
 | Cashier (markdown) | `cmd/cashier` | General-purpose markdown → HTML renderer with the cashier design system. Not in the photo pipeline; kept for ad-hoc use. |
 | Prompt templates | `prompts/` | LLM prompt templates embedded into binaries via `//go:embed`. `query.md` (auto-mode NL→boolean rewrite, used by `library.RewriteQuery`); `classify_filter.md` (post-retrieval drop oracle, used by `library.FilterByClassification`). Edit these files; the next build picks up changes. |
@@ -160,16 +160,19 @@ The Subject field demands both nouns AND verbs ("single-engine propeller airplan
 |-------|-------|
 | `photos` | `id`, `name`, `file_path` (original on disk), `file_basename`, timestamps |
 | `exif` | Typed columns from EXIF: `camera_make`, `camera_model`, `lens_model`, `date_taken` (ISO 8601 + decomposed year/month), `focal_length_mm`, `f_number`, `exposure_time_seconds`, `iso`, `exposure_compensation`, `gps_latitude/longitude`, etc. Plus a generated `fts tsvector` column over camera/lens/year/software/artist so FTS+vector mode can match queries like `2024` or `X100VI` that live only in metadata (v8). |
-| `descriptions` | Parsed `subject / setting / light / colors / composition / vantage / ground_truth / condition`, `full_description` (the raw LLM output), and a generated `fts tsvector` column (English stemmer) for keyword recall. `cmd/search`'s FTS arm concatenates this with `exif.fts` at query time so prose tokens and metadata tokens can co-match. The `condition` column captures wear/age/cleanliness/construction state so queries like "construction site" or "abandoned building" reach the right photos. |
+| `descriptions` | Parsed `subject / setting / light / colors / composition / vantage / ground_truth / condition / mood`, `full_description` (the raw LLM output), and a generated `fts tsvector` column (English stemmer) for keyword recall. `cmd/search`'s FTS arm concatenates this with `exif.fts` at query time so prose tokens and metadata tokens can co-match. The `condition` column captures wear/age/cleanliness/construction state so queries like "construction site" or "abandoned building" reach the right photos. The `mood` column (v13) captures aesthetic descriptors emitted alongside the existing prose fields and feeds into `photo_descriptions` embeddings. |
 | `thumbnails` | 1024px JPG bytes as a `BYTEA` BLOB. Generated from the same magick output sent to the vision model — no second resize. |
 | `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
-| `chunks` | One row per chunk per photo. `text TEXT` + `embedding halfvec(2560)` (Qwen3-Embedding-4B GGUF). HNSW index on `embedding halfvec_cosine_ops`. Owned by the indexer (`cmd/index`). |
-| `verify_cache` | Persistent LLM yes/no cache for the verify pass. Keyed on `(query, photo_id, verify_model)`; `verified_at > inference.described_at` is the freshness check, so re-describing a photo silently invalidates older cached verdicts. Written by `library.VerifyFilter`; consulted by both `cmd/web` and `cmd/search`. **Always-on.** |
+| `photo_descriptions` | v12 — one row per chunk per photo. `chunk_text TEXT` + `embedding halfvec(2560)` (Qwen3-Embedding-4B GGUF). HNSW + `photo_id` indexes. Source text is `BuildDescriptionDocument` (scene fields + classifier verdicts + mood + full LLM description). UNIQUE `(photo_id, schema_version, chunk_index)`. |
+| `photo_metadata` | v12 — one row per photo. `metadata_text TEXT` (space-joined EXIF tokens, e.g. `NIKON Z 8 NIKKOR Z 24-120mm 90mm f/8 1/8000s ISO 720 Manual 2024`) + `embedding halfvec(2560)` + HNSW index. Source text is `BuildMetadataDocument`. UNIQUE `(photo_id, schema_version)`. |
+| `photo_queries` | v12 — N rows per photo (one per LLM-generated phrasing). `query_text TEXT` + `embedding halfvec(2560)` + HNSW index. Source list comes from `query_generations.queries` (the JSONB array). UNIQUE `(photo_id, schema_version, query_index)`. |
+| `query_generations` | v12 — source-of-truth for the LLM-generated search phrasings emitted by the describer's combined vision call. `model TEXT` + `prompt_hash TEXT` (16 hex chars; lets prompt drift be detected without diffing strings) + `queries JSONB`. One row per photo. Owned by `cmd/describe`; `cmd/index` reads it to populate `photo_queries`. |
+| `verify_cache` | Persistent LLM yes/no cache for the verify pass. Keyed on `(query, photo_id, verify_model)`; `verified_at > inference.described_at` is the freshness check, so re-describing a photo silently invalidates older cached verdicts. Written by `library.VerifyFilterV2`; consulted by both `cmd/web` and `cmd/search`. **Always-on.** |
 | `query_rewrite_cache` | Persistent NL→boolean rewrite cache for `auto` mode. Keyed on `(nl_query, rewrite_model)` — no per-photo dependency. **Opt-in** via the `save rewrite` checkbox so iterating to a good rewrite doesn't memorialize bad output (v10). |
 | `classify_filter_cache` | Persistent drop-verdict cache for the post-retrieval classifier filter. Keyed on `(nl_query, photo_id, classify_model)`; `filtered_at > classified.classified_at` is the freshness check. **Opt-in** via the `save classifier filter` checkbox (v11). |
 | `schema_version` | Single-row marker for migrations |
 
-`cmd/describe` itself never touches `chunks` — that's the indexer's table. Re-describing a photo overwrites its photos / exif / descriptions / inference / thumbnails rows but leaves chunks alone; re-running `./scripts/index.sh` regenerates chunks from the fresh description.
+`cmd/describe` owns `photos / exif / descriptions / inference / thumbnails / query_generations`; the indexer (`cmd/index`) owns the three vector stores. Re-describing a photo overwrites the describer's tables but leaves the embedding stores alone; re-running `./scripts/index.sh` regenerates them per-store from the fresh description / metadata / queries.
 
 **Key details:**
 
@@ -205,21 +208,25 @@ The cashier source tree stays in place for ad-hoc markdown rendering — essays,
 
 The photo `.jpg` sidecar `cmd/cashier` produces is no longer used by `cmd/web` — thumbnails come out of the `thumbnails` BLOB in Postgres.
 
-## Photo Search — pgvector (`cmd/index`, `cmd/search`)
+## Photo Search — pgvector three-store (`cmd/index`, `cmd/search`)
 
-Indexes photo descriptions from the Postgres library into the `chunks` table (pgvector halfvec(2560) + HNSW index). Search is a single SQL query: `ORDER BY embedding <=> $1 LIMIT k`. Uses LM Studio for embeddings and (optionally) for the LLM verify pass.
+v12 split the vector lane into three parallel halfvec(2560) HNSW stores (`photo_descriptions`, `photo_metadata`, `photo_queries`) so each signal type carries its own embedding and can be queried / weighted / disabled independently. See `ARCHITECTURE.md` Pillar 0 for the design rationale.
 
-Two Go binaries plus a shared `internal/library` package:
+Two Go binaries plus a shared `library/` package:
 
-- **`internal/library`** — `Photo` struct + `LoadPhoto` (pgx), `BuildDocument` (the indexable text — same Go function used by both indexer and verifier), `Chunk` (character-window splitter), `EmbedTexts` and `LLMComplete` (LM Studio HTTP)
-- **`cmd/index`** — reads photos from SQL, chunks each `BuildDocument` output, embeds via LM Studio, INSERTs into `chunks`. Idempotent: skips photos that already have chunks unless `-reindex` is passed.
-- **`cmd/search`** — embeds the query, runs the cosine SELECT, optionally pipes candidates through the LLM verify pass (8-way goroutine pool)
+- **`library/`** — `Photo` struct + `LoadPhoto` (pgx), three doc builders (`BuildDescriptionDocument` / `BuildMetadataDocument` / `BuildQueryDocuments`), `Chunk` (character-window splitter), `EmbedTexts` and `LLMComplete` (LM Studio / OpenRouter HTTP).
+- **`cmd/index`** — populates the three v12 stores per photo. Per-store skip-if-exists keyed `(photo_id, schema_version)`; granular `-reindex=descriptions,metadata,queries` (subset list); partial-failure-aware (descriptions OK + metadata fail → logged + resumable, never half-indexed).
+- **`cmd/search`** — embeds the query once, fans out per-store ANN queries in parallel goroutines, merges per `-merge-strategy=union|intersect|weighted` (with `-weight-{descriptions,metadata,queries}` knobs under `weighted`), optionally runs verify (`VerifyFilterV2`, text composition mirrors the per-store toggles). Hybrid mode (`-hybrid`) RRF-fuses the merged vector lane with the existing FTS arm.
 
 **How it works:**
 
-1. `cmd/index` iterates `SELECT name FROM photos`, calls `BuildDocument` per row, splits the result into ~6KB chunks, embeds each chunk via LM Studio, INSERTs `(photo_id, idx, text, embedding)` rows
-2. Search embeds the query the same way, then aggregates per-photo via `SELECT name, MAX(1 - (embedding <=> $1)) AS similarity FROM chunks JOIN photos ... GROUP BY name ORDER BY similarity DESC LIMIT k`
-3. Optional `-verify` runs an LLM yes/no relevance check on each candidate's `BuildDocument` text — same text the indexer embedded, so retrieval and verification stay coherent
+1. `cmd/index` reads each photo via `LoadPhoto`, then independently writes:
+   - `BuildDescriptionDocument` → chunked → embedded → `photo_descriptions` (one row per chunk)
+   - `BuildMetadataDocument` (EXIF tokens) → embedded → `photo_metadata` (one row total)
+   - `BuildQueryDocuments` (= `Photo.GeneratedQueries`) → embedded → `photo_queries` (one row per phrasing)
+   Each store has its own per-photo `DELETE`+`INSERT` transaction, so a metadata embed failure doesn't roll back a successful descriptions write.
+2. `cmd/search` embeds the query, fans out one ANN query per enabled store (`SELECT photo_id, MAX(1 - (embedding <=> $1)) ...`), merges via `mergeUnion` / `mergeIntersect` / `mergeWeighted`, applies the negation post-filter against `descriptions.fts || exif.fts`, returns ranked results.
+3. Optional `-verify` runs an LLM yes/no relevance check per candidate. The verifier sees `BuildDescriptionDocument(p)` + (when `-use-metadata` is on) `BuildMetadataDocument(p)` joined with `\n\n`. Queries are always excluded — verifier never sees its own training-target text.
 
 **Prerequisites — models loaded in LM Studio:**
 
@@ -245,8 +252,8 @@ lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 # Index every photo currently in the library
 ./scripts/index.sh
 
-# Re-index (TRUNCATE chunks then re-embed all photos)
-./scripts/index.sh -reindex
+# Re-index (per-store invalidation; subset list of descriptions, metadata, queries)
+./scripts/index.sh -reindex=descriptions,metadata,queries
 
 # Override library DSN
 ./scripts/index.sh -dsn postgres:///other_db
@@ -281,7 +288,7 @@ See [Query syntax](#query-syntax) for the full operator set.
 | *(default)* | Top-30 vector retrieval, no LLM |
 | `-retrieve` | Unbounded vector retrieval — every chunk match with cosine ≥ 0.5, no LLM (used by cmd/web; output parses cleanly via the `[N] name` regex) |
 | `-precise` | Same as `-retrieve` (kept for parity with the old Python tool's `--precise`) |
-| `-verify` | Composes with `-retrieve`/`-precise`: runs an LLM yes/no relevance check on each candidate's `BuildDocument` text in an 8-way goroutine pool, keeps only YES matches |
+| `-verify` | Composes with `-retrieve`/`-precise`: runs an LLM yes/no relevance check on each candidate's `BuildDescriptionDocument` (+ `BuildMetadataDocument` when `-use-metadata`) text in an 8-way goroutine pool, keeps only YES matches |
 
 **Environment variables:**
 
@@ -300,8 +307,8 @@ See [Query syntax](#query-syntax) for the full operator set.
 - Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — vector captures "X100VI", "f/2", "ISO 3200" alongside visual phrases like "bedroom" and "paisley duvet"
 - Chunking is a simple character-window splitter (~6KB per chunk with 400-byte overlap). Most photo descriptions fit in a single chunk; only long-form descriptions spill over.
 - HNSW index on `embedding halfvec_cosine_ops` — cosine is the metric, `<=>` is the distance operator. halfvec is required because the `vector` type's HNSW caps at 2000 dims; halfvec at 4000.
-- Re-indexing is incremental by default (skips photos that already have any chunks); use `-reindex` to TRUNCATE and rebuild
-- Per-photo similarity = `MAX(1 - (embedding <=> $1))` over the photo's chunks (best chunk wins) so the same photo doesn't appear multiple times in results
+- Re-indexing is incremental by default per store (skips photos that already have rows at the current `schema_version`). Use `-reindex=descriptions[,metadata,queries]` to invalidate a subset before re-populating.
+- Per-photo similarity in `photo_descriptions` / `photo_queries` = `MAX(1 - (embedding <=> $1))` over the photo's rows (best chunk / best phrasing wins). `photo_metadata` is one row per photo so MAX collapses trivially. Merge step combines the per-store similarities per the chosen strategy (max for union, mean for intersect, weighted-sum for weighted).
 - Embedding model must be `text-embedding-qwen3-embedding-4b` (2560-dim); changing it requires re-indexing
 - **Requirements:** Postgres + pgvector (`./scripts/bootstrap.sh`), LM Studio with an embedding model loaded, a populated library (run `cmd/describe` first)
 
@@ -341,7 +348,7 @@ If `open` can't resolve the configured name, the error ("Unable to find applicat
 | Route | Behavior |
 |-------|----------|
 | `GET /` | Search box + a four-pill mode toggle + result grid |
-| `GET /?q=<query>&mode=<mode>` | Calls `library.Searcher` in-process — `Search` for vector modes, `SearchHybrid` for FTS+vector modes, `VerifyFilter` when the mode includes verify. Returns the matching photo names, validated against `photos.name`, then rendered as a thumbnail grid. |
+| `GET /?q=<query>&mode=<mode>` | Calls `library.Searcher` in-process — `SearchV2` for vector modes (per-store toggles + merge strategy), `SearchHybridV2` for FTS+vector modes, `VerifyFilterV2` when the mode includes verify. Returns the matching photo names, validated against `photos.name`, then rendered as a thumbnail grid. |
 | `GET /photos/<name>` | HTML page rendered from a Go template against the photos / exif / descriptions / inference tables. Uses the cashier design system (hero / dual-pillars / built photo-meta sections). Three buttons under the hero figure (DxO PhotoLab / Capture One / Reveal in Finder) `fetch()` the open route below. |
 | `GET /photos/<name>.jpg` | Streams the thumbnail BLOB from `thumbnails.bytes` with `Content-Type: image/jpeg` and `Cache-Control: max-age=86400` |
 | `POST /photos/<name>/open?app=<dxo\|c1\|finder>` | Looks up `photos.file_path`, verifies the file is still on disk, then shells out to `/usr/bin/open -a "<AppName>" <path>` (or `open -R <path>` for `finder`). App names resolve via `DXO_APP_NAME` / `CAPTUREONE_APP_NAME` env vars; `open`'s error (e.g. "Unable to find application named 'DxO PhotoLab 9'") surfaces back to the UI as plain-text 500 so a stale env var is obvious. POST-only so a stray `<a href>` or link prefetch can't trigger a launch. macOS only — `cmd/web` must be running on the same Mac as the original files. |
@@ -358,6 +365,15 @@ If `open` can't resolve the configured name, the error ("Unable to find applicat
 | `auto` | (web only) | LLM rewrites your natural-language query into the boolean form (phrase binding, negations, vocabulary expansion against the describer's vocabulary tail) using `prompts/query.md`, then runs FTS+vector. The rewritten query is shown above the result grid; tick `save rewrite` to cache it. Off-by-default save means you can iterate to a good rewrite without sticky bad output. |
 | `auto+verify` | (web only) | Auto-rewrite + FTS+vector + per-candidate prose verify. Tightest auto path. |
 
+**Per-store vector lane** (compose with any mode above; the FTS arm is unaffected):
+
+| Toggle | URL param | Behavior |
+|--------|-----------|----------|
+| `descriptions store` | `?descriptions=1` | Include `photo_descriptions` in the merged vector lane. **On by default.** Drops scene-prose and classifier-verdict matches when off. |
+| `metadata store` | `?metadata=1` | Include `photo_metadata` (EXIF tokens). **On by default.** Drops camera / lens / aperture / shutter / year matches when off. |
+| `queries store` | `?queries=1` | Include `photo_queries` (LLM-generated phrasings). **On by default.** Useful to disable when phrasing-anchored matches are noise (e.g. an ambiguous one-word query pulling in associative photos). |
+| `merge` | `?merge=union\|intersect\|weighted` | How to combine per-store results. **Union** (default): photos from any enabled store, similarity = max across stores. **Intersect**: only photos in every enabled store (similarity = mean). **Weighted**: per-store similarity × weight, summed (`?wd=…&wm=…&wq=…` weight knobs visible only when `weighted` is selected). |
+
 **Independent post-retrieval toggles** (compose with any mode above):
 
 | Toggle | URL param | Behavior |
@@ -366,7 +382,7 @@ If `open` can't resolve the configured name, the error ("Unable to find applicat
 | `save classifier filter` | `?save_class=1` | Caches drop verdicts in `classify_filter_cache` keyed on `(canonical NL query, photo_id, classify_model)`. Freshness checked against `classified.classified_at` so re-classifying invalidates. |
 | `save rewrite` | `?save=1` | Caches the auto-mode boolean rewrite in `query_rewrite_cache` keyed on `(canonical NL query, rewrite_model)`. |
 
-All pills bound by the same cosine slider (vector arm) and FTS slider (FTS arm); the search has no top-N cap, only the threshold floors. Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when chunks reference a basename that's since been deleted from the library).
+All pills bound by the same cosine slider (vector arm) and FTS slider (FTS arm); the search has no top-N cap, only the threshold floors. Clicking a pill auto-submits the form. Results whose name isn't in `photos` are silently skipped (e.g. when a v12 store row references a basename that's since been deleted from the library).
 
 **Sort toggle:**
 
@@ -416,18 +432,18 @@ Other operators (`OR`, positive quoted phrases) pass through unchanged to the em
 
 **What's not yet reachable:**
 
-- **Classifier enums** (`scene_weather`, `pov_container`, `motion`, etc.) live in the `classified` table and in `chunks.text` (vector lane), but not in `descriptions.fts` or `exif.fts`. So `-overcast` only matches photos whose prose literally stem-matches `overcast`, not photos the classifier verdict labeled overcast. A `classified.fts` generated column would close this; see `library/classify.go:74` for the canonical enum vocabulary that would land in such an index. Deferred until needed.
+- **Classifier enums** (`scene_weather`, `pov_container`, `motion`, etc.) live in the `classified` table and in `photo_descriptions.chunk_text` (vector lane), but not in `descriptions.fts` or `exif.fts`. So `-overcast` only matches photos whose prose literally stem-matches `overcast`, not photos the classifier verdict labeled overcast. A `classified.fts` generated column would close this; see `library/classify.go:74` for the canonical enum vocabulary that would land in such an index. Deferred until needed.
 - **Numerical / range filters** (`f/2.8 or wider`, `April 2024 only`, `ISO ≥ 1600`) — pgvector + FTS can't express these. See `ARCHITECTURE.md` Phase 7 for the LLM-parse sketch.
 
 ### Tuning thresholds
 
-`cosine ≥` (vector arm) is a flat absolute floor — only chunks with similarity ≥ this value pass. Default `0.50`. Raise to tighten; lower to broaden.
+`cosine ≥` (vector arm) is a flat absolute floor — only per-store rows with similarity ≥ this value pass before merge. Default `0.50`. Raise to tighten; lower to broaden.
 
 `fts ≥` (FTS arm) is a relative floor — `value × max(ts_rank)` for the query. Default `0.30`. Adaptive: a single-token query like `X100VI` produces uniformly low ranks, while `red truck on road` produces a few high ranks plus noise; the relative cutoff handles both without over-pruning the former.
 
 When pure `vector` mode returns 0 hits but `FTS+vector` returns many, that's almost always the cosine floor pruning the long tail (the FTS arm catches what was just below 0.50). Drop the slider to confirm before assuming a bug.
 
-**Requirements:** A populated `chunks` table (see [Photo Search](#photo-search--pgvector-tools)) and a populated library (run `cmd/describe` first).
+**Requirements:** Populated v12 stores (`photo_descriptions` / `photo_metadata` / `photo_queries` — run `cmd/index` after `cmd/describe`).
 
 ## Tests
 

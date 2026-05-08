@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -11,7 +12,7 @@ import (
 	"ragotogar/library"
 )
 
-const schemaVersion = 11 // v11: classify_filter_cache — saved post-retrieval LLM drop verdicts keyed on (nl_query, photo_id, classify_model)
+const schemaVersion = 14 // v14: drops the legacy chunks table. v12 three-store split (photo_descriptions / photo_metadata / photo_queries) is the only vector lane after this migration.
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
@@ -35,9 +36,10 @@ func openDB(dsn string) (*sql.DB, error) {
 }
 
 func initSchema(db *sql.DB) error {
-	// pgvector is required for the chunks table — load it before any
-	// schema DDL so a fresh DB (e.g. test temp database) self-bootstraps.
-	// Trusted-extension flag in pgvector 0.7+ means no superuser needed.
+	// pgvector is required for the v12 vector stores (photo_descriptions /
+	// photo_metadata / photo_queries) — load it before any schema DDL so a
+	// fresh DB (e.g. test temp database) self-bootstraps. Trusted-extension
+	// flag in pgvector 0.7+ means no superuser needed.
 	if _, err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
 		return fmt.Errorf("load vector extension: %w (run ./scripts/bootstrap.sh on a fresh machine)", err)
 	}
@@ -109,6 +111,21 @@ func migrate(db *sql.DB) error {
 	if maxVersion < 11 {
 		if err := migrateV11(db); err != nil {
 			return fmt.Errorf("v11: %w", err)
+		}
+	}
+	if maxVersion < 12 {
+		if err := migrateV12(db); err != nil {
+			return fmt.Errorf("v12: %w", err)
+		}
+	}
+	if maxVersion < 13 {
+		if err := migrateV13(db); err != nil {
+			return fmt.Errorf("v13: %w", err)
+		}
+	}
+	if maxVersion < 14 {
+		if err := migrateV14(db); err != nil {
+			return fmt.Errorf("v14: %w", err)
 		}
 	}
 	return nil
@@ -250,6 +267,123 @@ func migrateV10(db *sql.DB) error {
 	return err
 }
 
+// migrateV12 adds the three new vector stores + the query_generations
+// source-of-truth table. The legacy chunks table was kept through v13
+// for v1↔v2 A/B comparison and dropped in v14. All four tables are
+// created CREATE … IF NOT EXISTS so this is idempotent against fresh
+// DBs (where schemaSQL also declares them) and against partial-state DBs.
+//
+// The id BIGSERIAL + UNIQUE(photo_id, schema_version, …) shape matches the
+// migration spec: surrogate key for stable row identity, business-key
+// uniqueness via the composite UNIQUE. schema_version is per-row so a
+// future prompt or model change touching one stage (e.g. re-running query
+// gen against a new model) doesn't force re-embedding the others.
+func migrateV12(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS photo_descriptions (
+		    id              BIGSERIAL PRIMARY KEY,
+		    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+		    schema_version  INTEGER NOT NULL,
+		    chunk_index     INTEGER NOT NULL,
+		    chunk_text      TEXT NOT NULL,
+		    embedding       halfvec(2560) NOT NULL,
+		    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+		    UNIQUE (photo_id, schema_version, chunk_index)
+		)`,
+		`CREATE TABLE IF NOT EXISTS photo_metadata (
+		    id              BIGSERIAL PRIMARY KEY,
+		    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+		    schema_version  INTEGER NOT NULL,
+		    metadata_text   TEXT NOT NULL,
+		    embedding       halfvec(2560) NOT NULL,
+		    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+		    UNIQUE (photo_id, schema_version)
+		)`,
+		`CREATE TABLE IF NOT EXISTS photo_queries (
+		    id              BIGSERIAL PRIMARY KEY,
+		    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+		    schema_version  INTEGER NOT NULL,
+		    query_index     INTEGER NOT NULL,
+		    query_text      TEXT NOT NULL,
+		    embedding       halfvec(2560) NOT NULL,
+		    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+		    UNIQUE (photo_id, schema_version, query_index)
+		)`,
+		`CREATE TABLE IF NOT EXISTS query_generations (
+		    photo_id        TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+		    schema_version  INTEGER NOT NULL,
+		    model           TEXT NOT NULL,
+		    prompt_hash     TEXT NOT NULL,
+		    queries         JSONB NOT NULL,
+		    generated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_descriptions_embedding ON photo_descriptions USING hnsw (embedding halfvec_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_metadata_embedding     ON photo_metadata     USING hnsw (embedding halfvec_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_queries_embedding      ON photo_queries      USING hnsw (embedding halfvec_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_descriptions_photo_id  ON photo_descriptions (photo_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_metadata_photo_id      ON photo_metadata     (photo_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_photo_queries_photo_id       ON photo_queries      (photo_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateV14 drops the legacy chunks table — the v1 single-store vector
+// lane that the v12 three-store split (photo_descriptions / photo_metadata /
+// photo_queries) supersedes. Validation against the v12 stores has signed
+// off; the v1 retrieval code paths (Search / SearchHybrid / VerifyFilter,
+// BuildDocument, the -v1-chunks / -include-v1-chunks CLI hatches) are
+// removed in the same release. DROP IF EXISTS so the migration is
+// idempotent against fresh DBs (where chunks was never in schemaSQL
+// post-v14) and against partially-applied environments.
+func migrateV14(db *sql.DB) error {
+	if _, err := db.Exec(`DROP TABLE IF EXISTS chunks`); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateV13 adds the descriptions.mood prose column for the v12
+// combined-call describer (mood emitted alongside subject/setting/light/
+// colors/composition). The fts generated column is dropped and recreated
+// to fold mood into to_tsvector input — same pattern as migrateV4 / V9:
+// generated columns can't be ALTER'd in place but the fts column has no
+// source-of-truth data of its own (GENERATED ALWAYS … STORED), so the
+// drop/recreate is non-lossy.
+func migrateV13(db *sql.DB) error {
+	if _, err := db.Exec(`ALTER TABLE descriptions ADD COLUMN IF NOT EXISTS mood TEXT`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`ALTER TABLE descriptions DROP COLUMN IF EXISTS fts`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		ALTER TABLE descriptions ADD COLUMN fts tsvector GENERATED ALWAYS AS (
+			to_tsvector('english',
+				coalesce(subject,'')          || ' ' ||
+				coalesce(setting,'')          || ' ' ||
+				coalesce(light,'')            || ' ' ||
+				coalesce(colors,'')           || ' ' ||
+				coalesce(composition,'')      || ' ' ||
+				coalesce(vantage,'')          || ' ' ||
+				coalesce(ground_truth,'')     || ' ' ||
+				coalesce(condition,'')        || ' ' ||
+				coalesce(mood,'')             || ' ' ||
+				coalesce(full_description,''))
+		) STORED
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_descriptions_fts ON descriptions USING gin(fts)`); err != nil {
+		return err
+	}
+	return nil
+}
+
 // migrateV8 adds a generated tsvector on the exif table so the FTS search
 // arm can match against camera / lens / year / software / artist tokens —
 // before this, descriptions.fts was the only FTS surface and a query like
@@ -329,9 +463,10 @@ func listExistingNames(db *sql.DB) (map[string]bool, error) {
 // inference / thumbnails in a single transaction. UPSERT semantics so re-runs
 // (e.g. with -force) overwrite cleanly.
 //
-// The chunks table is owned by the indexer (tools/index_and_vectorize); a new
-// describe overwrites the photo row but does not touch chunks. Re-running the
-// indexer regenerates chunks from the fresh description.
+// The v12 vector stores (photo_descriptions / photo_metadata /
+// photo_queries) are owned by cmd/index; a new describe overwrites the
+// photo row but does not touch them. Re-running cmd/index regenerates
+// the per-store rows from the fresh description / metadata / queries.
 func insertPhoto(
 	db *sql.DB,
 	name, srcPath string,
@@ -420,8 +555,8 @@ func insertPhoto(
 	}
 
 	if _, err := tx.Exec(`
-		INSERT INTO descriptions (photo_id, subject, setting, light, colors, composition, vantage, ground_truth, condition, full_description)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO descriptions (photo_id, subject, setting, light, colors, composition, vantage, ground_truth, condition, mood, full_description)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT(photo_id) DO UPDATE SET
 			subject          = EXCLUDED.subject,
 			setting          = EXCLUDED.setting,
@@ -431,6 +566,7 @@ func insertPhoto(
 			vantage          = EXCLUDED.vantage,
 			ground_truth     = EXCLUDED.ground_truth,
 			condition        = EXCLUDED.condition,
+			mood             = EXCLUDED.mood,
 			full_description = EXCLUDED.full_description
 	`,
 		name,
@@ -442,9 +578,35 @@ func insertPhoto(
 		nullIfEmpty(fields.Vantage),
 		nullIfEmpty(fields.GroundTruth),
 		nullIfEmpty(fields.Condition),
+		nullIfEmpty(fields.Mood),
 		nullIfEmpty(desc),
 	); err != nil {
 		return fmt.Errorf("upsert descriptions: %w", err)
+	}
+
+	// query_generations is the source-of-truth for the LLM-generated search
+	// phrasings emitted by the v12 combined-call describer. Empty queries
+	// (parse failed, or model omitted the section) skip the write — Step 4's
+	// indexer treats absence as "no photo_queries rows for this photo,"
+	// resumable on next describe. Per spec: never store empty/broken JSON
+	// silently; the caller logs a warning when fields.Queries is empty.
+	if len(fields.Queries) > 0 {
+		queriesJSON, err := json.Marshal(fields.Queries)
+		if err != nil {
+			return fmt.Errorf("marshal queries: %w", err)
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO query_generations (photo_id, schema_version, model, prompt_hash, queries, generated_at)
+			VALUES ($1, $2, $3, $4, $5, now())
+			ON CONFLICT(photo_id) DO UPDATE SET
+				schema_version = EXCLUDED.schema_version,
+				model          = EXCLUDED.model,
+				prompt_hash    = EXCLUDED.prompt_hash,
+				queries        = EXCLUDED.queries,
+				generated_at   = now()
+		`, name, queryGenerationsSchemaVersion, model, describePromptHash, queriesJSON); err != nil {
+			return fmt.Errorf("upsert query_generations: %w", err)
+		}
 	}
 
 	if _, err := tx.Exec(`

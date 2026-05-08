@@ -9,7 +9,7 @@ import (
 	"github.com/lib/pq"
 )
 
-// VerifyStats summarizes the cache outcome of a single VerifyFilter call. Used
+// VerifyStats summarizes the cache outcome of a single VerifyFilterV2 call. Used
 // by callers to render telemetry — cmd/web shows it in the search footer,
 // cmd/search prints it to stderr after the per-photo verdicts.
 type VerifyStats struct {

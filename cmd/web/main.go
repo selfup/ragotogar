@@ -37,6 +37,19 @@ type pageData struct {
 	Classify        bool               // checkbox state — true means run the classifier filter
 	SaveClassify    bool               // checkbox state — true means cache classifier filter verdicts
 	ClassifyStats   *classifyStatsView // nil unless the classifier filter ran
+
+	// v12 three-store toggles. Per-store on/off + merge strategy + per-
+	// store weights for the weighted strategy. Verifier text composition
+	// follows the enable toggles (queries always excluded — verifier
+	// must never see its own training-target text). See ARCHITECTURE.md
+	// Pillar 0 for the design rationale.
+	UseDescriptions bool
+	UseMetadata     bool
+	UseQueries      bool
+	Merge           string // "union" (default) | "intersect" | "weighted"
+	WeightDesc      string // pre-formatted for the input value attribute
+	WeightMeta      string
+	WeightQueries   string
 }
 
 // classifyStatsView projects library.ClassifyFilterStats for the template.
@@ -178,6 +191,37 @@ func resolveSort(s string) string {
 	return "relevance"
 }
 
+// validMerges — three v12 strategies the UI exposes. union is the
+// validated default (broadest recall); intersect requires every enabled
+// store to agree; weighted lets the user bias toward (e.g.) the queries
+// store via per-store weights.
+var validMerges = map[string]bool{
+	string(library.MergeUnion):     true,
+	string(library.MergeIntersect): true,
+	string(library.MergeWeighted):  true,
+}
+
+func resolveMerge(m string) string {
+	if validMerges[m] {
+		return m
+	}
+	return string(library.MergeUnion)
+}
+
+// parseWeight reads a non-negative float URL param for the merge=weighted
+// per-store weight. Falls back to 1.0 on missing / malformed / negative
+// input — UI sliders may produce odd values; default 1.0 is a safe baseline.
+func parseWeight(raw string) float64 {
+	if raw == "" {
+		return 1.0
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		return 1.0
+	}
+	return v
+}
+
 func defaultDSN() string {
 	if v := os.Getenv("LIBRARY_DSN"); v != "" {
 		return v
@@ -228,6 +272,25 @@ func main() {
 		classify := r.URL.Query().Get("class") == "1"
 		saveClassify := r.URL.Query().Get("save_class") == "1"
 
+		// v12 three-store toggles. Empty query (page first-load) → defaults
+		// (all stores on, union merge, weights = 1.0). Submitted form →
+		// explicit URL state (absent checkboxes = unchecked). The "all off
+		// + non-empty query" case is handled downstream as a no-op search.
+		merge := resolveMerge(r.URL.Query().Get("merge"))
+		var useDesc, useMeta, useQueries bool
+		var wDesc, wMeta, wQueries float64
+		if q == "" {
+			useDesc, useMeta, useQueries = true, true, true
+			wDesc, wMeta, wQueries = 1.0, 1.0, 1.0
+		} else {
+			useDesc = r.URL.Query().Get("descriptions") == "1"
+			useMeta = r.URL.Query().Get("metadata") == "1"
+			useQueries = r.URL.Query().Get("queries") == "1"
+			wDesc = parseWeight(r.URL.Query().Get("wd"))
+			wMeta = parseWeight(r.URL.Query().Get("wm"))
+			wQueries = parseWeight(r.URL.Query().Get("wq"))
+		}
+
 		var (
 			results      []result
 			latency      string
@@ -237,7 +300,22 @@ func main() {
 			classifyView *classifyStatsView
 		)
 		if q != "" {
-			res := search(db, q, mode, cosine, ftsRel, save, classify, saveClassify)
+			res := search(db, searchParams{
+				query:           q,
+				mode:            mode,
+				cosine:          cosine,
+				ftsRel:          ftsRel,
+				save:            save,
+				classify:        classify,
+				saveClassify:    saveClassify,
+				useDescriptions: useDesc,
+				useMetadata:     useMeta,
+				useQueries:      useQueries,
+				merge:           library.MergeStrategy(merge),
+				weightDesc:      wDesc,
+				weightMeta:      wMeta,
+				weightQueries:   wQueries,
+			})
 			results = applySort(db, res.Results, sortBy)
 			latency = formatLatency(res.Elapsed)
 			total = countPhotos(db)
@@ -272,6 +350,13 @@ func main() {
 			Classify:        classify,
 			SaveClassify:    saveClassify,
 			ClassifyStats:   classifyView,
+			UseDescriptions: useDesc,
+			UseMetadata:     useMeta,
+			UseQueries:      useQueries,
+			Merge:           merge,
+			WeightDesc:      fmt.Sprintf("%g", wDesc),
+			WeightMeta:      fmt.Sprintf("%g", wMeta),
+			WeightQueries:   fmt.Sprintf("%g", wQueries),
 		}); err != nil {
 			log.Printf("template: %v", err)
 		}

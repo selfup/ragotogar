@@ -2,6 +2,7 @@ package library
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,9 +10,9 @@ import (
 	"github.com/lib/pq"
 )
 
-// Photo is the typed view used for both BuildDocument (indexing input) and
-// the cmd/web template render. Pointers for nullable numeric fields so
-// callers can distinguish "absent" from "zero".
+// Photo is the typed view used by the v12 doc builders (indexing input)
+// and the cmd/web template render. Pointers for nullable numeric fields
+// so callers can distinguish "absent" from "zero".
 type Photo struct {
 	Name         string
 	FileBasename string
@@ -41,6 +42,7 @@ type Photo struct {
 	Vantage         string
 	GroundTruth     string
 	Condition       string
+	Mood            string // v12: aesthetic descriptors from the describer's combined-call output. Empty until Step 3 lands the prompt change + descriptions.mood column.
 	FullDescription string
 
 	// Typed enum fields produced by cmd/classify. Empty/nil when the photo
@@ -59,25 +61,39 @@ type Photo struct {
 	Framing            []string
 	Motion             string
 	ColorPalette       string
+
+	// v12: search phrasings emitted by the describer's combined vision
+	// call, sourced from query_generations.queries (JSONB array). nil
+	// until LoadPhoto learns the JOIN in Step 4. Each element becomes one
+	// row in photo_queries.
+	GeneratedQueries []string
 }
 
 // LoadPhoto fetches a photo by name and returns it fully populated. Returns
 // sql.ErrNoRows when the photo doesn't exist.
+//
+// LEFT JOINs against descriptions / classified / query_generations mean
+// photos that have only been organized (not described / classified /
+// query-generated) still load — the corresponding fields just stay
+// zero-valued. v13 added descriptions.mood; v12 added query_generations
+// (queries JSONB → Photo.GeneratedQueries).
 func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	var p Photo
 	var (
-		make_, model, lensModel, lensInfo                                   sql.NullString
-		dateTaken, exposureMode, whiteBalance, flash, software, artist      sql.NullString
-		subject, setting, light, colors, composition, vantage, gt, condition, fullDesc sql.NullString
-		focalMM, focal35, fnum, shutter, ec                                 sql.NullFloat64
-		iso                                                                 sql.NullInt64
-		fileBasename                                                        sql.NullString
+		make_, model, lensModel, lensInfo                                                    sql.NullString
+		dateTaken, exposureMode, whiteBalance, flash, software, artist                       sql.NullString
+		subject, setting, light, colors, composition, vantage, gt, condition, mood, fullDesc sql.NullString
+		focalMM, focal35, fnum, shutter, ec                                                  sql.NullFloat64
+		iso                                                                                  sql.NullInt64
+		fileBasename                                                                         sql.NullString
 		// classified columns — all nullable (LEFT JOIN may not match)
-		povContainer, povAltitude, povAngle                          sql.NullString
-		subjectAltitude, subjectDistance, subjectCount, animalCount  sql.NullString
-		sceneTimeOfDay, sceneIndoorOutdoor, sceneWeather             sql.NullString
-		motion, colorPalette                                         sql.NullString
-		subjectCategory, framing                                     []string
+		povContainer, povAltitude, povAngle                         sql.NullString
+		subjectAltitude, subjectDistance, subjectCount, animalCount sql.NullString
+		sceneTimeOfDay, sceneIndoorOutdoor, sceneWeather            sql.NullString
+		motion, colorPalette                                        sql.NullString
+		subjectCategory, framing                                    []string
+		// v12 query_generations.queries JSONB → []string
+		queriesJSON []byte
 	)
 	err := db.QueryRow(`
 		SELECT p.name, p.file_basename,
@@ -86,16 +102,18 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		       e.f_number, e.exposure_time_seconds, e.iso, e.exposure_compensation,
 		       e.exposure_mode, e.white_balance, e.flash, e.software, e.artist,
 		       d.subject, d.setting, d.light, d.colors, d.composition,
-		       d.vantage, d.ground_truth, d.condition, d.full_description,
+		       d.vantage, d.ground_truth, d.condition, d.mood, d.full_description,
 		       c.pov_container, c.pov_altitude, c.pov_angle,
 		       c.subject_altitude, c.subject_category, c.subject_distance,
 		       c.subject_count, c.animal_count,
 		       c.scene_time_of_day, c.scene_indoor_outdoor, c.scene_weather,
-		       c.framing, c.motion, c.color_palette
+		       c.framing, c.motion, c.color_palette,
+		       qg.queries
 		FROM photos p
-		LEFT JOIN exif e         ON p.id = e.photo_id
-		LEFT JOIN descriptions d ON p.id = d.photo_id
-		LEFT JOIN classified c   ON p.id = c.photo_id
+		LEFT JOIN exif e              ON p.id = e.photo_id
+		LEFT JOIN descriptions d      ON p.id = d.photo_id
+		LEFT JOIN classified c        ON p.id = c.photo_id
+		LEFT JOIN query_generations qg ON p.id = qg.photo_id
 		WHERE p.name = $1
 	`, name).Scan(
 		&p.Name, &fileBasename,
@@ -103,12 +121,13 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 		&dateTaken, &focalMM, &focal35,
 		&fnum, &shutter, &iso, &ec,
 		&exposureMode, &whiteBalance, &flash, &software, &artist,
-		&subject, &setting, &light, &colors, &composition, &vantage, &gt, &condition, &fullDesc,
+		&subject, &setting, &light, &colors, &composition, &vantage, &gt, &condition, &mood, &fullDesc,
 		&povContainer, &povAltitude, &povAngle,
 		&subjectAltitude, pq.Array(&subjectCategory), &subjectDistance,
 		&subjectCount, &animalCount,
 		&sceneTimeOfDay, &sceneIndoorOutdoor, &sceneWeather,
 		pq.Array(&framing), &motion, &colorPalette,
+		&queriesJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -157,7 +176,21 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	p.Vantage = vantage.String
 	p.GroundTruth = gt.String
 	p.Condition = condition.String
+	p.Mood = mood.String
 	p.FullDescription = fullDesc.String
+
+	// queries JSONB → []string. The LEFT JOIN may not match (no query gen
+	// row), in which case queriesJSON is nil — leave GeneratedQueries nil.
+	// A non-nil empty array also leaves it nil (treated as "no queries").
+	if len(queriesJSON) > 0 {
+		var qs []string
+		if err := json.Unmarshal(queriesJSON, &qs); err != nil {
+			return nil, fmt.Errorf("decode query_generations.queries for %s: %w", name, err)
+		}
+		if len(qs) > 0 {
+			p.GeneratedQueries = qs
+		}
+	}
 
 	p.POVContainer = povContainer.String
 	p.POVAltitude = povAltitude.String
@@ -191,9 +224,9 @@ func shutterFraction(seconds float64) string {
 }
 
 // dateTakenToExifString converts the ISO 8601 stored in date_taken back to
-// the legacy EXIF "YYYY:MM:DD HH:MM:SS" form so HumanizeExifDate can re-parse
-// it the same way the Python build_document did. Mirrors fetch_photo_dict
-// in tools/rag_common.py.
+// the legacy EXIF "YYYY:MM:DD HH:MM:SS" form, mirroring fetch_photo_dict
+// in the original Python rag_common.py. Used by BuildDescriptionDocument's
+// "Date: …" line.
 func dateTakenToExifString(iso string) string {
 	if iso == "" {
 		return ""

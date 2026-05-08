@@ -158,6 +158,7 @@ CREATE TABLE descriptions (
     vantage           TEXT,
     ground_truth      TEXT,
     condition         TEXT,
+    mood              TEXT,
     full_description  TEXT,
     fts               tsvector GENERATED ALWAYS AS (
                         to_tsvector('english',
@@ -169,10 +170,23 @@ CREATE TABLE descriptions (
                           coalesce(vantage,'')          || ' ' ||
                           coalesce(ground_truth,'')     || ' ' ||
                           coalesce(condition,'')        || ' ' ||
+                          coalesce(mood,'')             || ' ' ||
                           coalesce(full_description,''))
                       ) STORED
 );
 CREATE INDEX idx_descriptions_fts ON descriptions USING gin(fts);
+
+-- v12: query_generations is the source-of-truth for LLM-generated search
+-- phrasings. LoadPhoto LEFT JOINs against it; if no row exists the
+-- queries column scans as nil.
+CREATE TABLE query_generations (
+    photo_id        TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    schema_version  INTEGER NOT NULL,
+    model           TEXT NOT NULL,
+    prompt_hash     TEXT NOT NULL,
+    queries         JSONB NOT NULL,
+    generated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE classified (
     photo_id              TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,

@@ -1,10 +1,16 @@
-// cmd/search — terminal CLI around library.Searcher.
+// cmd/search — terminal CLI around library.SearcherV2.
+//
+// v12 default: queries the three vector stores (photo_descriptions,
+// photo_metadata, photo_queries) and merges per the chosen strategy.
 //
 // Usage:
-//   go run ./cmd/search "warm light bedroom"
-//   go run ./cmd/search -retrieve "shallow depth of field"
-//   go run ./cmd/search -retrieve -verify "April photos with trees"
-//   go run ./cmd/search -precise "indoor scenes"
+//
+//	go run ./cmd/search "warm light bedroom"
+//	go run ./cmd/search -retrieve "shallow depth of field"
+//	go run ./cmd/search -retrieve -verify "April photos with trees"
+//	go run ./cmd/search -merge-strategy=intersect "red truck"
+//	go run ./cmd/search -use-queries=false -use-metadata=false "X100VI"
+//	go run ./cmd/search -merge-strategy=weighted -weight-queries=2.0 "moody portrait"
 //
 // cmd/web no longer shells out to this binary — it imports library.Searcher
 // directly. This CLI is kept for terminal exploration.
@@ -29,10 +35,17 @@ func main() {
 		precise  = flag.Bool("precise", false, "Strict retrieval; alias for -retrieve")
 		hybrid   = flag.Bool("hybrid", false, "Vector retrieval + Postgres FTS, fused via Reciprocal Rank Fusion (unbounded above the cosine cutoff)")
 		verify   = flag.Bool("verify", false, "With -retrieve/-precise/-hybrid: run an LLM yes/no check per candidate, keep only YES")
-		cosine   = flag.Float64("cosine", library.CosineThreshold, "Vector cosine cutoff (0..1). Applied in -retrieve/-precise/-hybrid modes.")
+		cosine   = flag.Float64("cosine", library.CosineThreshold, "Vector cosine cutoff (0..1). Applied per-store before merge.")
 		fts      = flag.Float64("fts", library.FTSRelativeThreshold, "FTS adaptive threshold ratio (0..1). 0 = no FTS filter; 1 = only the top-ranked FTS match.")
+
+		useDescriptions = flag.Bool("use-descriptions", true, "Query the photo_descriptions store")
+		useMetadata     = flag.Bool("use-metadata", true, "Query the photo_metadata store")
+		useQueries      = flag.Bool("use-queries", true, "Query the photo_queries store")
+		mergeStrategy   = flag.String("merge-strategy", "union", "How to combine per-store results: union | intersect | weighted")
+		weightDesc      = flag.Float64("weight-descriptions", 1.0, "Score weight for the descriptions store under -merge-strategy=weighted")
+		weightMeta      = flag.Float64("weight-metadata", 1.0, "Score weight for the metadata store under -merge-strategy=weighted")
+		weightQueries   = flag.Float64("weight-queries", 1.0, "Score weight for the queries store under -merge-strategy=weighted")
 	)
-	// argparse-style suppressed flag for backward compat with old call sites.
 	mode := flag.String("mode", "", "ignored (kept for compatibility with the old Python tool's --mode)")
 	_ = mode
 
@@ -45,42 +58,83 @@ func main() {
 	}
 	query := flag.Arg(0)
 
-	if err := run(*dsn, query, *retrieve, *precise, *hybrid, *verify, *cosine, *fts); err != nil {
+	cfg := runConfig{
+		dsn:             *dsn,
+		query:           query,
+		retrieve:        *retrieve,
+		precise:         *precise,
+		hybrid:          *hybrid,
+		verify:          *verify,
+		cosine:          *cosine,
+		fts:             *fts,
+		useDescriptions: *useDescriptions,
+		useMetadata:     *useMetadata,
+		useQueries:      *useQueries,
+		mergeStrategy:   library.MergeStrategy(*mergeStrategy),
+		weightDesc:      *weightDesc,
+		weightMeta:      *weightMeta,
+		weightQueries:   *weightQueries,
+	}
+
+	if err := run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(dsn, query string, retrieve, precise, hybrid, verify bool, cosine, fts float64) error {
-	db, err := sql.Open("pgx", dsn)
+type runConfig struct {
+	dsn             string
+	query           string
+	retrieve        bool
+	precise         bool
+	hybrid          bool
+	verify          bool
+	cosine          float64
+	fts             float64
+	useDescriptions bool
+	useMetadata     bool
+	useQueries      bool
+	mergeStrategy   library.MergeStrategy
+	weightDesc      float64
+	weightMeta      float64
+	weightQueries   float64
+}
+
+func run(cfg runConfig) error {
+	db, err := sql.Open("pgx", cfg.dsn)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {
-		return fmt.Errorf("connect %s: %w", library.MaskDSN(dsn), err)
+		return fmt.Errorf("connect %s: %w", library.MaskDSN(cfg.dsn), err)
 	}
 
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM chunks").Scan(&n); err != nil {
-		return fmt.Errorf("count chunks: %w", err)
+	if !cfg.useDescriptions && !cfg.useMetadata && !cfg.useQueries {
+		return fmt.Errorf("at least one of -use-descriptions / -use-metadata / -use-queries must be true")
 	}
-	if n == 0 {
-		return fmt.Errorf("no chunks in library — run cmd/index first")
+	switch cfg.mergeStrategy {
+	case library.MergeUnion, library.MergeIntersect, library.MergeWeighted:
+		// ok
+	default:
+		return fmt.Errorf("unknown -merge-strategy %q (valid: union, intersect, weighted)", cfg.mergeStrategy)
 	}
 
-	opts := library.SearchOptions{
-		TopK:            library.DefaultTopK,
-		FTSThresholdRel: fts,
-		// Strip websearch NOT operators for the embedder; FTS still sees
-		// the original boolean form. See library.StripNegation.
-		VectorQuery: library.StripNegation(query),
+	opts := library.SearchOptionsV2{
+		TopK:               library.DefaultTopK,
+		FTSThresholdRel:    cfg.fts,
+		VectorQuery:        library.StripNegation(cfg.query),
+		UseDescriptions:    cfg.useDescriptions,
+		UseMetadata:        cfg.useMetadata,
+		UseQueries:         cfg.useQueries,
+		MergeStrategy:      cfg.mergeStrategy,
+		WeightDescriptions: cfg.weightDesc,
+		WeightMetadata:     cfg.weightMeta,
+		WeightQueries:      cfg.weightQueries,
 	}
-	if retrieve || precise || hybrid {
-		// Strict-retrieval modes drop the LIMIT entirely — the cosine
-		// threshold is the only bound. cmd/web does the same.
-		opts.TopK = 0
-		t := cosine
+	if cfg.retrieve || cfg.precise || cfg.hybrid {
+		opts.TopK = 0 // unbounded — cosine threshold is the only cap
+		t := cfg.cosine
 		opts.Threshold = &t
 	}
 
@@ -91,18 +145,18 @@ func run(dsn, query string, retrieve, precise, hybrid, verify bool, cosine, fts 
 		results []library.Result
 		err2    error
 	)
-	if hybrid {
-		results, err2 = searcher.SearchHybrid(ctx, query, opts)
+	if cfg.hybrid {
+		results, err2 = searcher.SearchHybridV2(ctx, cfg.query, opts)
 	} else {
-		results, err2 = searcher.Search(ctx, query, opts)
+		results, err2 = searcher.SearchV2(ctx, cfg.query, opts)
 	}
 	if err2 != nil {
 		return err2
 	}
 
-	if verify && (retrieve || precise || hybrid) {
+	if cfg.verify && (cfg.retrieve || cfg.precise || cfg.hybrid) {
 		fmt.Fprintf(os.Stderr, "\n--- Verifying %d candidate(s) with LLM ---\n", len(results))
-		verdicts, stats, err := searcher.VerifyFilter(ctx, query, results)
+		verdicts, stats, err := searcher.VerifyFilterV2(ctx, cfg.query, results, opts)
 		if err != nil {
 			return err
 		}

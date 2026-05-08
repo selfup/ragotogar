@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"ragotogar/library"
+)
 
 func TestParseThreshold(t *testing.T) {
 	cases := []struct {
@@ -42,6 +46,51 @@ func TestResolveMode(t *testing.T) {
 	for _, tt := range tests {
 		if got := resolveMode(tt.in); got != tt.want {
 			t.Errorf("resolveMode(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestResolveMerge: v12 merge-strategy URL param. Valid values pass
+// through; everything else falls back to "union" (broadest recall, the
+// validated default).
+func TestResolveMerge(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"union", "union"},
+		{"intersect", "intersect"},
+		{"weighted", "weighted"},
+
+		// Defaults / unknowns
+		{"", string(library.MergeUnion)},
+		{"UNION", string(library.MergeUnion)},  // case-sensitive
+		{"naive", string(library.MergeUnion)},  // mode value, not merge
+		{"garbage", string(library.MergeUnion)},
+	}
+	for _, tt := range tests {
+		if got := resolveMerge(tt.in); got != tt.want {
+			t.Errorf("resolveMerge(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestParseWeight: per-store weight URL param for merge=weighted. Empty
+// or malformed → 1.0 (the equal-contribution baseline). Negative → 1.0
+// (UI sliders should never produce these but URL fiddling can).
+func TestParseWeight(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want float64
+	}{
+		{"", 1.0},
+		{"1", 1.0},
+		{"2.5", 2.5},
+		{"0", 0},
+		{"0.5", 0.5},
+		{"-1", 1.0},      // negative falls back
+		{"garbage", 1.0}, // unparseable falls back
+	}
+	for _, tc := range cases {
+		if got := parseWeight(tc.raw); got != tc.want {
+			t.Errorf("parseWeight(%q) = %v, want %v", tc.raw, got, tc.want)
 		}
 	}
 }

@@ -24,6 +24,21 @@ package main
 // from the description prose. Lets queries like "from a plane on the ground"
 // become exact predicates (pov_container='from_plane' AND pov_altitude='ground')
 // instead of fuzzy text matches.
+//
+// v12 splits the vector lane into three parallel halfvec(2560) stores —
+// photo_descriptions (prose + classifier verdicts), photo_metadata (EXIF
+// tokens), photo_queries (LLM-generated search phrasings) — plus a new
+// query_generations table holding the raw JSON output from the describer's
+// query-gen pass.
+//
+// v13 adds the descriptions.mood prose column emitted by the v12 combined-
+// call describer alongside subject/setting/light/colors/composition. The
+// fts generated column is rebuilt to fold mood into the keyword-search
+// surface.
+//
+// v14 drops the legacy chunks table; the three v12 stores are now the
+// only vector lane. See ARCHITECTURE.md "v12 design decisions" for the
+// locked-in choices behind these migrations.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -103,6 +118,7 @@ CREATE TABLE IF NOT EXISTS descriptions (
     vantage           TEXT,
     ground_truth      TEXT,
     condition         TEXT,
+    mood              TEXT,
     full_description  TEXT,
     fts               tsvector GENERATED ALWAYS AS (
                         to_tsvector('english',
@@ -114,6 +130,7 @@ CREATE TABLE IF NOT EXISTS descriptions (
                           coalesce(vantage,'')          || ' ' ||
                           coalesce(ground_truth,'')     || ' ' ||
                           coalesce(condition,'')        || ' ' ||
+                          coalesce(mood,'')             || ' ' ||
                           coalesce(full_description,''))
                       ) STORED
 );
@@ -176,20 +193,6 @@ CREATE INDEX IF NOT EXISTS idx_classified_palette        ON classified(color_pal
 CREATE INDEX IF NOT EXISTS idx_classified_subject_cat    ON classified USING gin(subject_category);
 CREATE INDEX IF NOT EXISTS idx_classified_framing        ON classified USING gin(framing);
 
--- Vector chunks table: one row per chunk per photo. Qwen3-Embedding-4B
--- output dim is 2560. halfvec (16-bit float) keeps storage reasonable and is
--- the only HNSW-viable type at this dim — pgvector caps the vector type's
--- HNSW at 2000 dims, halfvec at 4000. halfvec_cosine_ops matches the <=>
--- distance operator the search path uses.
-CREATE TABLE IF NOT EXISTS chunks (
-    photo_id   TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-    idx        SMALLINT NOT NULL,
-    text       TEXT NOT NULL,
-    embedding  halfvec(2560) NOT NULL,
-    PRIMARY KEY (photo_id, idx)
-);
-CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON chunks USING hnsw (embedding halfvec_cosine_ops);
-
 -- v7: persistent cache for the LLM yes/no verify pass. Lookup is
 -- (query, photo_id, verify_model); the verify_model column means swapping
 -- SEARCH_MODEL (e.g. ministral-3-3b → devstral-small-2-2512) doesn't poison
@@ -234,5 +237,63 @@ CREATE TABLE IF NOT EXISTS classify_filter_cache (
     drop_verdict    BOOLEAN NOT NULL,
     filtered_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (nl_query, photo_id, classify_model)
+);
+
+-- v12: three parallel halfvec(2560) stores. Each row's schema_version
+-- column lets one stage's prompt/model change without re-embedding the
+-- others. The id BIGSERIAL is a surrogate for stable row identity;
+-- business-key uniqueness is the composite UNIQUE. ON DELETE CASCADE
+-- keeps the stores in sync with photos.
+CREATE TABLE IF NOT EXISTS photo_descriptions (
+    id              BIGSERIAL PRIMARY KEY,
+    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    schema_version  INTEGER NOT NULL,
+    chunk_index     INTEGER NOT NULL,
+    chunk_text      TEXT NOT NULL,
+    embedding       halfvec(2560) NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (photo_id, schema_version, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_descriptions_embedding ON photo_descriptions USING hnsw (embedding halfvec_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_photo_descriptions_photo_id  ON photo_descriptions (photo_id);
+
+CREATE TABLE IF NOT EXISTS photo_metadata (
+    id              BIGSERIAL PRIMARY KEY,
+    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    schema_version  INTEGER NOT NULL,
+    metadata_text   TEXT NOT NULL,
+    embedding       halfvec(2560) NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (photo_id, schema_version)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_metadata_embedding ON photo_metadata USING hnsw (embedding halfvec_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_photo_metadata_photo_id  ON photo_metadata (photo_id);
+
+CREATE TABLE IF NOT EXISTS photo_queries (
+    id              BIGSERIAL PRIMARY KEY,
+    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    schema_version  INTEGER NOT NULL,
+    query_index     INTEGER NOT NULL,
+    query_text      TEXT NOT NULL,
+    embedding       halfvec(2560) NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (photo_id, schema_version, query_index)
+);
+CREATE INDEX IF NOT EXISTS idx_photo_queries_embedding ON photo_queries USING hnsw (embedding halfvec_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_photo_queries_photo_id  ON photo_queries (photo_id);
+
+-- query_generations is the source-of-truth for the LLM-generated search
+-- phrasings emitted alongside the description (combined vision call).
+-- One row per photo; queries column is the JSONB array. prompt_hash lets
+-- a future prompt change be detected and re-runs scoped without
+-- re-embedding the description store. photo_queries (above) is the
+-- per-phrasing embedded form derived from this row.
+CREATE TABLE IF NOT EXISTS query_generations (
+    photo_id        TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    schema_version  INTEGER NOT NULL,
+    model           TEXT NOT NULL,
+    prompt_hash     TEXT NOT NULL,
+    queries         JSONB NOT NULL,
+    generated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 `

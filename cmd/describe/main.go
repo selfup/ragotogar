@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,6 +24,29 @@ import (
 
 	"ragotogar/library"
 )
+
+// describePromptTemplate is the static part of the vision-call prompt
+// (everything before the per-photo "Camera metadata for context: …" suffix).
+// Pulled out as a const so describePromptHash can fingerprint it at package
+// init for query_generations.prompt_hash — that lets a future re-run detect
+// "queries already generated under this prompt, skip" without having to
+// re-read the full prompt at decision time.
+const describePromptTemplate = "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see. (The Mood field below is the one exception — it explicitly invites aesthetic descriptors.)\n\nFormat:\n- Subject: what/who is in the frame AND what they're doing (verbs, motion, state). Identify type/category specifically — \"airplane\" is not enough; say \"single-engine propeller airplane in flight, climbing\" or \"twin-engine jetliner parked at gate\". For people: action (walking, sitting, running, looking at camera). For vehicles: state (parked, moving, in flight, taxiing, taking off, climbing, descending). For animals: activity (running, eating, sleeping, standing). Cover both nouns and verbs in this field.\n- Setting: specific location type, surfaces, objects; explicitly note indoor or outdoor\n- Light: direction, color, source (window/lamp/sun/etc); time of day suggested; weather (clear, overcast, rain, snow, fog)\n- Colors: dominant palette\n- Mood: 3-5 aesthetic descriptors that capture the feel of the image (e.g. warm, nostalgic, intimate, peaceful, energetic, melancholic, austere, playful). Comma-separated. Anchor to visible evidence — light quality, color palette, subject expression, framing tension. This is the ONLY field where subjective/aesthetic language is permitted.\n- Composition: framing, camera angle (eye level, looking up, looking down), depth of field, distance to the main subject\n- Vantage: where the camera is physically located. Is the photographer on the ground, elevated (balcony, rooftop, hill), inside a vehicle, inside a plane, on a drone, or shooting through a window/foliage/fence? If from a plane, is it on the ground or in flight? If from a vehicle, moving or stopped? Use 'unclear' if there is no evidence either way.\n- Ground truth: how many people are visible (none / one / two / a few / a group / a crowd); how many animals; is anything in motion (subject moving, camera moving, both, or static).\n- Condition: physical state visible in the frame — under construction (scaffolding, exposed framing, partial walls, work in progress), worn (visible damage, rust, peeling paint, weathering), aged or old, new or recent, pristine or well-maintained, clean, dirty, cluttered, abandoned, freshly renovated. State what you actually see; use 'unclear' if condition isn't legible from the photo.\n- Queries: 5-7 search-shaped phrasings someone might type to find this photo. One phrasing per line. No leading numbers, bullets, or quotation marks. Image-grounded — only use phrases the photo actually supports. Vary the facets across the list:\n    - one subject-anchored phrasing (\"two friends at a wooden table\")\n    - one mood-anchored phrasing (\"warm nostalgic afternoon\")\n    - one technique-anchored phrasing (\"low-angle handheld portrait\")\n    - one occasion-anchored phrasing (\"casual lunch\")\n    - one style-anchored phrasing (\"candid documentary look\")\n  Do not add commentary or explanation after the queries — the Queries section is the end of the output.\n\nCamera metadata for context:\n"
+
+// describePromptHash is a 16-hex-char (64-bit) fingerprint of the prompt
+// template, computed once at package init. Stored in query_generations.
+// prompt_hash so a future prompt edit can be detected without diffing
+// strings — query backfill can scope re-runs to photos whose stored hash
+// no longer matches.
+var describePromptHash = func() string {
+	h := sha256.Sum256([]byte(describePromptTemplate))
+	return hex.EncodeToString(h[:])[:16]
+}()
+
+// queryGenerationsSchemaVersion stamps query_generations rows. Starts at 2
+// (the v12 three-store cutover); bump on prompt changes that meaningfully
+// alter query distribution.
+const queryGenerationsSchemaVersion = 2
 
 var supportedExts = map[string]bool{
 	"jpg": true, "jpeg": true, "png": true,
@@ -410,7 +435,7 @@ func describeWithRetry(cfg config, b64, exif string) (string, error) {
 }
 
 func describeImage(cfg config, b64, exif string) (string, error) {
-	prompt := "Before describing, check if the scene contains many similar or repeating elements (rows of people, identical chairs, parked cars, etc). If so, keep it simple — state the count and describe the group once. Never repeat the same sentence or description for each individual item.\n\nDescribe exactly what is visible in this photograph. Be concrete and specific — name objects, colors, materials, positions, and spatial relationships. Do NOT use subjective or interpretive language like 'intimate', 'captures', 'suggests', or 'evokes'. Just state what you see.\n\nFormat:\n- Subject: what/who is in the frame AND what they're doing (verbs, motion, state). Identify type/category specifically — \"airplane\" is not enough; say \"single-engine propeller airplane in flight, climbing\" or \"twin-engine jetliner parked at gate\". For people: action (walking, sitting, running, looking at camera). For vehicles: state (parked, moving, in flight, taxiing, taking off, climbing, descending). For animals: activity (running, eating, sleeping, standing). Cover both nouns and verbs in this field.\n- Setting: specific location type, surfaces, objects; explicitly note indoor or outdoor\n- Light: direction, color, source (window/lamp/sun/etc); time of day suggested; weather (clear, overcast, rain, snow, fog)\n- Colors: dominant palette\n- Composition: framing, camera angle (eye level, looking up, looking down), depth of field, distance to the main subject\n- Vantage: where the camera is physically located. Is the photographer on the ground, elevated (balcony, rooftop, hill), inside a vehicle, inside a plane, on a drone, or shooting through a window/foliage/fence? If from a plane, is it on the ground or in flight? If from a vehicle, moving or stopped? Use 'unclear' if there is no evidence either way.\n- Ground truth: how many people are visible (none / one / two / a few / a group / a crowd); how many animals; is anything in motion (subject moving, camera moving, both, or static).\n- Condition: physical state visible in the frame — under construction (scaffolding, exposed framing, partial walls, work in progress), worn (visible damage, rust, peeling paint, weathering), aged or old, new or recent, pristine or well-maintained, clean, dirty, cluttered, abandoned, freshly renovated. State what you actually see; use 'unclear' if condition isn't legible from the photo.\n\nCamera metadata for context:\n" + exif
+	prompt := describePromptTemplate + exif
 
 	sessionID := fmt.Sprintf("photo-describe-%d-%d", time.Now().UnixNano(), rand.Int64())
 
@@ -779,33 +804,45 @@ func magickConvertBytes(magickCmd, file string, resizePx, quality int) ([]byte, 
 }
 
 type descriptionFields struct {
-	Subject     string `json:"subject"`
-	Setting     string `json:"setting"`
-	Light       string `json:"light"`
-	Colors      string `json:"colors"`
-	Composition string `json:"composition"`
-	Vantage     string `json:"vantage"`
-	GroundTruth string `json:"ground_truth"`
-	Condition   string `json:"condition"`
+	Subject     string   `json:"subject"`
+	Setting     string   `json:"setting"`
+	Light       string   `json:"light"`
+	Colors      string   `json:"colors"`
+	Mood        string   `json:"mood"` // v13: aesthetic descriptors, comma-separated.
+	Composition string   `json:"composition"`
+	Vantage     string   `json:"vantage"`
+	GroundTruth string   `json:"ground_truth"`
+	Condition   string   `json:"condition"`
+	Queries     []string `json:"queries"` // v12: LLM-generated search phrasings, one element per phrasing. Empty when parse failed; insertPhoto skips the query_generations row in that case.
 }
 
 // parseDescriptionFields extracts structured sections from the model output.
-// The model is prompted to use "Subject:", "Setting:", etc. headers.
+// The model is prompted to use "Subject:", "Setting:", "Mood:", "Queries:",
+// etc. headers.
 //
-// "ground truth" must precede "ground" (no overlap currently, but keep this
-// in mind if more keys are added) — the parser walks the map in unspecified
-// order, so any prefix collision needs to be resolved by avoiding overlap.
+// Section keys must not be prefixes of other keys — the parser walks the map
+// in unspecified order. "ground truth" before "ground" is the only current
+// near-collision; new keys should follow the same rule.
+//
+// The Queries section is special-cased: its value is the multi-line block
+// of search phrasings, one per line. After the section's text is collected,
+// extractQueriesList splits it into a slice and stores the result in
+// fields.Queries. The fields.Condition / .Mood / etc. text fields stay free-
+// form prose; only Queries gets list-shaped storage.
 func parseDescriptionFields(description string) descriptionFields {
 	fields := descriptionFields{}
+	var queriesRaw string
 	sections := map[string]*string{
 		"subject":      &fields.Subject,
 		"setting":      &fields.Setting,
 		"light":        &fields.Light,
 		"colors":       &fields.Colors,
+		"mood":         &fields.Mood,
 		"composition":  &fields.Composition,
 		"vantage":      &fields.Vantage,
 		"ground truth": &fields.GroundTruth,
 		"condition":    &fields.Condition,
+		"queries":      &queriesRaw,
 	}
 
 	lines := strings.Split(description, "\n")
@@ -869,7 +906,61 @@ func parseDescriptionFields(description string) descriptionFields {
 	}
 	flush()
 
+	fields.Queries = extractQueriesList(queriesRaw)
 	return fields
+}
+
+// extractQueriesList splits the raw Queries-section text into individual
+// phrasings. The model is prompted to emit one per line with no leading
+// markers, but real-world output drifts: leading "1. ", "- ", "* ", or
+// quoted phrasings are tolerated. Empty lines and lines that look like
+// trailing commentary (no leading marker AND start with capitalized
+// non-content like "These", "Note", "Here") are dropped so a chatty model
+// doesn't poison the queries list with explanation prose.
+func extractQueriesList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(raw, "\n") {
+		s := strings.TrimSpace(line)
+		if s == "" {
+			continue
+		}
+		// Strip leading list/numeric markers.
+		s = strings.TrimLeft(s, "-*•· ")
+		s = trimLeadingNumber(s)
+		// Strip surrounding quote characters.
+		s = strings.TrimSpace(s)
+		s = strings.Trim(s, `"`)
+		s = strings.Trim(s, `'`)
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// trimLeadingNumber removes a leading "1. ", "12) ", "3 - " etc. from a line
+// so a numbered query list parses to clean phrasings. Conservative: only
+// strips leading digits followed by a single punctuation separator.
+func trimLeadingNumber(s string) string {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 || i == len(s) {
+		return s
+	}
+	// Allow ". ", ") ", "- ", ": " as separators.
+	switch s[i] {
+	case '.', ')', '-', ':':
+		i++
+		return strings.TrimLeft(s[i:], " \t")
+	}
+	return s
 }
 
 func checkDeps() error {

@@ -10,14 +10,13 @@ import (
 	"sync"
 
 	"github.com/lib/pq"
-	"github.com/pgvector/pgvector-go"
 )
 
 // Search defaults — exported so cmd/search and cmd/web both pull from the
 // same source of truth instead of redefining magic numbers.
 //
-// TopK = 0 is the "unbounded" sentinel: Search / searchFTS skip the LIMIT
-// clause entirely and SearchHybrid skips the post-fusion cap. The cosine
+// TopK = 0 is the "unbounded" sentinel: SearchV2 / searchFTS skip the LIMIT
+// clause entirely and SearchHybridV2 skips the post-fusion cap. The cosine
 // threshold (and, for FTS, FTSRelativeThreshold) becomes the only bound on
 // result size. cmd/web and cmd/search's -retrieve/-precise/-hybrid paths
 // rely on this — they want every match above the cutoff, not an arbitrary
@@ -48,23 +47,6 @@ const (
 type Result struct {
 	Name       string
 	Similarity float64
-}
-
-// SearchOptions controls Search and SearchHybrid behavior.
-type SearchOptions struct {
-	TopK            int
-	Threshold       *float64 // vector cosine cutoff. nil = return everything up to TopK; non-nil = post-filter on similarity
-	FTSThresholdRel float64  // FTS adaptive threshold ratio for SearchHybrid. 0 = use FTSRelativeThreshold (the package default)
-	// VectorQuery overrides the string passed to the embedder in Search.
-	// SearchHybrid propagates it through to the vector arm; the FTS arm
-	// always uses the main query unchanged. When the user types boolean
-	// syntax like `red truck -monochrome`, FTS wants the original string
-	// but the embedder treats `-` as a regular token, not Boolean NOT —
-	// passing the boolean form unchanged biases the embedding toward the
-	// negated word. The caller computes the positive residual via
-	// StripNegation and sets it here. Empty = use the main query for
-	// both arms (the historical default).
-	VectorQuery string
 }
 
 // StripNegation removes websearch_to_tsquery NOT operators (`-term` and
@@ -147,67 +129,6 @@ type Searcher struct {
 
 func NewSearcher(db *sql.DB) *Searcher {
 	return &Searcher{db: db}
-}
-
-// Search embeds the query, runs a single SQL roundtrip against the chunks
-// table, and returns the per-photo best-chunk similarity in descending order.
-// Filters by Threshold when non-nil. Caller decides whether to feed the
-// results into VerifyFilter.
-//
-// opts.TopK <= 0 means unbounded — the LIMIT clause is dropped and the only
-// cap on the result set is the optional Threshold. Otherwise LIMIT $2 is
-// appended. The branch keeps the SQL static (no string interpolation of
-// untrusted values) while still letting "give me everything above 0.5" be
-// expressible.
-func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
-	embedInput := query
-	if opts.VectorQuery != "" {
-		embedInput = opts.VectorQuery
-	}
-	negation := ExtractNegation(query)
-	embeddings, err := EmbedTexts(ctx, []string{embedInput})
-	if err != nil {
-		return nil, fmt.Errorf("embed query: %w", err)
-	}
-	vec := pgvector.NewHalfVector(embeddings[0])
-
-	const baseSQL = `
-		SELECT name, MAX(1 - (embedding <=> $1)) AS similarity
-		FROM chunks JOIN photos ON photos.id = chunks.photo_id
-		GROUP BY name
-		ORDER BY similarity DESC`
-	var rows *sql.Rows
-	if opts.TopK > 0 {
-		rows, err = s.db.QueryContext(ctx, baseSQL+" LIMIT $2", vec, opts.TopK)
-	} else {
-		rows, err = s.db.QueryContext(ctx, baseSQL, vec)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("vector query: %w", err)
-	}
-	defer rows.Close()
-
-	var out []Result
-	for rows.Next() {
-		var r Result
-		if err := rows.Scan(&r.Name, &r.Similarity); err != nil {
-			return nil, err
-		}
-		if opts.Threshold != nil && r.Similarity < *opts.Threshold {
-			continue
-		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if negation != "" && len(out) > 0 {
-		out, err = s.filterByNegation(ctx, out, negation)
-		if err != nil {
-			return nil, fmt.Errorf("negation filter: %w", err)
-		}
-	}
-	return out, nil
 }
 
 // filterByNegation drops vector results whose description / exif text
@@ -344,55 +265,6 @@ func (s *Searcher) searchFTS(ctx context.Context, query string, topK int, relThr
 	return kept, nil
 }
 
-// SearchHybrid runs vector retrieval + Postgres full-text search in
-// parallel, then fuses the two ranked lists via Reciprocal Rank Fusion.
-// FTS catches literal-text queries the vector misses (model names,
-// place names, person names typed into the description); vector catches
-// the semantic shape ("warm light bedroom") that FTS can't reason about.
-//
-// The vector arm uses Search with the same TopK + Threshold the caller
-// would pass to a pure vector search. The FTS arm pulls up to TopK
-// matches above zero ts_rank. RRF combines, dedupes, returns up to
-// opts.TopK results ordered by fused score.
-func (s *Searcher) SearchHybrid(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
-	type lane struct {
-		results []Result
-		err     error
-	}
-	vecCh := make(chan lane, 1)
-	ftsCh := make(chan lane, 1)
-
-	go func() {
-		r, err := s.Search(ctx, query, opts)
-		vecCh <- lane{r, err}
-	}()
-	go func() {
-		// FTS honors opts.TopK as a per-lane cap; 0 propagates as
-		// "unbounded" the same way Search treats it. opts.FTSThresholdRel
-		// = 0 means "use the package default" so callers can leave it
-		// unset.
-		relThreshold := opts.FTSThresholdRel
-		if relThreshold <= 0 {
-			relThreshold = FTSRelativeThreshold
-		}
-		r, err := s.searchFTS(ctx, query, opts.TopK, relThreshold)
-		ftsCh <- lane{r, err}
-	}()
-
-	vec := <-vecCh
-	fts := <-ftsCh
-	if vec.err != nil {
-		return nil, vec.err
-	}
-	if fts.err != nil {
-		return nil, fts.err
-	}
-
-	// opts.TopK <= 0 → no post-fusion cap; rrfFuse already handles that
-	// via its own topK<=0 branch.
-	return rrfFuse([][]Result{vec.results, fts.results}, RRFK, opts.TopK), nil
-}
-
 // rrfFuse implements Reciprocal Rank Fusion (Cormack et al. 2009).
 // Each input list is treated as a ranking; a document's fused score is
 // the sum over lists of `1 / (k + rank_in_list)` (rank is 1-indexed).
@@ -432,9 +304,11 @@ func rrfFuse(lists [][]Result, k float64, topK int) []Result {
 }
 
 // VerifyPrompt is the LLM yes/no template applied to each candidate's
-// BuildDocument text. Recall-biased on purpose — precision comes from the
-// cosine threshold upstream of verify, so the verify pass mostly weeds out
-// the "vector matched 'red' somewhere in the description" false positives.
+// per-photo verifier text (BuildDescriptionDocument + optional
+// BuildMetadataDocument, gated by SearchOptionsV2 toggles). Recall-biased
+// on purpose — precision comes from the cosine threshold upstream of
+// verify, so the verify pass mostly weeds out the "vector matched 'red'
+// somewhere in the description" false positives.
 const VerifyPrompt = `Determine if a photo is relevant to a search query.
 
 Query: %s
@@ -459,20 +333,25 @@ type Verdict struct {
 	FromCache bool
 }
 
-// VerifyFilter runs the LLM yes/no check on each candidate's BuildDocument
-// text, consulting verify_cache before each LLM call. Concurrency is bounded
-// by VerifyConcurrency. Verdicts come back in the original retrieval order
-// so callers can display them in rank order. The returned VerifyStats counts
-// cache hits vs LLM calls — caller surfaces the hit rate to UI / logs.
+// docBuilder turns a Photo into the text the verifier LLM sees. v12
+// composes BuildDescriptionDocument + (optionally) BuildMetadataDocument
+// based on the search-time enable toggles. Pulled out as a parameter so
+// future verify variants (e.g. with structured-filter pre-pass) can reuse
+// the cache + concurrency machinery without duplication.
+type docBuilder func(*Photo) string
+
+// runVerify is the shared verify-cache + bounded-concurrency loop used by
+// VerifyFilterV2. Pulled out as a helper rather than inlined so future
+// verify variants (e.g. with structured-filter pre-pass) can reuse the
+// cache + concurrency machinery without duplication. Cache lookup is one
+// batch query keyed on (canonical_query, photo_ids, verify_model). Rows
+// where the photo has been re-described after the verdict was written
+// are silently skipped (see verify_cache.go) so a re-describe transparently
+// invalidates stale cache entries without explicit teardown.
 //
-// Cache lookup is one batch query keyed on (canonical_query, photo_ids,
-// verify_model). Rows where the photo has been re-described after the verdict
-// was written are silently skipped (see verify_cache.go) so a re-describe
-// transparently invalidates stale cache entries without explicit teardown.
-//
-// Errors (LoadPhoto failure, LLM failure) produce verdicts with YES=false but
-// are NOT cached — only successful LLM responses become persistent rows.
-func (s *Searcher) VerifyFilter(ctx context.Context, query string, candidates []Result) ([]Verdict, VerifyStats, error) {
+// Errors (LoadPhoto failure, LLM failure) produce verdicts with YES=false
+// but are NOT cached — only successful LLM responses become persistent rows.
+func (s *Searcher) runVerify(ctx context.Context, query string, candidates []Result, build docBuilder) ([]Verdict, VerifyStats, error) {
 	model := SearchModel()
 	canonical := CanonicalQuery(query)
 	verdicts := make([]Verdict, len(candidates))
@@ -516,7 +395,7 @@ func (s *Searcher) VerifyFilter(ctx context.Context, query string, candidates []
 				verdicts[i] = Verdict{Result: c, YES: false, Raw: "(no photo)"}
 				return
 			}
-			doc := BuildDocument(photo)
+			doc := build(photo)
 			if len(doc) > 3000 {
 				doc = doc[:3000]
 			}

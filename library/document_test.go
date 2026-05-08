@@ -5,186 +5,165 @@ import (
 	"testing"
 )
 
-func TestHumanizeExifDate(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"2024:04:21 16:27:54", "21 April 2024 at 16:27:54"},
-		{"2024:04:21", "21 April 2024"},
-		{"", ""},
-		{"garbage", ""},
-		{"2024:13:21 00:00:00", ""},  // out-of-range month
-		{"2024:00:21 00:00:00", ""},  // zero month
-	}
-	for _, tc := range cases {
-		if got := HumanizeExifDate(tc.in); got != tc.want {
-			t.Errorf("HumanizeExifDate(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
+// v12 three-store split. BuildDescriptionDocument carries the scene-side
+// fields (prose-derived + classifier verdicts + full description + new
+// mood field) and explicitly excludes EXIF/capture-context tokens — those
+// move to BuildMetadataDocument.
 
-func TestBuildDocumentFullPhoto(t *testing.T) {
+func TestBuildDescriptionDocumentSceneFieldsOnly(t *testing.T) {
 	f := func(v float64) *float64 { return &v }
 	i := func(v int64) *int64 { return &v }
 
 	p := &Photo{
-		Name:                 "test_photo",
-		FileBasename:         "DSCF0086.JPG",
-		CameraMake:           "FUJIFILM",
-		CameraModel:          "X100VI",
-		LensModel:            "23mm f/2",
-		DateTaken:            "2024-04-21T16:27:54",
-		FocalLengthMM:        f(23.0),
-		FocalLength35mm:      f(35.0),
-		FNumber:              f(5.6),
-		ShutterSeconds:       f(1.0 / 250),
-		ISO:                  i(500),
-		ExposureCompensation: f(-0.67),
-		ExposureMode:         "Auto",
-		WhiteBalance:         "Auto",
-		Flash:                "No Flash",
-		Software:             "X100VI Ver1.01",
-		Subject:              "a man in a gray shirt",
-		Setting:              "indoor scene with trees visible",
-		Light:                "natural daylight",
-		Colors:               "muted greens",
-		Composition:          "shallow depth of field",
-		FullDescription:      "Full description of the scene with red truck and trees.",
+		Name:               "scene",
+		FileBasename:       "S.JPG",
+		CameraMake:         "FUJIFILM", // metadata — must NOT appear
+		CameraModel:        "X100VI",
+		LensModel:          "23mm f/2",
+		FocalLengthMM:      f(23.0),
+		FNumber:            f(2.8),
+		ShutterSeconds:     f(1.0 / 250),
+		ISO:                i(800),
+		Software:           "X100VI Ver1.01",
+		Vantage:            "low handheld",
+		GroundTruth:        "two people visible",
+		Condition:          "pristine",
+		Mood:               "warm, nostalgic, intimate",
+		POVContainer:       "handheld",
+		SceneIndoorOutdoor: "indoor",
+		FullDescription:    "A quiet indoor scene with two people at a table.",
 	}
-
-	doc := BuildDocument(p)
+	doc := BuildDescriptionDocument(p)
 
 	for _, want := range []string{
-		"Photo: test_photo",
-		"File: DSCF0086.JPG",
-		"Camera: FUJIFILM X100VI",
-		"Lens: 23mm f/2",
-		"Date: 2024:04:21 16:27:54",          // re-converted to legacy EXIF form
-		"Captured on 21 April 2024 at 16:27:54", // human form
-		"23 mm",
-		"35 mm (35mm equivalent)",
-		"f/5.6",
-		"1/250s",
-		"ISO 500",
-		"Auto exposure",
-		"Auto white balance",
-		"Flash: No Flash",
-		"Software: X100VI Ver1.01",
-		"Full description of the scene with red truck and trees.",
+		"Photo: scene",
+		"File: S.JPG",
+		"Vantage: low handheld",
+		"Ground truth: two people visible",
+		"Condition: pristine",
+		"Mood: warm, nostalgic, intimate",
+		"Camera vantage: handheld",
+		"Scene: indoor",
+		"A quiet indoor scene with two people at a table.",
 	} {
 		if !strings.Contains(doc, want) {
-			t.Errorf("BuildDocument missing %q\n--- doc ---\n%s\n", want, doc)
+			t.Errorf("description missing %q\n--- doc ---\n%s\n", want, doc)
+		}
+	}
+	for _, banned := range []string{
+		"FUJIFILM", "X100VI", "23mm f/2", "f/2.8", "1/250s", "ISO 800",
+		"Camera:", "Lens:", "Settings:", "Software:",
+	} {
+		if strings.Contains(doc, banned) {
+			t.Errorf("description leaked metadata token %q\n--- doc ---\n%s\n", banned, doc)
 		}
 	}
 }
 
-func TestBuildDocumentTypedClassification(t *testing.T) {
-	// Photo classified by cmd/classify — the typed enum fields should
-	// surface as canonical text in the document for vector embedding.
-	p := &Photo{
-		Name:               "typed",
-		FileBasename:       "x.JPG",
-		POVContainer:       "from_plane",
-		POVAltitude:        "ground",
-		POVAngle:           "looking_down",
-		SubjectAltitude:    "on_ground",
-		SubjectCategory:    []string{"architecture", "landscape"},
-		SubjectDistance:    "wide",
-		SubjectCount:       "0",
-		AnimalCount:        "0",
-		SceneTimeOfDay:     "day",
-		SceneIndoorOutdoor: "outdoor",
-		SceneWeather:       "clear",
-		Framing:            []string{"through_window"},
-		Motion:             "static",
-		ColorPalette:       "cool",
+func TestBuildDescriptionDocumentSkipsMoodWhenAbsent(t *testing.T) {
+	// Photos described before the v12 prompt change have no Mood set.
+	// The line should be omitted entirely, not appear as "Mood: ".
+	p := &Photo{Name: "n", FileBasename: "n.JPG", Vantage: "high"}
+	doc := BuildDescriptionDocument(p)
+	if strings.Contains(doc, "Mood:") {
+		t.Errorf("Mood line should be omitted when absent: %q", doc)
 	}
-	doc := BuildDocument(p)
-	for _, want := range []string{
-		"Camera vantage: from_plane, ground, looking_down",
-		"Subject category: architecture, landscape",
-		"Subject altitude: on_ground",
-		"Subject distance: wide",
-		"Counts: people=0, animals=0",
-		"Scene: day, outdoor, clear",
-		"Motion: static",
-		"Color palette: cool",
-		"Framing: through_window",
-	} {
-		if !strings.Contains(doc, want) {
-			t.Errorf("BuildDocument missing %q\n--- doc ---\n%s\n", want, doc)
-		}
+	if !strings.Contains(doc, "Vantage: high") {
+		t.Errorf("missing other scene field: %q", doc)
 	}
 }
 
-func TestBuildDocumentTypedClassificationPartial(t *testing.T) {
-	// Only some fields populated — the others should not produce empty
-	// or mis-rendered lines.
+// BuildMetadataDocument returns space-separated tokens (locked decision —
+// see ARCHITECTURE.md "v12 design decisions"). Stylized renders for
+// f-number, shutter, ISO, 35mm-equiv. Empty fields are dropped.
+
+func TestBuildMetadataDocumentTokenForm(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	i := func(v int64) *int64 { return &v }
+
 	p := &Photo{
-		Name:         "partial",
-		FileBasename: "x.JPG",
-		POVContainer: "handheld",
-		// POVAltitude + POVAngle unset → "Camera vantage: handheld" only
-		Motion: "static",
+		CameraMake:      "NIKON",
+		CameraModel:     "Z 8",
+		LensModel:       "NIKKOR Z 24-120mm f/4 S",
+		FocalLengthMM:   f(90.0),
+		FocalLength35mm: f(90.0),
+		FNumber:         f(8.0),
+		ShutterSeconds:  f(1.0 / 8000),
+		ISO:             i(720),
+		ExposureMode:    "Manual",
+		DateTaken:       "2024-04-21T16:27:54",
 	}
-	doc := BuildDocument(p)
-	if !strings.Contains(doc, "Camera vantage: handheld\n") {
-		t.Errorf("missing camera vantage with single value: %q", doc)
-	}
-	if strings.Contains(doc, "Camera vantage: handheld,") {
-		t.Errorf("trailing comma in vantage: %q", doc)
-	}
-	if !strings.Contains(doc, "Motion: static") {
-		t.Errorf("missing motion: %q", doc)
-	}
-	// no Counts line should appear when both counts are absent
-	if strings.Contains(doc, "Counts:") {
-		t.Errorf("Counts line should be omitted when both empty: %q", doc)
+	got := BuildMetadataDocument(p)
+	want := "NIKON Z 8 NIKKOR Z 24-120mm f/4 S 90mm 90mm-equiv f/8 1/8000s ISO 720 Manual 2024"
+	if got != want {
+		t.Errorf("metadata mismatch\n got: %q\nwant: %q", got, want)
 	}
 }
 
-func TestBuildDocumentMinimal(t *testing.T) {
+func TestBuildMetadataDocumentDropsEmptyFields(t *testing.T) {
 	p := &Photo{
-		Name:         "min",
-		FileBasename: "MIN.JPG",
+		CameraMake:  "FUJIFILM",
+		CameraModel: "X100VI",
 	}
-	doc := BuildDocument(p)
-	want := "Photo: min\nFile: MIN.JPG"
-	if doc != want {
-		t.Errorf("minimal photo doc = %q, want %q", doc, want)
+	got := BuildMetadataDocument(p)
+	if got != "FUJIFILM X100VI" {
+		t.Errorf("empty-field metadata should be %q, got %q", "FUJIFILM X100VI", got)
 	}
 }
 
-func TestBuildDocumentLensFallback(t *testing.T) {
-	// LensInfo used when LensModel is absent
-	p := &Photo{Name: "x", FileBasename: "x.JPG", LensInfo: "23.0 mm f/2"}
-	doc := BuildDocument(p)
-	if !strings.Contains(doc, "Lens: 23.0 mm f/2") {
-		t.Errorf("lens_info fallback missing: %q", doc)
+func TestBuildMetadataDocumentLensInfoFallback(t *testing.T) {
+	p := &Photo{
+		CameraMake: "FUJIFILM",
+		LensInfo:   "23.0 mm f/2",
+		// LensModel absent — LensInfo should be used
 	}
-	// LensModel takes priority over LensInfo
+	got := BuildMetadataDocument(p)
+	if !strings.Contains(got, "23.0 mm f/2") {
+		t.Errorf("LensInfo fallback missing: %q", got)
+	}
+	// And LensModel takes priority
 	p.LensModel = "Fujinon 23mm"
-	doc = BuildDocument(p)
-	if !strings.Contains(doc, "Lens: Fujinon 23mm") {
-		t.Errorf("lens_model not preferred: %q", doc)
+	got = BuildMetadataDocument(p)
+	if !strings.Contains(got, "Fujinon 23mm") {
+		t.Errorf("LensModel not preferred: %q", got)
 	}
-	if strings.Contains(doc, "Lens: 23.0 mm f/2") {
-		t.Errorf("both lens lines emitted: %q", doc)
+	if strings.Contains(got, "23.0 mm f/2") {
+		t.Errorf("both lens tokens emitted: %q", got)
 	}
 }
 
-func TestBuildDocumentDateOnly(t *testing.T) {
+func TestBuildMetadataDocumentLongShutter(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	p := &Photo{ShutterSeconds: f(2.5)}
+	got := BuildMetadataDocument(p)
+	if got != "2.5s" {
+		t.Errorf("long-shutter token = %q, want %q", got, "2.5s")
+	}
+}
+
+// BuildQueryDocuments is a passthrough on Photo.GeneratedQueries — one
+// string per phrasing, no concatenation.
+
+func TestBuildQueryDocumentsReturnsSlice(t *testing.T) {
 	p := &Photo{
-		Name:         "x",
-		FileBasename: "x.JPG",
-		DateTaken:    "2024-04-21", // no time component
+		GeneratedQueries: []string{
+			"warm sunset on a quiet beach",
+			"low-angle handheld portrait",
+			"two friends at a wooden table",
+		},
 	}
-	doc := BuildDocument(p)
-	if !strings.Contains(doc, "Date: 2024:04:21") {
-		t.Errorf("missing legacy EXIF date form: %q", doc)
+	got := BuildQueryDocuments(p)
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
 	}
-	if !strings.Contains(doc, "Captured on 21 April 2024") {
-		t.Errorf("missing date-only humanization: %q", doc)
+	if got[0] != "warm sunset on a quiet beach" {
+		t.Errorf("got[0] = %q", got[0])
 	}
-	if strings.Contains(doc, "Captured on 21 April 2024 at") {
-		t.Errorf("date-only should not append a time: %q", doc)
+}
+
+func TestBuildQueryDocumentsNilWhenAbsent(t *testing.T) {
+	p := &Photo{Name: "n"}
+	if got := BuildQueryDocuments(p); got != nil {
+		t.Errorf("expected nil, got %v", got)
 	}
 }

@@ -178,6 +178,156 @@ Ground truth: one person visible, no animals, subject is static`,
 	}
 }
 
+// TestParseDescriptionFieldsMoodAndQueries covers the v13 prompt extension:
+// the describer's combined-call output now includes a Mood section
+// (aesthetic descriptors, comma-separated) and a Queries section (one
+// search-shaped phrasing per line).
+func TestParseDescriptionFieldsMoodAndQueries(t *testing.T) {
+	in := `Subject: two friends at a wooden table
+Setting: indoor cafe, exposed brick walls
+Light: warm late-afternoon window light from the right
+Colors: amber, brown, cream
+Mood: warm, nostalgic, intimate
+Composition: medium distance, eye level, shallow DOF
+Vantage: handheld at table height
+Ground truth: two people, no animals, both static
+Condition: clean, well-maintained
+Queries:
+warm afternoon at a corner cafe
+two friends sharing coffee
+intimate candid portrait
+shallow depth of field, indoor
+golden hour cafe scene`
+
+	got := parseDescriptionFields(in)
+
+	if got.Mood != "warm, nostalgic, intimate" {
+		t.Errorf("Mood mismatch: %q", got.Mood)
+	}
+
+	wantQueries := []string{
+		"warm afternoon at a corner cafe",
+		"two friends sharing coffee",
+		"intimate candid portrait",
+		"shallow depth of field, indoor",
+		"golden hour cafe scene",
+	}
+	if len(got.Queries) != len(wantQueries) {
+		t.Fatalf("Queries len = %d, want %d (%q)", len(got.Queries), len(wantQueries), got.Queries)
+	}
+	for i, w := range wantQueries {
+		if got.Queries[i] != w {
+			t.Errorf("Queries[%d] = %q, want %q", i, got.Queries[i], w)
+		}
+	}
+
+	// Sanity: existing fields still parse alongside the new ones.
+	if got.Subject != "two friends at a wooden table" {
+		t.Errorf("Subject regressed: %q", got.Subject)
+	}
+	if got.Condition != "clean, well-maintained" {
+		t.Errorf("Condition regressed: %q", got.Condition)
+	}
+}
+
+// TestExtractQueriesListVariants covers the line-prefix shapes a less-
+// disciplined model emits: numbered lists, bullets, quoted phrasings,
+// trailing blank lines.
+func TestExtractQueriesListVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{
+			name: "plain lines",
+			in: `warm afternoon
+candid portrait
+two friends`,
+			want: []string{"warm afternoon", "candid portrait", "two friends"},
+		},
+		{
+			name: "numbered list",
+			in: `1. warm afternoon
+2. candid portrait
+3. two friends`,
+			want: []string{"warm afternoon", "candid portrait", "two friends"},
+		},
+		{
+			name: "mixed bullets and quotes",
+			in: `- "warm afternoon"
+* 'candid portrait'
+• two friends`,
+			want: []string{"warm afternoon", "candid portrait", "two friends"},
+		},
+		{
+			name: "blank lines and trailing whitespace",
+			in: `
+
+warm afternoon
+
+candid portrait
+   `,
+			want: []string{"warm afternoon", "candid portrait"},
+		},
+		{
+			name: "empty input",
+			in:   "",
+			want: nil,
+		},
+		{
+			name: "whitespace only",
+			in:   "   \n\n  \n",
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractQueriesList(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len = %d, want %d (got=%q want=%q)", len(got), len(tc.want), got, tc.want)
+			}
+			for i, w := range tc.want {
+				if got[i] != w {
+					t.Errorf("[%d] got %q want %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}
+
+// TestParseDescriptionFieldsEmptyQueriesNeverWritesGarbage is the contract
+// insertPhoto relies on: if the model omits the Queries section entirely,
+// fields.Queries is nil (not an empty slice with empty strings) so the
+// query_generations write is skipped per the spec's "do not write empty/
+// broken JSON files silently" rule.
+func TestParseDescriptionFieldsEmptyQueriesNeverWritesGarbage(t *testing.T) {
+	in := `Subject: a quiet desk
+Setting: home office
+Light: lamp from above
+Colors: warm wood tones`
+	got := parseDescriptionFields(in)
+	if got.Queries != nil {
+		t.Errorf("expected nil queries, got %q", got.Queries)
+	}
+}
+
+// TestDescribePromptHashStable pins the prompt-hash format so an accidental
+// rewrite of the hash function (e.g. lengthening or changing the algorithm)
+// surfaces as a test failure rather than silently invalidating every cached
+// query_generations row's prompt_hash. The exact value is not pinned —
+// just the shape (16 hex chars).
+func TestDescribePromptHashStable(t *testing.T) {
+	if len(describePromptHash) != 16 {
+		t.Errorf("prompt hash length = %d, want 16", len(describePromptHash))
+	}
+	for _, c := range describePromptHash {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("non-hex char %q in hash %q", c, describePromptHash)
+		}
+	}
+}
+
 func TestDetectRepetitionLoop(t *testing.T) {
 	cases := []struct {
 		name      string

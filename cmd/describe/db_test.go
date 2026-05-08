@@ -96,7 +96,8 @@ func TestOpenDBCreatesSchema(t *testing.T) {
 
 	expected := []string{
 		"schema_version", "photos", "exif", "descriptions",
-		"thumbnails", "inference", "chunks", "verify_cache",
+		"thumbnails", "inference", "verify_cache",
+		"photo_descriptions", "photo_metadata", "photo_queries", "query_generations",
 	}
 	for _, name := range expected {
 		var found int
@@ -116,8 +117,11 @@ func TestOpenDBCreatesSchema(t *testing.T) {
 		"idx_exif_year_month", "idx_exif_iso", "idx_exif_aperture",
 		"idx_exif_focal", "idx_exif_artist",
 		"idx_exif_fts",
-		"idx_descriptions_fts", "idx_chunks_embedding",
+		"idx_descriptions_fts",
 		"idx_verify_cache_query",
+		"idx_photo_descriptions_embedding", "idx_photo_descriptions_photo_id",
+		"idx_photo_metadata_embedding", "idx_photo_metadata_photo_id",
+		"idx_photo_queries_embedding", "idx_photo_queries_photo_id",
 	}
 	for _, name := range expectedIdx {
 		var found int
@@ -276,6 +280,101 @@ func TestInsertPhotoRoundTrip(t *testing.T) {
 	if modelName != "qwen/qwen3-vl-8b" || previewMs != 1228 || inferenceMs != 11371 {
 		t.Errorf("inference mismatch: model=%s preview=%d inference=%d",
 			modelName, previewMs, inferenceMs)
+	}
+}
+
+// TestInsertPhotoMoodAndQueries covers the v13 describer's new write paths:
+// descriptions.mood column populates from fields.Mood, and a non-empty
+// fields.Queries triggers a query_generations row with JSONB queries +
+// the package's static prompt_hash. Verifies absence semantics too: an
+// empty fields.Queries skips the query_generations write per spec ("do
+// not write empty/broken JSON silently").
+func TestInsertPhotoMoodAndQueries(t *testing.T) {
+	db := newTempDB(t)
+
+	exif := exifData{
+		FileName: "DSCF0091.JPG",
+		Make:     "FUJIFILM",
+		Model:    "X100VI",
+	}
+	fields := descriptionFields{
+		Subject: "two friends at a wooden table",
+		Mood:    "warm, nostalgic, intimate",
+		Queries: []string{
+			"warm afternoon at a corner cafe",
+			"two friends sharing coffee",
+			"intimate candid portrait",
+		},
+	}
+
+	if err := insertPhoto(
+		db, "moodphoto", "/p/x.JPG",
+		exif, "Full description.", fields,
+		[]byte{0xff}, "qwen/qwen3-vl-8b", 100, 200,
+	); err != nil {
+		t.Fatalf("insertPhoto: %v", err)
+	}
+
+	// descriptions.mood populates
+	var mood string
+	if err := db.QueryRow(
+		"SELECT mood FROM descriptions WHERE photo_id = 'moodphoto'",
+	).Scan(&mood); err != nil {
+		t.Fatalf("read mood: %v", err)
+	}
+	if mood != "warm, nostalgic, intimate" {
+		t.Errorf("mood roundtrip: %q", mood)
+	}
+
+	// query_generations row landed with JSONB array, prompt_hash, model
+	var (
+		schemaVersion int
+		model         string
+		promptHash    string
+		queriesJSON   []byte
+	)
+	if err := db.QueryRow(`
+		SELECT schema_version, model, prompt_hash, queries::text
+		FROM query_generations WHERE photo_id = 'moodphoto'
+	`).Scan(&schemaVersion, &model, &promptHash, &queriesJSON); err != nil {
+		t.Fatalf("read query_generations: %v", err)
+	}
+	if schemaVersion != queryGenerationsSchemaVersion {
+		t.Errorf("schema_version = %d, want %d", schemaVersion, queryGenerationsSchemaVersion)
+	}
+	if model != "qwen/qwen3-vl-8b" {
+		t.Errorf("model = %q", model)
+	}
+	if promptHash != describePromptHash {
+		t.Errorf("prompt_hash = %q, want %q (the package's computed hash)", promptHash, describePromptHash)
+	}
+	if !strings.Contains(string(queriesJSON), "warm afternoon at a corner cafe") ||
+		!strings.Contains(string(queriesJSON), "intimate candid portrait") {
+		t.Errorf("queries JSON missing expected phrasings: %s", queriesJSON)
+	}
+}
+
+// TestInsertPhotoEmptyQueriesSkipsRow guards the spec rule "do not write
+// empty/broken JSON silently" — when the model omits the Queries section
+// entirely, the query_generations row stays absent.
+func TestInsertPhotoEmptyQueriesSkipsRow(t *testing.T) {
+	db := newTempDB(t)
+
+	if err := insertPhoto(
+		db, "no_queries", "/p/x.JPG", exifData{}, "desc",
+		descriptionFields{Subject: "x"}, []byte{0xff}, "m", 1, 2,
+	); err != nil {
+		t.Fatalf("insertPhoto: %v", err)
+	}
+
+	var found int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM query_generations WHERE photo_id = 'no_queries'",
+	).Scan(&found); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if found != 0 {
+		t.Errorf("expected 0 query_generations rows for photo with empty Queries, got %d", found)
 	}
 }
 

@@ -4,7 +4,8 @@ set -euo pipefail
 # Full pipeline against one or more photo directories:
 #   1. Describe every image in each dir → Postgres library
 #   2. Classify the description prose into typed enum fields
-#   3. Embed each photo's description (incl. typed fields) into chunks (pgvector)
+#   3. Embed each photo into the v12 three-store schema (photo_descriptions /
+#      photo_metadata / photo_queries; pgvector halfvec(2560) HNSW per store)
 #   4. Start the web server
 #
 # Usage:
@@ -36,9 +37,10 @@ set -euo pipefail
 # paths to force the per-subdir form.
 #
 # --rebuild re-describes photos already in the DB (-force on cmd/describe),
-# re-classifies (-reclassify on cmd/classify), AND truncates+rebuilds the
-# chunks table (-reindex on cmd/index). Use it after switching the vision
-# model OR the classifier prompt.
+# re-classifies (-reclassify on cmd/classify), AND invalidates every v12
+# vector store (-reindex=descriptions,metadata,queries on cmd/index). Use
+# it after switching the vision model, the classifier prompt, or the
+# describer prompt.
 #
 # Override the vision model: LM_MODEL=qwen/qwen3-vl-8b ./full_run.sh /path
 # Override the classifier:   CLASSIFY_MODEL=mistralai/devstral-small-2-2512 ./full_run.sh /path
@@ -114,7 +116,7 @@ index_reindex=""
 if [[ $REBUILD -eq 1 ]]; then
     describe_force="-force"
     classify_reclassify="-reclassify"
-    index_reindex="-reindex"
+    index_reindex="-reindex=descriptions,metadata,queries"
 fi
 
 brew services start postgresql@18

@@ -90,6 +90,15 @@ const indexHTML = `<!doctype html>
       margin-top: 0.25rem; user-select: none;
     }
     .save-toggle input { accent-color: var(--fg); cursor: pointer; }
+    .weight-input {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      font-size: 0.78rem; color: var(--mute); user-select: none;
+    }
+    .weight-input input {
+      width: 4.5rem; padding: 0.15rem 0.3rem;
+      background: #0e0e0e; border: 1px solid var(--line); color: var(--fg);
+      font-family: inherit; font-size: 0.78rem;
+    }
     .grid {
       display: grid; gap: 1rem;
       grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -180,6 +189,38 @@ const indexHTML = `<!doctype html>
           <span>save classifier filter</span>
         </label>
       </div>
+      <div style="display: flex; gap: 1.25rem; flex-wrap: wrap;" title="v12 three-store vector lane. Toggle which stores contribute to vector retrieval; verifier text composition follows the same toggles (queries always excluded from verify). Disable all three to skip the vector lane entirely.">
+        <label class="save-toggle">
+          <input type="checkbox" name="descriptions" value="1" {{if .UseDescriptions}}checked{{end}}>
+          <span>descriptions store</span>
+        </label>
+        <label class="save-toggle">
+          <input type="checkbox" name="metadata" value="1" {{if .UseMetadata}}checked{{end}}>
+          <span>metadata store</span>
+        </label>
+        <label class="save-toggle">
+          <input type="checkbox" name="queries" value="1" {{if .UseQueries}}checked{{end}}>
+          <span>queries store</span>
+        </label>
+      </div>
+      <div class="modes" title="How to combine the per-store results. Union: photos from any enabled store (broadest recall). Intersect: only photos appearing in every enabled store (strictest). Weighted: per-store score × weight, summed (lets you bias toward one store).">
+        <label class="{{if eq .Merge "union"}}active{{end}}" title="Photos from any enabled store, deduplicated. Similarity = max across stores.">
+          <input type="radio" name="merge" value="union" {{if eq .Merge "union"}}checked{{end}} onchange="this.form.submit()">union
+        </label>
+        <label class="{{if eq .Merge "intersect"}}active{{end}}" title="Only photos in every enabled store. Similarity = mean across stores.">
+          <input type="radio" name="merge" value="intersect" {{if eq .Merge "intersect"}}checked{{end}} onchange="this.form.submit()">intersect
+        </label>
+        <label class="{{if eq .Merge "weighted"}}active{{end}}" title="Per-store similarity × weight, summed. Photos in multiple stores rise via the sum. Tune weights below.">
+          <input type="radio" name="merge" value="weighted" {{if eq .Merge "weighted"}}checked{{end}} onchange="this.form.submit()">weighted
+        </label>
+      </div>
+      {{if eq .Merge "weighted"}}
+      <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;" title="Per-store weights for the weighted merge. Defaults to 1.0 each (equivalent to union with summing). Higher = that store contributes more to the final rank.">
+        <label class="weight-input"><span>w(desc)</span><input type="number" name="wd" step="0.1" min="0" value="{{.WeightDesc}}" onchange="this.form.submit()"></label>
+        <label class="weight-input"><span>w(meta)</span><input type="number" name="wm" step="0.1" min="0" value="{{.WeightMeta}}" onchange="this.form.submit()"></label>
+        <label class="weight-input"><span>w(queries)</span><input type="number" name="wq" step="0.1" min="0" value="{{.WeightQueries}}" onchange="this.form.submit()"></label>
+      </div>
+      {{end}}
     </form>
   </header>
 
