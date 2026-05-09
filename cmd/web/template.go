@@ -66,6 +66,13 @@ const indexHTML = `<!doctype html>
       color: var(--fg); font-variant-numeric: tabular-nums; min-width: 2.5rem;
       text-align: right;
     }
+    .sliders input[type="number"] {
+      width: 5rem; padding: 0.15rem 0.3rem;
+      background: #0e0e0e; border: 1px solid var(--line); color: var(--fg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums; font-size: 0.8rem;
+      text-align: right;
+    }
     .status { color: var(--mute); font-size: 0.875rem; margin: 1rem 0; }
     .status .latency {
       margin-left: 0.5rem; opacity: 0.7;
@@ -151,21 +158,25 @@ const indexHTML = `<!doctype html>
         </label>
       </div>
       <div class="sliders" title="Tune the precision/recall floor for each retrieval arm. Default cosine 0.50, FTS ratio 0.30.">
-        <label>
+        <label title="Slider snaps to 0.1; the number box accepts any 0..1 value (e.g. 0.43) and wins on submit.">
           <span>cosine ≥</span>
-          <input type="range" name="cosine" min="0" max="1" step="0.05"
+          <input type="range" min="0" max="1" step="0.1"
             value="{{.CosineThreshold}}"
-            oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(2)"
+            oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(3)"
             onchange="this.form.submit()">
-          <output>{{.CosineThreshold}}</output>
+          <input type="number" name="cosine" min="0" max="1" step="0.001"
+            value="{{.CosineThreshold}}"
+            onchange="this.form.submit()">
         </label>
-        <label title="Adaptive FTS floor as a fraction of the top ts_rank in the result set. 0 = no filter, 1 = only the strongest match.">
+        <label title="Adaptive FTS floor as a fraction of the top ts_rank in the result set. 0 = no filter, 1 = only the strongest match. Slider snaps to 0.1; the number box accepts any 0..1 value and wins on submit.">
           <span>fts ≥</span>
-          <input type="range" name="fts" min="0" max="1" step="0.05"
+          <input type="range" min="0" max="1" step="0.1"
             value="{{.FTSThresholdRel}}"
-            oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(2)"
+            oninput="this.nextElementSibling.value = parseFloat(this.value).toFixed(3)"
             onchange="this.form.submit()">
-          <output>{{.FTSThresholdRel}}</output>
+          <input type="number" name="fts" min="0" max="1" step="0.001"
+            value="{{.FTSThresholdRel}}"
+            onchange="this.form.submit()">
           <span>× max</span>
         </label>
       </div>
