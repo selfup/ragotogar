@@ -180,22 +180,51 @@ across runs against unchanged pg state).
 | `idspace_test.go` | `idSpace.CompactID` round-trip + missing name + empty |
 | `main_test.go` | `humanBytes` boundaries |
 
-## Runtime (`cmd/edge`) — sketch only, not in this commit
+## Runtime (`cmd/edge`)
 
-- Loads artifacts via mmap (default) or `go:embed` (build-tag opt-in).
-  Pick mmap for v1 — flexible, no binary bloat, easy to swap artifacts
-  without rebuilding.
+- Loads artifacts via `mmap` (`github.com/blevesearch/mmap-go`) for the
+  vector blobs, postings, and payload bytes. Rowmaps and the payload
+  offset table are read into memory at startup since they're small
+  and the access pattern is dense.
 - Accepts query string + per-lane toggles + merge strategy + cosine
-  threshold over HTTP (mirrors `cmd/web` knobs).
-- Calls server-side encode endpoint for the query vector.
-- FST lexical lookup with negation parse mirroring
-  `library.ExtractNegation`.
-- Per-enabled-lane flat int8 cosine scan.
-- Merge per strategy.
-- Return ranked compact-ids + payload.
-- Caller hydrates from pg.
+  threshold + lexical/vector arm toggles + RRF fusion over HTTP at
+  `GET /search?q=…`. Mirrors `cmd/web`'s URL params.
+- Calls server-side encode endpoint for the query vector via
+  `library.EmbedTexts` (same OpenAI-shaped HTTP contract `cmd/web` /
+  `cmd/index` use, with the same retry layer).
+- Per-enabled-lane flat int8 cosine scan with MAX-collapse via the
+  rowmap sidecar.
+- FST retrieval lane with **Snowball English (Porter2) stemming**
+  matching pg's `to_tsvector('english')` so `airplane → airplan` /
+  `propeller → propel` / `engine → engin` line up with the stems pg
+  wrote into the FST at build time. Without stemming the FST arm
+  contributes ~0 for descriptive queries; with it, the arm
+  contributes hundreds of hits per token.
+- Coverage rank as the FST scoring function (count of query tokens
+  matched per doc). Approximates pg's `ts_rank` for short queries
+  without per-term IDF storage in the artifact.
+- RRF fusion of vector arm + FST arm (k=60, matching `library.RRFK`).
+- Negation post-filter: `library.ExtractNegation` produces the
+  negation tokens, FST lookup of each (also stemmed) yields a drop
+  set, applied after merge.
+- Phrase queries blocked at HTTP 400 — the FST has no position info,
+  so adjacency can't be reproduced without a silent over-match.
+- Returns JSON `{compact_id, name, caption, tags, score}` per hit
+  plus per-arm timing for diagnostics.
+- pg hydration is left to the caller; cmd/edge's pg handle is open
+  for liveness only at v1.
 
-Cold start budget: artifact `mmap` + pg connection. Both reported.
+Cold start budget at the live 3,564-photo corpus: ~150 ms to load
+artifacts (mmap + parse manifest's id_space + parse rowmap+offset
+tables), pg ping, FST `vellum.Open`. Reported in startup logs.
+
+> **Parity callout — honored.** `library.StripNegation` and
+> `library.ExtractNegation` are imported by `cmd/edge`, not
+> reimplemented. Same code path → automatic parity with `cmd/web` for
+> the negation parser. The runtime tokenizer's stemmer was added
+> mid-flight after live data showed `pg`'s `to_tsvector('english')`
+> stemming was a much wider parity gap than initially scoped — see
+> `cmd/edge/fst_lane.go:tokenizeQuery`.
 
 ## Out of scope (per brief)
 
@@ -230,13 +259,15 @@ Cold start budget: artifact `mmap` + pg connection. Both reported.
 
 ## Steps to ship
 
-1. **`cmd/edge_build` v1** — produces all seven artifacts against
-   `ragotogar_three_store_test`. Validate output sizes against
-   estimates (~61 MB int8 vectors total, ~700 KB payload, FST size
-   measured-not-predicted).
-2. **`cmd/edge` v1** — mmap artifacts, server-encode HTTP client,
-   per-lane flat int8 cosine, FST lexical lane, merge, payload return,
-   pg hydration call. (Separate session.)
+1. **`cmd/edge_build` v1** ✓ — produces all seven artifacts against
+   `ragotogar_three_store_test`. Output sizes match estimates
+   (~62 MB int8 vectors, 1.19 MB payload, 36 KiB FST).
+2. **`cmd/edge` v1** ✓ — mmap loader, server-encode HTTP client via
+   `library.EmbedTexts`, per-lane flat int8 cosine + MAX-collapse,
+   FST retrieval lane with Snowball English stemming, RRF fusion,
+   merge strategies on uint32, negation post-filter, phrase
+   block at HTTP 400, JSON response with hits + per-arm timing.
+   pg connect for liveness only at v1; hydration deferred to caller.
 3. **Parity validation** — run a held-out query set through both
    `cmd/web` and `cmd/edge` against the same corpus. Confirm ranked
    ID overlap and divergence cases. (Separate session.)
