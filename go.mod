@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/lib/pq v1.10.9
 	github.com/pgvector/pgvector-go v0.3.0
+	go.uber.org/goleak v1.3.0
 )
 
 require (

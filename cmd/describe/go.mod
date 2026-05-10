@@ -9,6 +9,7 @@ replace ragotogar => ../..
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2
+	go.uber.org/goleak v1.3.0
 	ragotogar v0.0.0
 )
 
