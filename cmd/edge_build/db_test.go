@@ -1,105 +1,20 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
-	"fmt"
-	"os"
-	"strings"
 	"testing"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"ragotogar/library/testdb"
 )
 
-// adminDSN points at the maintenance database so tests can CREATE/DROP
-// transient databases. Mirrors library/testdb_test.go's helper —
-// duplicated rather than imported because cmd/edge_build is its own
-// package main and Go's test infrastructure doesn't share between
-// packages.
-func adminDSN(t *testing.T) string {
-	t.Helper()
-	if v := os.Getenv("TEST_LIBRARY_DSN"); v != "" {
-		return v
-	}
-	if v := os.Getenv("LIBRARY_DSN"); v != "" {
-		return rewriteDBName(v, "postgres")
-	}
-	return "postgres:///postgres"
-}
-
-func rewriteDBName(dsn, newDB string) string {
-	idx := strings.LastIndex(dsn, "/")
-	if idx < 0 || idx == len(dsn)-1 {
-		return dsn + newDB
-	}
-	return dsn[:idx+1] + newDB
-}
-
-// newTempDB creates a uniquely-named Postgres database, applies the
-// minimal schema cmd/edge_build's queries depend on, and returns an
-// open connection. Cleanup drops the DB on test exit. Skips (rather
-// than fails) when no Postgres is reachable so the suite still runs
-// in environments where the user hasn't bootstrapped local Postgres.
+// newTempDB is the cmd/edge_build convenience wrapper around testdb.New.
+// The schema lives in this file (not in the shared package) because each
+// consumer needs a different subset of the production schema —
+// cmd/edge_build's queries hit photos, descriptions, exif, classified,
+// inference, the three v12 vector stores, and query_generations.
 func newTempDB(t *testing.T) *sql.DB {
 	t.Helper()
-	admin, err := sql.Open("pgx", adminDSN(t))
-	if err != nil {
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	if err := admin.Ping(); err != nil {
-		admin.Close()
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	defer admin.Close()
-
-	rnd := make([]byte, 6)
-	rand.Read(rnd)
-	name := "ragotogar_edgebuild_test_" + hex.EncodeToString(rnd)
-	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE %s", name)); err != nil {
-		t.Fatalf("create test db: %v", err)
-	}
-
-	dsn := rewriteDBName(adminDSN(t), name)
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		dropTestDB(adminDSN(t), name)
-		t.Fatalf("open test db: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-		t.Fatalf("ping test db: %v", err)
-	}
-
-	if _, err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-		t.Skipf("vector extension not available: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	if _, err := db.Exec(testSchemaSQL); err != nil {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-		t.Fatalf("apply test schema: %v", err)
-	}
-
-	t.Cleanup(func() {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-	})
-	return db
-}
-
-func dropTestDB(adminDSNStr, name string) {
-	admin, err := sql.Open("pgx", adminDSNStr)
-	if err != nil {
-		return
-	}
-	defer admin.Close()
-	admin.Exec(fmt.Sprintf(
-		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", name,
-	))
-	admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
+	return testdb.New(t, "edge_build", testdb.SchemaSQL(testSchemaSQL))
 }
 
 // testSchemaSQL is the minimum subset of the v12+ schema cmd/edge_build

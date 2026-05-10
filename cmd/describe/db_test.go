@@ -1,94 +1,23 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
-	"fmt"
-	"os"
 	"strings"
 	"testing"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"ragotogar/library/testdb"
 )
 
-// adminDSN is the DSN we use to CREATE/DROP transient test databases.
-// Connects to the maintenance database (`postgres`) so we can issue DDL
-// against the cluster itself.
-func adminDSN(t *testing.T) string {
-	t.Helper()
-	if v := os.Getenv("TEST_LIBRARY_DSN"); v != "" {
-		return v
-	}
-	if v := os.Getenv("LIBRARY_DSN"); v != "" {
-		// strip the dbname; replace with `postgres`
-		return rewriteDBName(v, "postgres")
-	}
-	return "postgres:///postgres"
-}
-
-func rewriteDBName(dsn, newDB string) string {
-	// crude but adequate for the two DSN shapes we use:
-	//   postgres:///dbname            (path-style)
-	//   postgres://host:port/dbname   (URL-style)
-	// strip everything after the last "/" if it isn't already empty
-	idx := strings.LastIndex(dsn, "/")
-	if idx < 0 || idx == len(dsn)-1 {
-		return dsn + newDB
-	}
-	return dsn[:idx+1] + newDB
-}
-
-// newTempDB creates a uniquely-named Postgres database, applies the schema,
-// and returns an open connection plus a cleanup function. Skips the test
-// (rather than failing) when no Postgres is reachable so unit tests don't
-// brick on machines without ./scripts/bootstrap.sh having run.
+// newTempDB is the cmd/describe convenience wrapper around testdb.New that
+// routes schema application through the live initSchema path — same code
+// path production uses on every cmd/describe startup. This makes
+// TestOpenDBCreatesSchema below a true integration test of the migrate +
+// schemaSQL pipeline, not a copy of the production DDL.
 func newTempDB(t *testing.T) *sql.DB {
 	t.Helper()
-	admin, err := sql.Open("pgx", adminDSN(t))
-	if err != nil {
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	if err := admin.Ping(); err != nil {
-		admin.Close()
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	defer admin.Close()
-
-	rnd := make([]byte, 6)
-	rand.Read(rnd)
-	name := "ragotogar_test_" + hex.EncodeToString(rnd)
-	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE %s", name)); err != nil {
-		t.Fatalf("create test db: %v", err)
-	}
-
-	dsn := rewriteDBName(adminDSN(t), name)
-	db, err := openDB(dsn)
-	if err != nil {
-		// best-effort cleanup
-		admin2, _ := sql.Open("pgx", adminDSN(t))
-		if admin2 != nil {
-			admin2.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
-			admin2.Close()
-		}
-		t.Fatalf("open test db: %v", err)
-	}
-
-	t.Cleanup(func() {
-		db.Close()
-		// ensure the test DB is droppable: kill any lingering backends
-		admin2, err := sql.Open("pgx", adminDSN(t))
-		if err != nil {
-			return
-		}
-		defer admin2.Close()
-		admin2.Exec(fmt.Sprintf(
-			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", name,
-		))
-		admin2.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
+	return testdb.New(t, "describe", func(db *sql.DB) error {
+		return initSchema(db)
 	})
-
-	return db
 }
 
 func TestOpenDBCreatesSchema(t *testing.T) {

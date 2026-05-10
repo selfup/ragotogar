@@ -33,7 +33,7 @@ func (a *Artifacts) FSTNegationDrop(negation string) (map[uint32]bool, error) {
 		return nil, nil
 	}
 	drop := map[uint32]bool{}
-	for _, raw := range strings.Fields(negation) {
+	for raw := range strings.FieldsSeq(negation) {
 		raw = strings.TrimLeft(raw, "-\"")
 		raw = strings.TrimRight(raw, "\"")
 		for _, tok := range tokenizeQuery(raw) {

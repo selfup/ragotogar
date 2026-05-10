@@ -1,110 +1,30 @@
 package library
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
-	"fmt"
-	"os"
-	"strings"
 	"testing"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"ragotogar/library/testdb"
 )
 
-// adminDSN points at the maintenance database (`postgres`) so tests can
-// CREATE/DROP transient databases. Mirrors cmd/describe/db_test.go's helper —
-// duplicated rather than imported because cmd/describe is its own Go module.
-func adminDSN(t *testing.T) string {
-	t.Helper()
-	if v := os.Getenv("TEST_LIBRARY_DSN"); v != "" {
-		return v
-	}
-	if v := os.Getenv("LIBRARY_DSN"); v != "" {
-		return rewriteDBName(v, "postgres")
-	}
-	return "postgres:///postgres"
-}
-
-func rewriteDBName(dsn, newDB string) string {
-	idx := strings.LastIndex(dsn, "/")
-	if idx < 0 || idx == len(dsn)-1 {
-		return dsn + newDB
-	}
-	return dsn[:idx+1] + newDB
-}
-
-// newTempDB creates a uniquely-named Postgres database, applies the v7
-// schema, and returns an open connection. Cleanup drops the DB on test exit.
-// Skips (rather than fails) when no Postgres is reachable so the suite still
-// runs in environments where the user hasn't bootstrapped local Postgres.
+// newTempDB is a library-package convenience wrapper around testdb.New that
+// applies the v12+ schema this package's pg-integration tests assume. The
+// schema string lives here (not in the shared package) because each consumer
+// has its own subset of the production schema — library's tests need exif,
+// descriptions, query_generations, classified, inference, verify_cache; they
+// don't need the photo_descriptions / photo_metadata / photo_queries vector
+// stores (those are exercised in cmd/index / cmd/edge_build tests).
 func newTempDB(t *testing.T) *sql.DB {
 	t.Helper()
-	admin, err := sql.Open("pgx", adminDSN(t))
-	if err != nil {
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	if err := admin.Ping(); err != nil {
-		admin.Close()
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	defer admin.Close()
-
-	rnd := make([]byte, 6)
-	rand.Read(rnd)
-	name := "ragotogar_libtest_" + hex.EncodeToString(rnd)
-	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE %s", name)); err != nil {
-		t.Fatalf("create test db: %v", err)
-	}
-
-	dsn := rewriteDBName(adminDSN(t), name)
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		dropTestDB(adminDSN(t), name)
-		t.Fatalf("open test db: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-		t.Fatalf("ping test db: %v", err)
-	}
-
-	if _, err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-		t.Skipf("vector extension not available: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	if _, err := db.Exec(testSchemaSQL); err != nil {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-		t.Fatalf("apply test schema: %v", err)
-	}
-
-	t.Cleanup(func() {
-		db.Close()
-		dropTestDB(adminDSN(t), name)
-	})
-	return db
+	return testdb.New(t, "lib", testdb.SchemaSQL(testSchemaSQL))
 }
 
-func dropTestDB(adminDSNStr, name string) {
-	admin, err := sql.Open("pgx", adminDSNStr)
-	if err != nil {
-		return
-	}
-	defer admin.Close()
-	admin.Exec(fmt.Sprintf(
-		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", name,
-	))
-	admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
-}
-
-// testSchemaSQL is the minimum subset of the v7 schema the verify_cache and
+// testSchemaSQL is the minimum subset of the v7+ schema the verify_cache and
 // VerifyFilter tests need. The exif / descriptions / classified tables are
 // declared empty so LoadPhoto's LEFT JOINs return NULLs cleanly without the
-// caller faking column data. The full schema (chunks, FTS, all the EXIF
-// indexes) lives in cmd/describe/schema.go — duplicated here only because
-// cmd/describe is its own Go module.
+// caller faking column data. The full schema authority is cmd/describe/schema.go;
+// this duplicate exists because cmd/describe is a separate Go module and Go's
+// test infrastructure doesn't share const declarations across modules.
 const testSchemaSQL = `
 CREATE TABLE photos (
     id            TEXT PRIMARY KEY,
@@ -203,7 +123,10 @@ CREATE TABLE classified (
     scene_weather         TEXT,
     framing               TEXT[],
     motion                TEXT,
-    color_palette         TEXT
+    color_palette         TEXT,
+    classified_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    classifier_model      TEXT NOT NULL,
+    extras                JSONB
 );
 
 CREATE TABLE inference (
@@ -224,6 +147,15 @@ CREATE TABLE verify_cache (
     PRIMARY KEY (query, photo_id, verify_model)
 );
 CREATE INDEX idx_verify_cache_query ON verify_cache(query, verify_model);
+
+CREATE TABLE classify_filter_cache (
+    nl_query        TEXT NOT NULL,
+    photo_id        TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    classify_model  TEXT NOT NULL,
+    drop_verdict    BOOLEAN NOT NULL,
+    filtered_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (nl_query, photo_id, classify_model)
+);
 `
 
 // seedPhoto inserts a photos + inference row pair so verify_cache rows can be

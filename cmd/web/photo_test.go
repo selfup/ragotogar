@@ -1,24 +1,23 @@
 package main
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
-	"fmt"
 	"html/template"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"ragotogar/library/testdb"
 )
 
+// minimalSchema is the subset of the production schema that cmd/web's photo
+// handlers exercise: photos + exif + descriptions + thumbnails + inference +
+// classified. The full schema authority is cmd/describe/schema.go; this
+// duplicate exists because each module's tests need a different subset and
+// the goal of the shared testdb package is the lifecycle, not the DDL.
 const minimalSchema = `
-CREATE EXTENSION IF NOT EXISTS vector;
-
 CREATE TABLE photos (
     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
     file_path TEXT, file_basename TEXT
@@ -59,68 +58,11 @@ CREATE TABLE classified (
 );
 `
 
-func adminDSN(t *testing.T) string {
-	t.Helper()
-	if v := os.Getenv("TEST_LIBRARY_DSN"); v != "" {
-		return v
-	}
-	if v := os.Getenv("LIBRARY_DSN"); v != "" {
-		return rewriteDBName(v, "postgres")
-	}
-	return "postgres:///postgres"
-}
-
-func rewriteDBName(dsn, newDB string) string {
-	idx := strings.LastIndex(dsn, "/")
-	if idx < 0 || idx == len(dsn)-1 {
-		return dsn + newDB
-	}
-	return dsn[:idx+1] + newDB
-}
-
+// newTestDB is the cmd/web convenience wrapper around testdb.New. Used by
+// both photo_test.go and open_test.go.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	admin, err := sql.Open("pgx", adminDSN(t))
-	if err != nil {
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	if err := admin.Ping(); err != nil {
-		admin.Close()
-		t.Skipf("cannot reach Postgres for tests: %v (run ./scripts/bootstrap.sh)", err)
-	}
-	defer admin.Close()
-
-	rnd := make([]byte, 6)
-	rand.Read(rnd)
-	name := "ragotogar_web_test_" + hex.EncodeToString(rnd)
-	if _, err := admin.Exec(fmt.Sprintf("CREATE DATABASE %s", name)); err != nil {
-		t.Fatalf("create test db: %v", err)
-	}
-
-	dsn := rewriteDBName(adminDSN(t), name)
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-	if _, err := db.Exec(minimalSchema); err != nil {
-		db.Close()
-		t.Fatalf("apply schema: %v", err)
-	}
-
-	t.Cleanup(func() {
-		db.Close()
-		admin2, err := sql.Open("pgx", adminDSN(t))
-		if err != nil {
-			return
-		}
-		defer admin2.Close()
-		admin2.Exec(fmt.Sprintf(
-			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", name,
-		))
-		admin2.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s", name))
-	})
-
-	return db
+	return testdb.New(t, "web", testdb.SchemaSQL(minimalSchema))
 }
 
 func seedPhoto(t *testing.T, db *sql.DB, name string, thumb []byte) {
