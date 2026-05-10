@@ -185,13 +185,20 @@ func buildFSTAndPostings(db *sql.DB, ids *idSpace, fstPath, postingsPath string)
 		return fstStats{}, err
 	}
 
+	// COLLATE "C" forces byte-wise lexicographic ordering. Without it,
+	// pg's default locale collation (often en_US-ish on developer
+	// machines) reorders punctuation-leading lexemes by language rules
+	// — producing pairs like "+0.33" *after* "/wooden" because the
+	// locale sorts `/` before `+`, which trips fstWriter's eager order
+	// check (vellum requires byte-wise insert order). Both columns
+	// are TEXT so both need the explicit collation.
 	rows, err := db.Query(`
 		SELECT lexeme, photo_id FROM (
 		  SELECT photo_id, unnest(tsvector_to_array(fts)) AS lexeme FROM descriptions
 		  UNION ALL
 		  SELECT photo_id, unnest(tsvector_to_array(fts)) AS lexeme FROM exif
 		) t
-		ORDER BY lexeme, photo_id
+		ORDER BY lexeme COLLATE "C", photo_id COLLATE "C"
 	`)
 	if err != nil {
 		w.Close()

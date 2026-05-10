@@ -23,10 +23,19 @@ func main() {
 	artifactsDir := flag.String("artifacts", "", "directory containing edge_build output (required)")
 	addr := flag.String("addr", ":8081", "HTTP listen address")
 	dsn := flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (used for hydration only)")
+	embedModel := flag.String("embed-model", "", "embedder model name; overrides EMBED_MODEL env. Used for the per-lane drift check and the embed HTTP request. Symmetric with cmd/edge_build's flag of the same name.")
 	flag.Parse()
 
 	if *artifactsDir == "" {
 		log.Fatal("-artifacts is required")
+	}
+	// Flag wins over env so a user can override on the command line
+	// without exporting. Setting the env (rather than threading the
+	// value through everywhere) keeps library.EmbedModel() the single
+	// source of truth — the drift check below and library.EmbedTexts
+	// at request time both read it.
+	if *embedModel != "" {
+		os.Setenv("EMBED_MODEL", *embedModel)
 	}
 
 	mf, err := loadManifest(*artifactsDir)

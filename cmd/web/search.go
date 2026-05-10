@@ -32,6 +32,17 @@ type searchParams struct {
 	weightDesc      float64
 	weightMeta      float64
 	weightQueries   float64
+
+	// backend swaps the retrieval source. "" or "pg" → in-process
+	// SearchV2/SearchHybridV2 (default). "edge" → HTTP call to
+	// cmd/edge's /search. The auto-rewrite, classifier filter, and
+	// verify steps run in cmd/web regardless of backend, so all six
+	// modes compose with both.
+	backend string
+	// edgeURL is the cmd/edge base URL (no trailing slash).
+	// Effective only when backend == "edge". Empty string when -edge-url
+	// flag wasn't passed at startup.
+	edgeURL string
 }
 
 // search runs the appropriate retrieval pipeline for the given mode and
@@ -55,6 +66,7 @@ type searchResult struct {
 	Stats    *library.VerifyStats // nil when verify didn't run
 	Rewrite  *rewriteView         // nil when no rewrite happened (mode wasn't auto, or input bypassed)
 	Classify *classifyStatsView   // nil when the classifier filter didn't run (toggle off)
+	Err      string               // non-empty when retrieval errored — UI surfaces this; e.g. cmd/edge's 400 on phrase queries.
 }
 
 func search(db *sql.DB, p searchParams) searchResult {
@@ -118,15 +130,22 @@ func search(db *sql.DB, p searchParams) searchResult {
 		candidates []library.Result
 		err        error
 	)
-	switch mode {
-	case "fts-vector", "fts-vector-verify":
+	useEdge := p.backend == "edge" && p.edgeURL != ""
+	switch {
+	case useEdge:
+		// Edge backend handles both vector and FTS+vector via its own
+		// arm toggles; mode controls whether the FST arm participates.
+		// retrieveFromEdge sends the same per-store + merge + cosine
+		// params the in-process path uses.
+		candidates, err = retrieveFromEdge(ctx, p.edgeURL, mode, effectiveQuery, opts)
+	case mode == "fts-vector" || mode == "fts-vector-verify":
 		candidates, err = searcher.SearchHybridV2(ctx, effectiveQuery, opts)
 	default:
 		candidates, err = searcher.SearchV2(ctx, effectiveQuery, opts)
 	}
 	if err != nil {
-		log.Printf("search %q (mode=%s): %v", effectiveQuery, mode, err)
-		return searchResult{Elapsed: time.Since(start), Rewrite: rwView}
+		log.Printf("search %q (mode=%s, backend=%s): %v", effectiveQuery, mode, p.backend, err)
+		return searchResult{Elapsed: time.Since(start), Rewrite: rwView, Err: err.Error()}
 	}
 
 	// Classifier filter — runs BEFORE verify so the prose verify (if it runs)

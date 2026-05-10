@@ -60,7 +60,10 @@ func parseSearchRequest(r *http.Request) (searchRequest, error) {
 		Cosine:          paramFloat(r, "cosine", 0.50),
 		UseFST:          paramBool(r, "lexical", true),
 		UseVec:          paramBool(r, "vector", true),
-		TopK:            int(paramFloat(r, "topk", 100)),
+		// TopK=0 means unbounded — cosine threshold is the only bound,
+		// matching cmd/web's behavior. Direct API callers who want a
+		// smaller response can pass ?topk=N to truncate post-fusion.
+		TopK:            int(paramFloat(r, "topk", 0)),
 	}
 	if !req.UseFST && !req.UseVec {
 		return searchRequest{}, fmt.Errorf("at least one of vector=1 or lexical=1 must be set")

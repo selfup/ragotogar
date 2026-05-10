@@ -242,6 +242,38 @@ tables), pg ping, FST `vellum.Open`. Reported in startup logs.
   user's existing setup)
 - Auth, secrets, deployment
 
+## Pg → edge parity audit (the bug class)
+
+Two bugs already shipped were the same shape: a pg-side default
+behavior diverging from what the edge expected. This section
+itemizes the audit so the *next* class member doesn't ambush a
+release the same way.
+
+The shape of the class:
+
+> A function that takes pg output and feeds it to a Go consumer with
+> stricter input requirements than pg's defaults satisfy.
+
+| Gap | What pg does by default | What edge expects | Status |
+|-----|-------------------------|-------------------|--------|
+| **Lexicographic ordering** | `lc_collate` (e.g. en_US.UTF-8) reorders punctuation + interleaves case | byte-wise lex (vellum requires it) | Fixed: `ORDER BY <text-col> COLLATE "C"` on every text sort in the build path. Integration test in `cmd/edge_build/integration_test.go` catches regressions. |
+| **English morphology** | `to_tsvector('english')` stems via Porter2 (`airplane → airplan`) | tokenizeQuery uses raw query tokens for FST.Get | Fixed: `cmd/edge/fst_lane.go:tokenizeQuery` applies the same Porter2 stemmer (`github.com/blevesearch/snowballstem`). Known-answer test pins parity. |
+| **English stopwords** | `to_tsvector('english')` drops `the`, `and`, `of`, … from indexed lexemes | tokenizeQuery passes them through | Acceptable: stopwords miss FST (not stored at index time), contribute nothing, no recall hit. Documented in `tokenizeQuery` comment. |
+| **Schema version filtering** | `cmd/index` writes rows at `schema_version=2`; future bumps may UPSERT-delete old rows | `cmd/edge_build` doesn't filter by schema_version on the v12 stores | Latent: works today because schema_version=2 is the only value present. Future-proofing would add `WHERE schema_version = 2` to the vector lane queries; not a bug now. |
+| **Unicode normalization** | `to_tsvector` is locale-aware but doesn't NFC/NFD-normalize | edge tokenizer preserves Go-string bytes | Latent: corpus is ASCII-heavy English, mismatch unlikely to bite. Worth re-auditing if a non-ASCII-heavy corpus is added. |
+| **Case folding** | `to_tsvector('english')` lowercases | tokenizeQuery lowercases via `strings.ToLower` | Match. |
+| **Token boundaries** | `to_tsvector` splits on word boundaries (whitespace, most punctuation) | tokenizeQuery splits on `unicode.IsLetter` and `unicode.IsDigit` | Approximate match; minor edge cases (e.g. internal apostrophes) may diverge. Latent. |
+| **Numeric tokens** | `to_tsvector` keeps numbers as separate lexemes | tokenizeQuery keeps numbers | Match. |
+
+The lesson — stated for the next time this class shows up:
+
+> Any function that consumes pg output and has a strict input
+> requirement (sortedness, normalized form, specific token shape) is
+> a candidate. **Test it against pg directly**, not just synthetic
+> Go-constructed inputs. Pure-function unit tests can't cover this
+> class because the bug lives in the pg-Go interface, not in either
+> language alone.
+
 ## Future work (not blocking)
 
 - **Manifest scaling.** `id_space.names[]` is JSON-inline today (~124 KB

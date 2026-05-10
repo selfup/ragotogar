@@ -8,16 +8,22 @@ import (
 // blob back to the canonical photos.name. id_space.names[i] is the
 // photo at compact id i.
 //
-// The ordering is ORDER BY name for determinism — same pg state in →
-// same compact-id assignments out, which keeps corpus_hash stable
-// across runs.
+// The ordering is ORDER BY name — byte-wise lex, NOT pg's
+// default locale-dependent collation. The within-lexeme posting list
+// is delta-encoded by compact_id, so the photo_id sort in the FST
+// query must produce the same order this slice does. pg's default
+// collation reorders punctuation by language rules (e.g. en_US treats
+// `/` and `+` differently than ASCII), which would produce out-of-
+// order compact_ids inside a posting and trip fstWriter's eager
+// validation. Using "C" everywhere keeps the contract trivial: byte
+// comparison, end of story.
 type idSpace struct {
 	Names []string
 	index map[string]uint32
 }
 
 func loadIDSpace(db *sql.DB) (*idSpace, error) {
-	rows, err := db.Query(`SELECT name FROM photos ORDER BY name`)
+	rows, err := db.Query(`SELECT name FROM photos ORDER BY name COLLATE "C"`)
 	if err != nil {
 		return nil, err
 	}

@@ -41,9 +41,14 @@ const expectedDim = 2560
 func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, error) {
 	var counts laneCounts
 
+	// COLLATE "C" forces byte-wise lex on photo_id sorts so artifacts
+	// stay byte-identical across hosts with different lc_collate
+	// settings (corpus_hash determinism). Within-row ordering doesn't
+	// affect runtime correctness since the rowmap sidecar carries the
+	// compact_id per row, but byte-stable artifacts are a contract.
 	d, err := writeLane(db, ids, outDir, "descriptions",
 		`SELECT photo_id, embedding FROM photo_descriptions
-		   ORDER BY photo_id, chunk_index`)
+		   ORDER BY photo_id COLLATE "C", chunk_index`)
 	if err != nil {
 		return counts, fmt.Errorf("descriptions lane: %w", err)
 	}
@@ -51,7 +56,7 @@ func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, erro
 
 	m, err := writeLane(db, ids, outDir, "metadata",
 		`SELECT photo_id, embedding FROM photo_metadata
-		   ORDER BY photo_id`)
+		   ORDER BY photo_id COLLATE "C"`)
 	if err != nil {
 		return counts, fmt.Errorf("metadata lane: %w", err)
 	}
@@ -59,7 +64,7 @@ func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, erro
 
 	q, err := writeLane(db, ids, outDir, "queries",
 		`SELECT photo_id, embedding FROM photo_queries
-		   ORDER BY photo_id, query_index`)
+		   ORDER BY photo_id COLLATE "C", query_index`)
 	if err != nil {
 		return counts, fmt.Errorf("queries lane: %w", err)
 	}

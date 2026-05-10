@@ -50,6 +50,18 @@ type pageData struct {
 	WeightDesc      string // pre-formatted for the input value attribute
 	WeightMeta      string
 	WeightQueries   string
+
+	// EdgeAvailable controls whether the backend checkbox renders.
+	// True only when -edge-url was passed at startup. Hides the
+	// toggle entirely when no edge server is configured so the UI
+	// doesn't expose a knob that can't possibly work.
+	EdgeAvailable bool
+	// Backend is the resolved retrieval source for this request:
+	// "pg" (default) or "edge". Drives the checkbox's checked state.
+	Backend string
+	// ErrorMsg surfaces a retrieval-side error (e.g. cmd/edge's 400 on
+	// phrase queries) into the page status line. Empty on success.
+	ErrorMsg string
 }
 
 // classifyStatsView projects library.ClassifyFilterStats for the template.
@@ -234,6 +246,7 @@ func main() {
 		addr     = flag.String("addr", ":8080", "listen address")
 		dsn      = flag.String("dsn", defaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
 		repoRoot = flag.String("repo", ".", "repo root (where styles.css lives)")
+		edgeURL  = flag.String("edge-url", "", "cmd/edge base URL (e.g. http://localhost:8081). When non-empty, the UI shows a backend checkbox that swaps retrieval to cmd/edge. Empty = backend toggle hidden.")
 	)
 	flag.Parse()
 
@@ -272,6 +285,14 @@ func main() {
 		classify := r.URL.Query().Get("class") == "1"
 		saveClassify := r.URL.Query().Get("save_class") == "1"
 
+		// Backend selector. Defaults to "pg"; "edge" only takes effect
+		// when -edge-url was configured at startup. Anything else
+		// resolves to "pg" defensively.
+		backend := "pg"
+		if *edgeURL != "" && r.URL.Query().Get("backend") == "edge" {
+			backend = "edge"
+		}
+
 		// v12 three-store toggles. Empty query (page first-load) → defaults
 		// (all stores on, union merge, weights = 1.0). Submitted form →
 		// explicit URL state (absent checkboxes = unchecked). The "all off
@@ -298,6 +319,7 @@ func main() {
 			verifyView   *verifyStatsView
 			rewriteView  *rewriteView
 			classifyView *classifyStatsView
+			errMsg       string
 		)
 		if q != "" {
 			res := search(db, searchParams{
@@ -315,6 +337,8 @@ func main() {
 				weightDesc:      wDesc,
 				weightMeta:      wMeta,
 				weightQueries:   wQueries,
+				backend:         backend,
+				edgeURL:         *edgeURL,
 			})
 			results = applySort(db, res.Results, sortBy)
 			latency = formatLatency(res.Elapsed)
@@ -333,6 +357,7 @@ func main() {
 			if res.Classify != nil {
 				classifyView = res.Classify
 			}
+			errMsg = res.Err
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := indexTmpl.Execute(w, pageData{
@@ -357,6 +382,9 @@ func main() {
 			WeightDesc:      fmt.Sprintf("%g", wDesc),
 			WeightMeta:      fmt.Sprintf("%g", wMeta),
 			WeightQueries:   fmt.Sprintf("%g", wQueries),
+			EdgeAvailable:   *edgeURL != "",
+			Backend:         backend,
+			ErrorMsg:        errMsg,
 		}); err != nil {
 			log.Printf("template: %v", err)
 		}
@@ -384,6 +412,11 @@ func main() {
 
 	log.Printf("library: %s", library.MaskDSN(*dsn))
 	log.Printf("repo:    %s", absRepo)
+	if *edgeURL != "" {
+		log.Printf("edge:    %s (backend toggle visible in UI)", *edgeURL)
+	} else {
+		log.Printf("edge:    not configured (backend toggle hidden); pass -edge-url to enable")
+	}
 	log.Printf("listening on http://localhost%s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }

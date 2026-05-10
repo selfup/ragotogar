@@ -187,6 +187,12 @@ const indexHTML = `<!doctype html>
         <button type="submit">search</button>
       </div>
       <div style="display: flex; gap: 1.25rem; flex-wrap: wrap;">
+        {{if .EdgeAvailable}}
+        <label class="save-toggle" title="Route retrieval to cmd/edge (the static-artifact search server) instead of in-process pg. Auto-rewrite, classifier filter, and verify still run in cmd/web — only the retrieval source swaps. Phrase queries (quoted) aren't supported on edge and will surface a 400. Use this to compare result identity and latency between the two backends on the same query.">
+          <input type="checkbox" name="backend" value="edge" {{if eq .Backend "edge"}}checked{{end}} onchange="this.form.submit()">
+          <span>edge backend</span>
+        </label>
+        {{end}}
         <label class="save-toggle" title="When checked, the rewritten boolean query is cached so repeat searches with the same NL query hit instantly. Off by default — leave it off while iterating, tick when satisfied.">
           <input type="checkbox" name="save" value="1" {{if .Save}}checked{{end}}>
           <span>save rewrite</span>
@@ -242,8 +248,10 @@ const indexHTML = `<!doctype html>
       {{end}}
       {{if .Total}}<span class="latency">(out of {{.Total}} image{{if ne .Total 1}}s{{end}})</span>{{end}}
       {{if .Latency}}<span class="latency">({{.Latency}})</span>{{end}}
-      {{if not .Results}} — try different words or broader concepts{{end}}
+      {{if eq .Backend "edge"}}<span class="latency">[backend: edge]</span>{{end}}
+      {{if not .Results}}{{if not .ErrorMsg}} — try different words or broader concepts{{end}}{{end}}
     </div>
+    {{if .ErrorMsg}}<div class="status" style="color: #b54;">retrieval error: {{.ErrorMsg}}</div>{{end}}
     {{if .Rewrite}}
       <div class="rewrite-line" title="The boolean query the search actually ran. Edit the box to override; switch off auto mode to run your edit verbatim.">
         rewritten: <span class="body">{{.Rewrite.Rewritten}}</span>
