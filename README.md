@@ -447,22 +447,31 @@ When pure `vector` mode returns 0 hits but `FTS+vector` returns many, that's alm
 
 ## Tests
 
-Run the full test suite (all Go and bash tests):
+Run the full test suite (all Go and bash tests). `-race` and goroutine-leak detection (via [goleak](https://github.com/uber-go/goleak)) are on by default:
 
 ```bash
 ./test.sh
+TEST_RACE=0 ./test.sh    # ~30% faster, skips -race when iterating on non-concurrent code
 ```
+
+`test.sh` auto-discovers every `cmd/*/go.mod` sub-module, the root module (`library/` + every `cmd/*` without its own `go.mod` + `prompts/`), and every `scripts/*_test.sh` bash test.
 
 Or run individually:
 
 ```bash
 # Go tests — sub-modules (each has its own go.mod)
-cd cmd/organize  && go test -v ./...
-cd cmd/describe  && go test -v ./...   # parsers, schema, insert roundtrip, FTS, cascade
+cd cmd/organize  && go test -race -v ./...
+cd cmd/describe  && go test -race -v ./...   # parsers, schema, insert roundtrip, FTS, cascade
 
-# Go tests — root module (cmd/cashier and cmd/web)
-go test -v ./cmd/cashier/...
-go test -v ./cmd/web/...               # template render, BLOB stream, search-output parse, helpers
+# Go tests — root module
+go test -race -v ./library/...        # search math (RRF, merge, negation, FTS, verify), classify_filter, LoadPhoto
+go test -race -v ./cmd/cashier/...    # markdown renderer + cashier design system
+go test -race -v ./cmd/classify/...   # listTodo (incremental vs reclassify, ORDER BY photo_id)
+go test -race -v ./cmd/edge/...       # decode (posting, payload), scan lane, FST + stemming, RRF, negation
+go test -race -v ./cmd/edge_build/... # quantize, FST writer, manifest, payload, build→load round-trip
+go test -race -v ./cmd/index/...      # parseReindex + resumability (partial-failure tx isolation)
+go test -race -v ./cmd/search/...     # run() flag validation
+go test -race -v ./cmd/web/...        # template render, BLOB stream, edge backend client, helpers
 
 # Individual bash test scripts
 ./scripts/clone_test.sh
@@ -472,7 +481,30 @@ go test -v ./cmd/web/...               # template render, BLOB stream, search-ou
 ./scripts/sync_to_nas_test.sh
 ```
 
-`test.sh` auto-discovers all `cmd/*/go.mod` Go sub-modules, the root module (`cmd/cashier`, `cmd/web`), and all `scripts/*_test.sh` bash tests.
+### Benchmarks
+
+`./bench.sh` runs every `Benchmark*` function across every module. Output is the standard `go test -bench` format — pipe through `benchstat` for before/after regression comparison:
+
+```bash
+./bench.sh > before.txt
+# <change something>
+./bench.sh > after.txt
+benchstat before.txt after.txt
+```
+
+`benchstat` install: `go install golang.org/x/perf/cmd/benchstat@latest`.
+
+Benchmarks cover the hot paths: int8 quantize (build + query side), FST writer + lookup, posting decode, vector lane scan, RRF fuse, merge strategies, negation parsing, query tokenization. They're slow and noisy under CI, so they stay out of `./test.sh` — pre-merge `benchstat` is the manual regression check.
+
+### Test infrastructure
+
+| Mechanism | Location | What it does |
+|-----------|----------|--------------|
+| `library/testdb` shared package | `library/testdb/testdb.go` | `testdb.New(t, prefix, schemaApplier)` (and `NewWithDSN` for callers that take a DSN string) creates a uniquely-named transient Postgres database, enables `pgvector`, applies the caller-supplied schema, and registers cleanup. Skips (not fails) when Postgres is unreachable so the suite stays green on machines that haven't run `./scripts/bootstrap.sh`. Used by every pg-integration test in the repo. |
+| `-race` default | `test.sh` (`RACE_FLAG="-race"`) | Exercises concurrent code paths (`cmd/index` workers, `library.SearchV2`'s per-store goroutines, `library.VerifyFilter`'s 8-way pool, `cmd/describe` / `cmd/classify` worker pools). `TEST_RACE=0` disables. |
+| Goroutine-leak detection | `library/leaks_test.go`, `cmd/{classify,describe,edge,index,web}/leaks_test.go` | Each `TestMain` calls `goleak.VerifyTestMain(m, ...)` to assert no goroutines outlive the test process. Whitelist covers the pgx pool's background health-check workers; any other lingering goroutine fails the suite with the leaked stack. |
+| Property tests | `library/search_property_test.go`, `cmd/edge_build/{fst,quantize}_property_test.go`, `cmd/edge/quantize_property_test.go` | 100-trial deterministic sweeps (via `math/rand/v2` seeded PCG) over RRF, merge math, int8 quantize, FST writer byte-order. |
+| Fuzz tests | `library/negation_fuzz_test.go` | `FuzzStripExtractNegationPartition` + `FuzzStripNegationDoesNotMangleCompounds`. Run the seed corpus on every `go test`; opt in to discovery via `go test -fuzz=Fuzz... ./library/`. |
 
 **Go organizer test details:**
 
