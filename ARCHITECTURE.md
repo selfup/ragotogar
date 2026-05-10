@@ -4,6 +4,13 @@ The shape of the system today, plus what's still on the roadmap.
 
 This is a living document — update when a phase ships or a decision changes.
 
+> An experimental parallel pipeline — `cmd/edge_build` and the planned
+> `cmd/edge` runtime — lives in [EDGE.md](EDGE.md). It builds static
+> read-only artifacts (FST + int8 vector lanes + payload) so a Go
+> binary can serve search out of `mmap`-friendly files with pg as
+> system-of-record + hydration only. Doesn't replace anything in this
+> doc; runs alongside the pg-runtime search path.
+
 ---
 
 ## Current state (snapshot)
