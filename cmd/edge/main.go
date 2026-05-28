@@ -21,7 +21,7 @@ import (
 
 func main() {
 	artifactsDir := flag.String("artifacts", "", "directory containing edge_build output (required)")
-	addr := flag.String("addr", ":8081", "HTTP listen address")
+	addr := flag.String("addr", "127.0.0.1:8081", "HTTP listen address (loopback by default; set an explicit host:port to expose on other interfaces)")
 	dsn := flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (used for hydration only)")
 	embedModel := flag.String("embed-model", "", "embedder model name; overrides EMBED_MODEL env. Used for the per-lane drift check and the embed HTTP request. Symmetric with cmd/edge_build's flag of the same name.")
 	flag.Parse()

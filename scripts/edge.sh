@@ -15,7 +15,7 @@
 #   -artifacts    directory produced by ./scripts/edge_build.sh
 #
 # Optional flags:
-#   -addr         HTTP listen address (default: :8081)
+#   -addr         HTTP listen address (default: 127.0.0.1:8081, loopback only)
 #   -dsn          Postgres library DSN (default: LIBRARY_DSN env or
 #                 postgres:///ragotogar). Used for liveness check at
 #                 startup; downstream hydration is the caller's job.

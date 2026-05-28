@@ -243,7 +243,7 @@ func defaultDSN() string {
 
 func main() {
 	var (
-		addr     = flag.String("addr", ":8080", "listen address")
+		addr     = flag.String("addr", "127.0.0.1:8080", "listen address (loopback by default; set an explicit host:port to expose on other interfaces)")
 		dsn      = flag.String("dsn", defaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
 		repoRoot = flag.String("repo", ".", "repo root (where styles.css lives)")
 		edgeURL  = flag.String("edge-url", "", "cmd/edge base URL (e.g. http://localhost:8081). When non-empty, the UI shows a backend checkbox that swaps retrieval to cmd/edge. Empty = backend toggle hidden.")
@@ -417,6 +417,6 @@ func main() {
 	} else {
 		log.Printf("edge:    not configured (backend toggle hidden); pass -edge-url to enable")
 	}
-	log.Printf("listening on http://localhost%s", *addr)
+	log.Printf("listening on http://%s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }

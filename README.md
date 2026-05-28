@@ -319,9 +319,9 @@ Browser UI sitting on top of the Postgres library. Type a query, get a grid of m
 **Usage:**
 
 ```bash
-./scripts/web.sh                          # default: :8080, library at postgres:///ragotogar
+./scripts/web.sh                          # default: 127.0.0.1:8080, library at postgres:///ragotogar
 ./scripts/web.sh -dsn postgres:///other_db
-./scripts/web.sh -addr :9000              # different port
+./scripts/web.sh -addr :9000              # expose on all interfaces, port 9000
 ```
 
 Then open `http://localhost:8080`.
@@ -330,7 +330,7 @@ Then open `http://localhost:8080`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-addr` | `:8080` | Listen address |
+| `-addr` | `127.0.0.1:8080` | Listen address (loopback by default; set an explicit `host:port` to expose on other interfaces) |
 | `-dsn` | `postgres:///ragotogar` | Postgres library DSN (overrides `LIBRARY_DSN` env) |
 | `-repo` | `.` | Repo root (where `styles.css` lives) |
 
@@ -597,7 +597,7 @@ Convenience wrapper around `go run ./cmd/cashier`. Not part of the photo pipelin
 
 ### `scripts/web.sh` — Web Server
 
-Runs `cmd/web` with the repo root passed in for `scripts/search.sh` and `styles.css` resolution. Defaults to `:8080` and the canonical library at `postgres:///ragotogar`.
+Runs `cmd/web` with the repo root passed in for `scripts/search.sh` and `styles.css` resolution. Defaults to `127.0.0.1:8080` (loopback only) and the canonical library at `postgres:///ragotogar`.
 
 ```bash
 ./scripts/web.sh                          # default
