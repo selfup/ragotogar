@@ -285,9 +285,9 @@ func runStoreQuery(ctx context.Context, db *sql.DB, baseSQL string, vec pgvector
 		err  error
 	)
 	if topK > 0 {
-		rows, err = db.QueryContext(ctx, baseSQL+" LIMIT $3", vec, v2SchemaVersion, topK)
+		rows, err = db.QueryContext(ctx, baseSQL+" LIMIT $3", vec, V2SchemaVersion, topK)
 	} else {
-		rows, err = db.QueryContext(ctx, baseSQL, vec, v2SchemaVersion)
+		rows, err = db.QueryContext(ctx, baseSQL, vec, V2SchemaVersion)
 	}
 	if err != nil {
 		return nil, err
@@ -307,11 +307,13 @@ func runStoreQuery(ctx context.Context, db *sql.DB, baseSQL string, vec pgvector
 	return out, rows.Err()
 }
 
-// v2SchemaVersion mirrors cmd/index's const so the search side reads
-// rows the indexer wrote. Bumping in lockstep is intentional; declared
-// twice rather than exporting from cmd/index because cmd/index can't be
-// imported by library (cmd/* would create a cycle).
-const v2SchemaVersion = 2
+// V2SchemaVersion is the schema_version stamped on every row in the three
+// v12 vector stores (photo_descriptions / photo_metadata / photo_queries).
+// It is the single source of truth shared by the writer (cmd/index) and the
+// reader (this package): library is the lowest layer both depend on, so the
+// constant lives here and cmd/index imports it rather than each declaring
+// its own and bumping in lockstep by hand.
+const V2SchemaVersion = 2
 
 // mergeStores combines per-store result lists into a single ranked list
 // per the chosen strategy. Each strategy has different score semantics

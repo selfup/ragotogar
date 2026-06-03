@@ -120,7 +120,9 @@ func FilterByClassification(ctx context.Context, db *sql.DB, nl string, candidat
 		}
 	}
 
-	kept := candidates[:0]
+	// Fresh slice — not candidates[:0]; the caller still holds the
+	// pre-filter slice and in-place compaction would clobber it.
+	kept := make([]Result, 0, len(candidates))
 	for _, c := range candidates {
 		if !dropSet[c.Name] {
 			kept = append(kept, c)

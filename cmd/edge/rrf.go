@@ -1,12 +1,10 @@
 package main
 
-import "sort"
+import (
+	"sort"
 
-// RRFK is the standard Reciprocal Rank Fusion constant. 60 is the
-// canonical value from the original Cormack et al. paper and matches
-// library.RRFK so cross-arm scores are directly comparable in parity
-// validation.
-const RRFK = 60.0
+	"ragotogar/library"
+)
 
 // RRFFuse combines two or more ranked arms into one fused ranking via
 //
@@ -21,7 +19,7 @@ func RRFFuse(arms ...[]LaneHit) []LaneHit {
 	scores := map[uint32]float64{}
 	for _, arm := range arms {
 		for rank, hit := range arm {
-			scores[hit.CompactID] += 1.0 / (RRFK + float64(rank+1))
+			scores[hit.CompactID] += 1.0 / (library.RRFK + float64(rank+1))
 		}
 	}
 	out := make([]LaneHit, 0, len(scores))

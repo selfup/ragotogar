@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/lib/pq"
@@ -208,19 +207,6 @@ func LoadPhoto(db *sql.DB, name string) (*Photo, error) {
 	p.ColorPalette = colorPalette.String
 
 	return &p, nil
-}
-
-// shutterFraction renders an exposure time in seconds as the more
-// human-friendly "1/250" for sub-second exposures, matching the format
-// the indexed text uses.
-func shutterFraction(seconds float64) string {
-	if seconds <= 0 {
-		return ""
-	}
-	if seconds >= 1 {
-		return strconv.FormatFloat(seconds, 'f', -1, 64) + "s"
-	}
-	return fmt.Sprintf("1/%ds", int(0.5+1.0/seconds))
 }
 
 // dateTakenToExifString converts the ISO 8601 stored in date_taken back to

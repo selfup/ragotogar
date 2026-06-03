@@ -76,7 +76,7 @@ func main() {
 		weightQueries:   *weightQueries,
 	}
 
-	if err := run(cfg); err != nil {
+	if err := run(context.Background(), cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -100,13 +100,18 @@ type runConfig struct {
 	weightQueries   float64
 }
 
-func run(cfg runConfig) error {
+// run executes a search against cfg. It takes a context so callers can bound
+// the work: main() passes context.Background() (production keeps the full
+// unbounded retry/backoff in library.EmbedTexts), while tests pass a short
+// deadline so the real search path executes but fails fast when the embed
+// endpoint is unreachable instead of grinding through the whole backoff.
+func run(ctx context.Context, cfg runConfig) error {
 	db, err := sql.Open("pgx", cfg.dsn)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("connect %s: %w", library.MaskDSN(cfg.dsn), err)
 	}
 
@@ -138,7 +143,6 @@ func run(cfg runConfig) error {
 		opts.Threshold = &t
 	}
 
-	ctx := context.Background()
 	searcher := library.NewSearcher(db)
 
 	var (

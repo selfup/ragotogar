@@ -236,9 +236,9 @@ func TestLoadExistingV2_ReturnsExistingAtSchemaVersion(t *testing.T) {
 	}
 
 	// Also insert a row at a DIFFERENT schema_version directly — this row
-	// should NOT appear in the loadExistingV2 result for v2SchemaVersion.
+	// should NOT appear in the loadExistingV2 result for library.V2SchemaVersion.
 	seedPhotoForIndex(t, db, "stale", nil)
-	makeStaleRow(t, db, "stale", v2SchemaVersion+1)
+	makeStaleRow(t, db, "stale", library.V2SchemaVersion+1)
 
 	got, err := loadExistingV2(db, "photo_descriptions", false)
 	if err != nil {

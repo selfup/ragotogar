@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"ragotogar/library"
 	"ragotogar/library/testdb"
@@ -23,7 +25,7 @@ func TestRun_RejectsAllStoresDisabled(t *testing.T) {
 		useQueries:      false,
 		mergeStrategy:   library.MergeUnion,
 	}
-	err := run(cfg)
+	err := run(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("run() with all stores disabled should error")
 	}
@@ -43,7 +45,7 @@ func TestRun_RejectsUnknownMergeStrategy(t *testing.T) {
 		useDescriptions: true,
 		mergeStrategy:   "intresect", // typo: "intersect"
 	}
-	err := run(cfg)
+	err := run(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("run() with bad merge strategy should error")
 	}
@@ -77,7 +79,11 @@ func TestRun_AcceptsEachValidMergeStrategy(t *testing.T) {
 				weightMeta:      1.0,
 				weightQueries:   1.0,
 			}
-			err := run(cfg)
+			// Deadline-bound the real call so a down embed endpoint fails fast
+				// instead of grinding through EmbedTexts' full retry/backoff.
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				err := run(ctx, cfg)
 			// We don't require success — without populated vector stores
 			// and a reachable embed endpoint, SearchV2 will error
 			// downstream. We DO require the error isn't a validation
@@ -99,7 +105,7 @@ func TestRun_BadDSNFailsAtPing(t *testing.T) {
 		useDescriptions: true,
 		mergeStrategy:   library.MergeUnion,
 	}
-	err := run(cfg)
+	err := run(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("run() with unreachable DSN should error")
 	}

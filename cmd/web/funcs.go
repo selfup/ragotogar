@@ -38,14 +38,6 @@ func humanDate(iso string) string {
 	return base
 }
 
-// nl2br renders newline-bearing prose as HTML, escaping unsafe chars and
-// converting \n to <br>. Returns template.HTML so the template doesn't
-// re-escape the resulting <br> tags.
-func nl2br(s string) template.HTML {
-	escaped := template.HTMLEscapeString(s)
-	return template.HTML(strings.ReplaceAll(escaped, "\n", "<br>"))
-}
-
 // shutterFraction renders an exposure time in seconds back to the human
 // "1/250" form for sub-second exposures, or "Ns" for >=1s.
 func shutterFraction(seconds float64) string {
@@ -107,7 +99,6 @@ func templateFuncMap() template.FuncMap {
 	return template.FuncMap{
 		"humanDate":       humanDate,
 		"humanDateOnly":   humanDateOnly,
-		"nl2br":           nl2br,
 		"shutterFraction": shutterFraction,
 		"stem":            stem,
 		"msToSeconds":     msToSeconds,

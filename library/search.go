@@ -172,7 +172,10 @@ func (s *Searcher) filterByNegation(ctx context.Context, results []Result, negat
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	filtered := results[:0]
+	// Fresh slice — do NOT reuse results' backing array (results[:0]); the
+	// caller still holds the pre-filter slice and in-place compaction would
+	// silently clobber its contents.
+	filtered := make([]Result, 0, len(results))
 	for _, r := range results {
 		if _, ok := keep[r.Name]; ok {
 			filtered = append(filtered, r)

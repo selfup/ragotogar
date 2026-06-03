@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -18,22 +17,6 @@ func TestHumanDate(t *testing.T) {
 		if got := humanDate(tc.in); got != tc.want {
 			t.Errorf("humanDate(%q) = %q, want %q", tc.in, got, tc.want)
 		}
-	}
-}
-
-func TestNl2br(t *testing.T) {
-	got := string(nl2br("line1\nline2"))
-	if !strings.Contains(got, "<br>") {
-		t.Errorf("nl2br missing <br>: %q", got)
-	}
-
-	// HTML metacharacters in input must be escaped before <br> insertion.
-	got = string(nl2br("<script>x</script>\nhello"))
-	if strings.Contains(got, "<script>") {
-		t.Errorf("nl2br left raw <script>: %q", got)
-	}
-	if !strings.Contains(got, "&lt;script&gt;") {
-		t.Errorf("nl2br did not HTML-escape: %q", got)
 	}
 }
 

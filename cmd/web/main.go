@@ -234,17 +234,10 @@ func parseWeight(raw string) float64 {
 	return v
 }
 
-func defaultDSN() string {
-	if v := os.Getenv("LIBRARY_DSN"); v != "" {
-		return v
-	}
-	return "postgres:///ragotogar"
-}
-
 func main() {
 	var (
 		addr     = flag.String("addr", "127.0.0.1:8080", "listen address (loopback by default; set an explicit host:port to expose on other interfaces)")
-		dsn      = flag.String("dsn", defaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
+		dsn      = flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
 		repoRoot = flag.String("repo", ".", "repo root (where styles.css lives)")
 		edgeURL  = flag.String("edge-url", "", "cmd/edge base URL (e.g. http://localhost:8081). When non-empty, the UI shows a backend checkbox that swaps retrieval to cmd/edge. Empty = backend toggle hidden.")
 	)

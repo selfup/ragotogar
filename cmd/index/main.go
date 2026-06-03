@@ -39,11 +39,6 @@ import (
 	"ragotogar/library"
 )
 
-// v2SchemaVersion stamps every row inserted into the v12 three-store
-// tables. Bump per-store (with a separate const) when a prompt or builder
-// change makes prior rows stale; until then all three stores share v2.
-const v2SchemaVersion = 2
-
 // reindexSet carries the parsed -reindex flag — which stores should
 // invalidate their existing rows for a photo before re-populating. Stores
 // not listed here use the standard skip-if-exists path.
@@ -135,7 +130,7 @@ func run(dsn string, reindex reindexSet, workers int) error {
 	}
 
 	// Pre-compute per-store skip sets. Each store's skip set is the set of
-	// photos that already have rows at v2SchemaVersion. -reindex=<store>
+	// photos that already have rows at library.V2SchemaVersion. -reindex=<store>
 	// skips loading the corresponding set (treats it as empty so every
 	// photo gets re-populated for that store).
 	descExisting, err := loadExistingV2(db, "photo_descriptions", reindex.descriptions)
@@ -307,7 +302,7 @@ func run(dsn string, reindex reindexSet, workers int) error {
 }
 
 // loadExistingV2 returns the set of photo IDs that already have at least one
-// row in the named v2 store at v2SchemaVersion. Returns an empty map (so
+// row in the named v2 store at library.V2SchemaVersion. Returns an empty map (so
 // every photo's "exists" check returns false → populate) when reindex is
 // true.
 func loadExistingV2(db *sql.DB, table string, reindex bool) (map[string]bool, error) {
@@ -317,7 +312,7 @@ func loadExistingV2(db *sql.DB, table string, reindex bool) (map[string]bool, er
 	// table is a fixed-string switch on caller side — no SQL injection risk
 	// (the three valid values are pinned).
 	q := fmt.Sprintf("SELECT DISTINCT photo_id FROM %s WHERE schema_version = $1", table)
-	rows, err := db.Query(q, v2SchemaVersion)
+	rows, err := db.Query(q, library.V2SchemaVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +348,7 @@ func indexDescriptions(ctx context.Context, db *sql.DB, photo *library.Photo) (i
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM photo_descriptions WHERE photo_id = $1 AND schema_version = $2",
-		photo.Name, v2SchemaVersion,
+		photo.Name, library.V2SchemaVersion,
 	); err != nil {
 		return 0, fmt.Errorf("delete existing description rows: %w", err)
 	}
@@ -363,7 +358,7 @@ func indexDescriptions(ctx context.Context, db *sql.DB, photo *library.Photo) (i
 			`INSERT INTO photo_descriptions
 			    (photo_id, schema_version, chunk_index, chunk_text, embedding)
 			 VALUES ($1, $2, $3, $4, $5)`,
-			photo.Name, v2SchemaVersion, i, text, vec,
+			photo.Name, library.V2SchemaVersion, i, text, vec,
 		); err != nil {
 			return 0, fmt.Errorf("insert description chunk %d: %w", i, err)
 		}
@@ -392,7 +387,7 @@ func indexMetadata(ctx context.Context, db *sql.DB, photo *library.Photo) (int, 
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM photo_metadata WHERE photo_id = $1 AND schema_version = $2",
-		photo.Name, v2SchemaVersion,
+		photo.Name, library.V2SchemaVersion,
 	); err != nil {
 		return 0, fmt.Errorf("delete existing metadata row: %w", err)
 	}
@@ -401,7 +396,7 @@ func indexMetadata(ctx context.Context, db *sql.DB, photo *library.Photo) (int, 
 		`INSERT INTO photo_metadata
 		    (photo_id, schema_version, metadata_text, embedding)
 		 VALUES ($1, $2, $3, $4)`,
-		photo.Name, v2SchemaVersion, text, vec,
+		photo.Name, library.V2SchemaVersion, text, vec,
 	); err != nil {
 		return 0, fmt.Errorf("insert metadata row: %w", err)
 	}
@@ -431,7 +426,7 @@ func indexQueries(ctx context.Context, db *sql.DB, photo *library.Photo) (int, e
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM photo_queries WHERE photo_id = $1 AND schema_version = $2",
-		photo.Name, v2SchemaVersion,
+		photo.Name, library.V2SchemaVersion,
 	); err != nil {
 		return 0, fmt.Errorf("delete existing query rows: %w", err)
 	}
@@ -441,7 +436,7 @@ func indexQueries(ctx context.Context, db *sql.DB, photo *library.Photo) (int, e
 			`INSERT INTO photo_queries
 			    (photo_id, schema_version, query_index, query_text, embedding)
 			 VALUES ($1, $2, $3, $4, $5)`,
-			photo.Name, v2SchemaVersion, i, text, vec,
+			photo.Name, library.V2SchemaVersion, i, text, vec,
 		); err != nil {
 			return 0, fmt.Errorf("insert query row %d: %w", i, err)
 		}

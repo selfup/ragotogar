@@ -12,19 +12,6 @@ import (
 // embedding model requires re-indexing AND swapping this constant.
 const EmbedDim = 2560
 
-// LMStudioBase reads LM_STUDIO_BASE with the canonical localhost default.
-//
-// Deprecated: prefer VisionEndpoint / TextEndpoint / EmbedEndpoint, which
-// fall back to LM_STUDIO_BASE but allow per-stage overrides for cloud
-// deployments where each model lives behind a different URL. Kept for
-// display strings in cmd/index, cmd/classify that print the active host.
-func LMStudioBase() string {
-	if v := os.Getenv("LM_STUDIO_BASE"); v != "" {
-		return v
-	}
-	return "http://localhost:1234"
-}
-
 // EmbedModel reads EMBED_MODEL with the text-embedding-qwen3-embedding-4b
 // default — the GGUF build of Qwen3-Embedding-4B as LM Studio exposes it.
 // LM Studio's MLX build of the same model is misclassified as an LLM and

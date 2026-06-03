@@ -369,6 +369,11 @@ func run(cfg config) error {
 					inferenceElapsed.Round(time.Millisecond))
 
 				fields := parseDescriptionFields(description)
+				if !fields.hasContent() {
+					fmt.Fprintf(os.Stderr,
+						"    !! %s: model output had no parseable fields; storing raw description only (per-field columns NULL)\n",
+						j.safeName)
+				}
 				if err := insertPhoto(
 					db, j.safeName, j.file, j.exif, description, fields,
 					res.bytes, cfg.model,
@@ -814,6 +819,19 @@ type descriptionFields struct {
 	GroundTruth string   `json:"ground_truth"`
 	Condition   string   `json:"condition"`
 	Queries     []string `json:"queries"` // v12: LLM-generated search phrasings, one element per phrasing. Empty when parse failed; insertPhoto skips the query_generations row in that case.
+}
+
+// hasContent reports whether parseDescriptionFields recognized at least one
+// structured section. False means the model output carried no parseable
+// "Subject:" / "Setting:" / ... headers, so every per-field column will be
+// NULL and only full_description holds the raw text. The describe loop logs
+// this case so a silent parse failure (malformed or off-format model output)
+// is visible instead of degrading quality unnoticed.
+func (f descriptionFields) hasContent() bool {
+	return f.Subject != "" || f.Setting != "" || f.Light != "" ||
+		f.Colors != "" || f.Mood != "" || f.Composition != "" ||
+		f.Vantage != "" || f.GroundTruth != "" || f.Condition != "" ||
+		len(f.Queries) > 0
 }
 
 // parseDescriptionFields extracts structured sections from the model output.

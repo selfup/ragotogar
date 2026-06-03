@@ -217,28 +217,6 @@ func TestLoadPhoto_MalformedQueriesJSONReturnsError(t *testing.T) {
 	}
 }
 
-// TestShutterFraction is pure-function; it doesn't need pg but lives here
-// because shutterFraction sits in photo.go.
-func TestShutterFraction(t *testing.T) {
-	tests := []struct {
-		seconds float64
-		want    string
-	}{
-		{0, ""},
-		{-1, ""},
-		{1, "1s"},
-		{2.5, "2.5s"},
-		{1.0 / 250, "1/250s"},
-		{1.0 / 60, "1/60s"},
-		{1.0 / 1000, "1/1000s"},
-	}
-	for _, tc := range tests {
-		got := shutterFraction(tc.seconds)
-		if got != tc.want {
-			t.Errorf("shutterFraction(%v) = %q, want %q", tc.seconds, got, tc.want)
-		}
-	}
-}
 
 func TestDateTakenToExifString(t *testing.T) {
 	tests := []struct{ iso, want string }{
