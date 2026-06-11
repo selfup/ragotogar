@@ -1,26 +1,83 @@
 package main
 
-const indexHTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{{if .Q}}{{.Q}} — {{end}}ragotogar</title>
-  <style>
+// shellCSS is the layout + control styling shared by every sidebar page
+// (search, describe). Page-specific rules stay in each page's own
+// <style> block; this holds the app shell (sidebar + main column) and
+// the controls both pages use (buttons, checkbox toggles, status line).
+const shellCSS = `
     :root { color-scheme: dark; --bg:#0a0a0a; --fg:#e8e8e8; --mute:#888; --line:#222; --accent:#444; }
     * { box-sizing: border-box; }
     html, body { margin: 0; }
     body {
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
       background: var(--bg); color: var(--fg);
-      max-width: 1400px; margin: 0 auto; padding: 2rem 1.5rem;
     }
-    header { margin-bottom: 1.5rem; }
+    .app { display: flex; min-height: 100vh; }
+    .sidebar {
+      width: 200px; flex-shrink: 0;
+      background: #0e0e0e; border-right: 1px solid var(--line);
+      padding: 1.5rem 0.75rem;
+      position: sticky; top: 0; height: 100vh;
+      display: flex; flex-direction: column; gap: 0.2rem;
+    }
+    .sidebar-brand {
+      font-weight: 200; letter-spacing: -0.03em; font-size: 1.15rem;
+      opacity: 0.6; margin: 0 0.5rem 1.25rem;
+    }
+    .sidebar-brand a { color: inherit; text-decoration: none; }
+    .sidebar-label {
+      font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--mute); margin: 0 0.5rem 0.4rem;
+    }
+    .sidebar-item {
+      display: block; padding: 0.45rem 0.6rem; border-radius: 6px;
+      color: var(--mute); text-decoration: none; font-size: 0.9rem;
+      transition: background 0.1s ease, color 0.1s ease;
+    }
+    .sidebar-item:hover { background: #1a1a1a; color: var(--fg); }
+    .sidebar-item.active { background: #222; color: var(--fg); }
+    .main { flex: 1; min-width: 0; max-width: 1400px; padding: 2rem 1.5rem; }
     h1 {
       font-weight: 200; letter-spacing: -0.03em; font-size: 1.5rem;
       margin: 0 0 1rem 0; opacity: 0.6;
     }
-    h1 a { color: inherit; text-decoration: none; }
+    button {
+      padding: 0.75rem 1.5rem; font-family: inherit; font-size: 0.9rem;
+      background: #1a1a1a; border: 1px solid var(--line); color: var(--fg);
+      cursor: pointer; border-radius: 6px;
+    }
+    button:hover { background: #222; border-color: var(--accent); }
+    .save-toggle {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: 0.8rem; color: var(--mute); cursor: pointer;
+      margin-top: 0.25rem; user-select: none;
+    }
+    .save-toggle input { accent-color: var(--fg); cursor: pointer; }
+    .status { color: var(--mute); font-size: 0.875rem; margin: 1rem 0; }
+    .status .latency {
+      margin-left: 0.5rem; opacity: 0.7;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+`
+
+// sidebarTmpl defines the {{template "sidebar" .}} block both pages
+// include. Pages set .Active to highlight their own nav item.
+const sidebarTmpl = `{{define "sidebar"}}<nav class="sidebar">
+  <div class="sidebar-brand"><a href="/">ragotogar</a></div>
+  <div class="sidebar-label">sections</div>
+  <a class="sidebar-item {{if eq .Active "search"}}active{{end}}" href="/">search</a>
+  <a class="sidebar-item {{if eq .Active "describe"}}active{{end}}" href="/describe">describe</a>
+</nav>{{end}}`
+
+const indexHTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{if .Q}}{{.Q}} — {{end}}ragotogar</title>
+  <style>` + shellCSS + `
+    header { margin-bottom: 1.5rem; }
     form { display: flex; flex-direction: column; gap: 0.5rem; }
     input[type="search"] {
       flex: 1; padding: 0.75rem 1rem; font-size: 1rem; font-family: inherit;
@@ -28,12 +85,6 @@ const indexHTML = `<!doctype html>
       border-radius: 6px;
     }
     input[type="search"]:focus { outline: none; border-color: var(--accent); }
-    button {
-      padding: 0.75rem 1.5rem; font-family: inherit; font-size: 0.9rem;
-      background: #1a1a1a; border: 1px solid var(--line); color: var(--fg);
-      cursor: pointer; border-radius: 6px;
-    }
-    button:hover { background: #222; border-color: var(--accent); }
     .modes {
       display: flex; gap: 0; margin-bottom: 0.75rem;
       border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
@@ -73,12 +124,6 @@ const indexHTML = `<!doctype html>
       font-variant-numeric: tabular-nums; font-size: 0.8rem;
       text-align: right;
     }
-    .status { color: var(--mute); font-size: 0.875rem; margin: 1rem 0; }
-    .status .latency {
-      margin-left: 0.5rem; opacity: 0.7;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-variant-numeric: tabular-nums;
-    }
     .verify-stats {
       color: var(--mute); font-size: 0.8rem; margin: -0.5rem 0 1rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -91,12 +136,6 @@ const indexHTML = `<!doctype html>
     }
     .rewrite-line .body { color: var(--fg); }
     .rewrite-line .saved { color: #6a9955; margin-left: 0.5rem; }
-    .save-toggle {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      font-size: 0.8rem; color: var(--mute); cursor: pointer;
-      margin-top: 0.25rem; user-select: none;
-    }
-    .save-toggle input { accent-color: var(--fg); cursor: pointer; }
     .weight-input {
       display: inline-flex; align-items: center; gap: 0.35rem;
       font-size: 0.78rem; color: var(--mute); user-select: none;
@@ -123,8 +162,11 @@ const indexHTML = `<!doctype html>
   </style>
 </head>
 <body>
+<div class="app">
+  {{template "sidebar" .}}
+  <main class="main">
   <header>
-    <h1><a href="/">ragotogar</a></h1>
+    <h1>search</h1>
     <form method="GET" action="/">
       <div class="modes" title="Retrieval mode">
         <label class="{{if eq .Mode "naive"}}active{{end}}" title="Pure vector cosine similarity. Sub-second; broad semantic recall.">
@@ -281,6 +323,137 @@ const indexHTML = `<!doctype html>
   {{else if not .Q}}
     <div class="empty">Search the photo library by description.</div>
   {{end}}
+  </main>
+</div>
+</body>
+</html>
+`
+
+// describeHTML is the scaffold for the describe section — pick a
+// directory, models, and worker counts; submit composes the exact
+// scripts/photo_describe.sh invocation. Execution is not wired yet:
+// the page previews the command so the form plumbing (params,
+// defaults, clamping) can be validated independently of run-control
+// concerns (process lifecycle, log streaming, cancellation).
+const describeHTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>describe — ragotogar</title>
+  <style>` + shellCSS + `
+    form { display: flex; flex-direction: column; gap: 0.85rem; max-width: 56rem; }
+    .hint { color: var(--mute); font-size: 0.875rem; margin: 0 0 1.5rem; max-width: 56rem; }
+    .field { display: flex; flex-direction: column; gap: 0.35rem; flex: 1; }
+    .field > span { font-size: 0.8rem; color: var(--mute); }
+    .field input[type="text"] {
+      padding: 0.6rem 0.8rem; font-size: 0.9rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #141414; border: 1px solid var(--line); color: var(--fg);
+      border-radius: 6px;
+    }
+    .field input[type="text"]:focus { outline: none; border-color: var(--accent); }
+    .field input::placeholder { color: #4a4a4a; }
+    .field input[type="number"] {
+      width: 6rem; padding: 0.45rem 0.6rem;
+      background: #141414; border: 1px solid var(--line); color: var(--fg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums; font-size: 0.9rem;
+      border-radius: 6px;
+    }
+    .field-row { display: flex; gap: 1.25rem; flex-wrap: wrap; }
+    .toggles { display: flex; gap: 1.25rem; flex-wrap: wrap; }
+    .cmd-note { color: var(--mute); font-size: 0.8rem; margin: 1.5rem 0 0.5rem; }
+    .cmd-note .scaffold { color: #c90; }
+    pre.cmd {
+      max-width: 56rem; margin: 0; padding: 0.85rem 1rem;
+      background: #141414; border: 1px solid var(--line); border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.82rem; color: var(--fg);
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .dsn-line {
+      color: var(--mute); font-size: 0.8rem; margin-top: 2rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  {{template "sidebar" .}}
+  <main class="main">
+    <h1>describe</h1>
+    <p class="hint">
+      Run the vision-LLM describer over a directory of photos — EXIF, parsed
+      description fields, and a 1024px thumbnail land in the Postgres library.
+      Pick the directory, models, and worker counts; submit to preview the run.
+    </p>
+    <form method="GET" action="/describe">
+      <label class="field" title="Directory of photos to describe. Passed as the positional argument to cmd/describe.">
+        <span>photo directory</span>
+        <input type="text" name="dir" value="{{.Dir}}" spellcheck="false" autofocus required
+          placeholder="e.g. /Volumes/T9/X100VI/JPEG/April2026">
+      </label>
+      <div class="field-row">
+        <label class="field" title="Vision model for descriptions (LM Studio name). Default mirrors cmd/describe: LM_MODEL env or qwen/qwen3-vl-8b.">
+          <span>vision model</span>
+          <input type="text" name="model" list="vision-models" value="{{.Model}}" spellcheck="false">
+          <datalist id="vision-models">
+            <option value="qwen/qwen3-vl-8b">
+            <option value="mistralai/ministral-3-3b">
+          </datalist>
+        </label>
+        <label class="field" title="Text model for the inline classifier — only used when 'classify after describe' is checked. Default mirrors cmd/describe: CLASSIFY_MODEL env or mistralai/ministral-3-3b.">
+          <span>classifier model</span>
+          <input type="text" name="classify_model" list="classify-models" value="{{.ClassifyModel}}" spellcheck="false">
+          <datalist id="classify-models">
+            <option value="mistralai/ministral-3-3b">
+            <option value="mistralai/devstral-small-2-2512">
+          </datalist>
+        </label>
+      </div>
+      <div class="field-row">
+        <label class="field" title="Parallel ImageMagick/exiftool workers for preview generation. Default 4.">
+          <span>preview workers</span>
+          <input type="number" name="pw" min="1" max="64" value="{{.PreviewWorkers}}">
+        </label>
+        <label class="field" title="Parallel LLM inference workers. Default 1; bump to N to use LM Studio's --parallel N continuous batching. Vision inference is memory-hungry — start at 2–4 and watch VRAM/error rate before going higher.">
+          <span>inference workers</span>
+          <input type="number" name="iw" min="1" max="32" value="{{.InferenceWorkers}}">
+        </label>
+        <label class="field" title="Max retry attempts per image on API failure. Default 3.">
+          <span>retries</span>
+          <input type="number" name="retries" min="0" max="10" value="{{.Retries}}">
+        </label>
+      </div>
+      <div class="toggles">
+        <label class="save-toggle" title="Re-describe photos already in the DB — UPSERTs across all describe-owned tables. Off = skip photos whose name is already in the library.">
+          <input type="checkbox" name="force" value="1" {{if .Force}}checked{{end}}>
+          <span>force re-describe</span>
+        </label>
+        <label class="save-toggle" title="List the files that would be processed without calling the LLM or touching the DB.">
+          <input type="checkbox" name="dry" value="1" {{if .DryRun}}checked{{end}}>
+          <span>dry run</span>
+        </label>
+        <label class="save-toggle" title="Pipeline mode: classify each photo right after describing it (uses the classifier model). Failures are logged, not fatal — re-run cmd/classify to retry.">
+          <input type="checkbox" name="class" value="1" {{if .Classify}}checked{{end}}>
+          <span>classify after describe</span>
+        </label>
+      </div>
+      <div><button type="submit">preview run</button></div>
+    </form>
+    {{if .DirMissing}}
+    <div class="cmd-note"><span class="scaffold">no directory</span> — enter a photo directory above to preview the run.</div>
+    {{end}}
+    {{if .Command}}
+    <div class="cmd-note">
+      <span class="scaffold">scaffold</span> — execution isn't wired up yet. Run this in a terminal:
+    </div>
+    <pre class="cmd">{{.Command}}</pre>
+    {{end}}
+    <div class="dsn-line">library: {{.DSN}}</div>
+  </main>
+</div>
 </body>
 </html>
 `

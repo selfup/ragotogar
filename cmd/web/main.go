@@ -23,6 +23,7 @@ type result struct {
 }
 
 type pageData struct {
+	Active          string // sidebar highlight — always "search" here
 	Q               Q
 	Mode            string // "naive" | "naive-verify" | "fts-vector" | "fts-vector-verify" | "auto" | "auto-verify"
 	Sort            string // "relevance" (default) | "date-desc" | "date-asc"
@@ -260,7 +261,11 @@ func main() {
 		log.Fatalf("ping db (%s): %v", library.MaskDSN(*dsn), err)
 	}
 
-	indexTmpl := template.Must(template.New("index").Parse(indexHTML))
+	// Sidebar pages parse sidebarTmpl first (it only defines the
+	// "sidebar" block; the whitespace-only root body doesn't clobber
+	// the page body parsed second).
+	indexTmpl := template.Must(template.Must(template.New("index").Parse(sidebarTmpl)).Parse(indexHTML))
+	describeTmpl := template.Must(template.Must(template.New("describe").Parse(sidebarTmpl)).Parse(describeHTML))
 	photoTmpl := template.Must(template.New("photo").Funcs(templateFuncMap()).Parse(photoHTML))
 
 	mux := http.NewServeMux()
@@ -354,6 +359,7 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := indexTmpl.Execute(w, pageData{
+			Active:          "search",
 			Q:               Q(q),
 			Mode:            mode,
 			Sort:            sortBy,
@@ -381,6 +387,9 @@ func main() {
 		}); err != nil {
 			log.Printf("template: %v", err)
 		}
+	})
+	mux.HandleFunc("/describe", func(w http.ResponseWriter, r *http.Request) {
+		serveDescribe(w, r, describeTmpl, *dsn)
 	})
 	mux.HandleFunc("/photos/", func(w http.ResponseWriter, r *http.Request) {
 		// /photos/<name>          → HTML page
