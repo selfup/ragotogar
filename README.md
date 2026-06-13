@@ -693,6 +693,19 @@ Sets file created and modified dates from EXIF `DateTimeOriginal`. Recursively p
 
 **Requirements:** [exiftool](https://exiftool.org/) (`brew install exiftool`)
 
+### `scripts/padratio.sh` — Aspect-Ratio Padding
+
+Pads an image out to a target aspect ratio (`3:2` or `5:4`) **without cropping** — it computes the smallest canvas of that ratio that fully contains the source and centers the image on a solid background. Orientation follows the image (landscape stays landscape). Useful for normalizing mixed-ratio frames before printing or posting.
+
+```bash
+./scripts/padratio.sh 3:2 shot.jpg                  # → shot_3x2.jpg, white border
+./scripts/padratio.sh 5:4 shot.jpg framed.jpg black # explicit output + border color
+```
+
+**Arguments:** `<ratio> <input> [output] [color]` — `ratio` is `3:2` or `5:4`; `output` defaults to `<input>_<ratio>.<ext>`; `color` defaults to `white`.
+
+**Requirements:** [ImageMagick](https://imagemagick.org/) (v7 `magick` or v6 `convert`)
+
 ### `scripts/sync_to_nas.sh` — NAS Sync (rsync)
 
 Syncs camera directories to a mounted NAS volume using rsync. Each subdirectory in the source (one per camera) is synced to a matching folder on the NAS.
