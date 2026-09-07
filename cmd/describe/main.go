@@ -838,9 +838,8 @@ func (f descriptionFields) hasContent() bool {
 // The model is prompted to use "Subject:", "Setting:", "Mood:", "Queries:",
 // etc. headers.
 //
-// Section keys must not be prefixes of other keys — the parser walks the map
-// in unspecified order. "ground truth" before "ground" is the only current
-// near-collision; new keys should follow the same rule.
+// Header recognition is shared with library.StripGeneratedQueries so parsed
+// fields and the stored scene prose agree about query-section boundaries.
 //
 // The Queries section is special-cased: its value is the multi-line block
 // of search phrasings, one per line. After the section's text is collected,
@@ -876,49 +875,13 @@ func parseDescriptionFields(description string) descriptionFields {
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		// Strip markdown formatting and list markers to normalize headers like:
-		// "**Subject:**", "- **Subject**:", "**Subject**:", "Subject:", etc.
-		cleaned := strings.TrimLeft(trimmed, "-*_ ")
-		cleaned = strings.TrimRight(cleaned, "*_ ")
-		matched := false
-		for key, ptr := range sections {
-			lower := strings.ToLower(cleaned)
-			if !strings.HasPrefix(lower, key) {
-				continue
-			}
-			// After the key, skip over any combination of markdown markers and
-			// parenthetical asides before requiring a colon. This handles headers like:
-			//   "Colors:", "**Colors:**", "- **Colors**:",
-			//   "**Colors** (from metadata):", "- **Colors** (in B&W):"
-			after := cleaned[len(key):]
-			for {
-				trimmed := strings.TrimLeft(after, "*_ ")
-				inside, ok := strings.CutPrefix(trimmed, "(")
-				if !ok {
-					after = trimmed
-					break
-				}
-				_, rest, found := strings.Cut(inside, ")")
-				if !found {
-					// unmatched paren; bail and let the colon check fail
-					after = trimmed
-					break
-				}
-				after = rest
-			}
-			if len(after) == 0 || after[0] != ':' {
-				continue
-			}
+		if key, rest, matched := library.ParseDescriptionSection(line); matched {
 			flush()
-			currentField = ptr
-			rest := strings.TrimLeft(after[1:], "* ")
+			currentField = sections[key]
 			if rest != "" {
 				currentLines = append(currentLines, rest)
 			}
-			matched = true
-			break
-		}
-		if !matched && currentField != nil {
+		} else if currentField != nil {
 			currentLines = append(currentLines, trimmed)
 		}
 	}

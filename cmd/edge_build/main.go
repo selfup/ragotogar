@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -26,7 +27,7 @@ import (
 func main() {
 	dsn := flag.String("dsn", library.DefaultDSN(), "Postgres library DSN")
 	out := flag.String("out", "", "output directory (required)")
-	embedModel := flag.String("embed-model", "", "operator-asserted embedder version recorded per lane in manifest (required)")
+	embedModel := flag.String("embed-model", "", "embedding model recorded in the database; must match before building (required)")
 	flag.Parse()
 
 	if *out == "" {
@@ -59,6 +60,18 @@ func main() {
 }
 
 func run(db *sql.DB, outDir, embedModel string) error {
+	configLock, err := library.LockEmbeddingConfig(context.Background(), db)
+	if err != nil {
+		return err
+	}
+	defer configLock.Rollback()
+	dim, err := library.StoredEmbeddingDimensions(context.Background(), db)
+	if err != nil {
+		return err
+	}
+	if err := library.CheckEmbeddingConfig(context.Background(), db, embedModel, dim); err != nil {
+		return err
+	}
 	ids, err := loadIDSpace(db)
 	if err != nil {
 		return fmt.Errorf("load id space: %w", err)

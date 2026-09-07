@@ -95,9 +95,15 @@ func LLMCompleteSchema(ctx context.Context, model, prompt, schemaName string, sc
 }
 
 func llmComplete(ctx context.Context, model, prompt string, format *responseFormat) (string, error) {
+	return llmCompleteWithLimit(ctx, model, prompt, format, -1)
+}
+
+// Bounded callers require a complete answer; truncation must not become a
+// plausible-looking partial query. Other completion callers keep their limits.
+func llmCompleteWithLimit(ctx context.Context, model, prompt string, format *responseFormat, maxTokens int) (string, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:       model,
-		MaxTokens:   -1, // let the server pick (LM Studio: full context window)
+		MaxTokens:   maxTokens,
 		Temperature: 0.0,
 		Messages: []chatMessage{
 			{Role: "user", Content: prompt},
@@ -127,6 +133,9 @@ func llmComplete(ctx context.Context, model, prompt string, format *responseForm
 	}
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("no choices in chat response")
+	}
+	if reason := out.Choices[0].FinishReason; maxTokens > 0 && reason != "" && reason != "stop" {
+		return "", fmt.Errorf("incomplete chat response: finish_reason=%q", reason)
 	}
 	content := strings.TrimSpace(thinkBlockRe.ReplaceAllString(out.Choices[0].Message.Content, ""))
 	if content == "" {

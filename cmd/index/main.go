@@ -2,9 +2,9 @@
 // schema (photo_descriptions / photo_metadata / photo_queries).
 //
 // Each store is populated independently:
-//   - photo_descriptions: BuildDescriptionDocument → chunked → halfvec(2560)
-//   - photo_metadata:     BuildMetadataDocument   → 1 row → halfvec(2560)
-//   - photo_queries:      BuildQueryDocuments     → N rows → halfvec(2560)
+//   - photo_descriptions: BuildDescriptionDocument → chunked → halfvec(dim)
+//   - photo_metadata:     BuildMetadataDocument   → 1 row → halfvec(dim)
+//   - photo_queries:      BuildQueryDocuments     → N rows → halfvec(dim)
 //
 // Skip-if-exists is per-store and keyed on (photo_id, schema_version), so
 // a prompt change touching only the description prompt invalidates only the
@@ -15,6 +15,7 @@
 // Usage:
 //
 //	go run ./cmd/index
+//	go run ./cmd/index -batch-size 10
 //	go run ./cmd/index -workers 16
 //	go run ./cmd/index -reindex=descriptions
 //	go run ./cmd/index -reindex=descriptions,queries
@@ -24,7 +25,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -34,7 +34,6 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/pgvector/pgvector-go"
 
 	"ragotogar/library"
 )
@@ -73,8 +72,9 @@ func parseReindex(raw string) (reindexSet, error) {
 func main() {
 	var (
 		dsn         = flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
-		reindexFlag = flag.String("reindex", "", "comma-separated list of stores to invalidate before re-populating: descriptions, metadata, queries. Default empty (incremental skip-if-exists).")
-		workers     = flag.Int("workers", 1, "parallel embed workers. Default 1 (local LM Studio serializes on GPU). Bump to 8–16 against cloud embed endpoints.")
+		reindexFlag = flag.String("reindex", "", "comma-separated stores to re-populate: descriptions, metadata, queries. Listing all three also authorizes clearing/resizing vector stores when model identity or dimensions change (including unrecorded legacy models). Default empty (incremental skip-if-exists).")
+		workers     = flag.Int("workers", 1, "parallel batch workers. Default 1 for local LM Studio; bump to 8–16 against cloud embed endpoints.")
+		batchSize   = flag.Int("batch-size", defaultBatchSize, "maximum documents per embedding request; each chunk or query phrasing is a separate input")
 	)
 	flag.Parse()
 
@@ -84,15 +84,22 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(*dsn, rs, *workers); err != nil {
+	if err := run(*dsn, rs, *workers, *batchSize); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(dsn string, reindex reindexSet, workers int) error {
+func run(dsn string, reindex reindexSet, workers, batchSize int) error {
+	if batchSize < 1 {
+		return fmt.Errorf("-batch-size must be at least 1")
+	}
 	if workers < 1 {
 		workers = 1
+	}
+	dim, err := library.EmbeddingDimensions()
+	if err != nil {
+		return err
 	}
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -109,19 +116,42 @@ func run(dsn string, reindex reindexSet, workers int) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	indexLock, err := lockIndex(ctx, db)
+	if err != nil {
+		return err
+	}
+	defer indexLock.Rollback()
+	if err := prepareVectorStores(ctx, db, dim, reindex); err != nil {
+		return err
+	}
 
-	rows, err := db.Query("SELECT name FROM photos ORDER BY name")
+	// A missing query-store row is work only when source phrasings exist.
+	// Older photos can legitimately have no generated queries; repeatedly
+	// queueing them after every restart inflates progress with zero-write jobs.
+	// Malformed non-empty JSON remains eligible so LoadPhoto reports it.
+	rows, err := db.Query(`
+		SELECT p.name, COALESCE(qg.queries NOT IN ('[]'::jsonb, 'null'::jsonb), false)
+		FROM photos p
+		LEFT JOIN query_generations qg ON qg.photo_id = p.id
+		ORDER BY p.name`)
 	if err != nil {
 		return fmt.Errorf("list photos: %w", err)
 	}
 	var allNames []string
+	querySources := map[string]bool{}
 	for rows.Next() {
 		var n string
-		if err := rows.Scan(&n); err != nil {
+		var hasQueries bool
+		if err := rows.Scan(&n, &hasQueries); err != nil {
 			rows.Close()
 			return err
 		}
 		allNames = append(allNames, n)
+		querySources[n] = hasQueries
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("list photos: %w", err)
 	}
 	rows.Close()
 	if len(allNames) == 0 {
@@ -146,21 +176,23 @@ func run(dsn string, reindex reindexSet, workers int) error {
 		return fmt.Errorf("load existing queries: %w", err)
 	}
 
-	// todo = photos that need at least one store populated. Photos already
-	// complete across all enabled stores are skipped entirely.
+	// todo = photos that need at least one store populated. A photo without
+	// query phrasings doesn't need a photo_queries row. New phrasings are
+	// picked up on the next run because availability is read fresh each time.
 	var todo []string
 	for _, n := range allNames {
 		needDesc := !descExisting[n]
 		needMeta := !metaExisting[n]
-		needQ := !queriesExisting[n]
+		needQ := querySources[n] && !queriesExisting[n]
 		if needDesc || needMeta || needQ {
 			todo = append(todo, n)
 		}
 	}
 	skipped := len(allNames) - len(todo)
 
-	fmt.Printf("Found %d photo(s) in %s (skipping %d already complete)\n", len(allNames), library.MaskDSN(dsn), skipped)
+	fmt.Printf("Found %d photo(s) in %s (skipping %d with no pending embeddings)\n", len(allNames), library.MaskDSN(dsn), skipped)
 	fmt.Printf("Embed: %s @ %s\n", library.EmbedModel(), library.EmbedEndpoint())
+	fmt.Printf("Dimensions: %d\n", dim)
 	fmt.Printf("Stores: descriptions, metadata, queries\n")
 	if reindex.descriptions || reindex.metadata || reindex.queries {
 		var rs []string
@@ -175,7 +207,8 @@ func run(dsn string, reindex reindexSet, workers int) error {
 		}
 		fmt.Printf("Reindex: %s\n", strings.Join(rs, ", "))
 	}
-	fmt.Printf("Workers: %d\n\n", workers)
+	fmt.Printf("Workers: %d\n", workers)
+	fmt.Printf("Batch size: %d documents per embedding request (max)\n\n", batchSize)
 
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
@@ -189,102 +222,89 @@ func run(dsn string, reindex reindexSet, workers int) error {
 	var fatalOnce sync.Once
 	var fatalErr error
 
+	stores := []struct {
+		store                 documentStore
+		existing              map[string]bool
+		rows, skipped, failed *atomic.Int64
+	}{
+		{descriptionsStore, descExisting, &descRows, &descSkip, &descFail},
+		{metadataStore, metaExisting, &metaRows, &metaSkip, &metaFail},
+		{queriesStore, queriesExisting, &queriesRows, &queriesSkip, &queriesFail},
+	}
+
 	start := time.Now()
-	for _, name := range todo {
-		if ctx.Err() != nil {
-			break
+queue:
+	for offset := 0; offset < len(todo); offset += batchSize {
+		// Bound both in-flight HTTP requests and loaded photos. One worker
+		// processes a window of photos, batching each store across the window.
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break queue
 		}
 		wg.Add(1)
-		sem <- struct{}{}
-		go func(n string) {
+		go func(names []string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if ctx.Err() != nil {
-				return
-			}
-
-			photo, err := library.LoadPhoto(db, n)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  [load-error] %s: %v\n", n, err)
-				loadFail.Add(1)
-				return
-			}
-
-			// Per-store work. Each store decides for itself whether to run
-			// based on the pre-computed existing set (overridden by reindex).
-			// A non-retryable embed error from any store cancels the whole
-			// run so we don't burn 16 workers × N photos hitting the same
-			// wall (wrong model, bad auth, etc).
-			handleStoreErr := func(store string, err error) {
-				if errors.Is(err, library.ErrNonRetryable) {
-					fatalOnce.Do(func() {
-						fatalErr = fmt.Errorf("%s/%s: %w (aborting — fix the embed endpoint and rerun)", n, store, err)
-						cancel()
-					})
+			var photos []*library.Photo
+			for _, name := range names {
+				if ctx.Err() != nil {
 					return
 				}
-				fmt.Fprintf(os.Stderr, "  [%s-error] %s: %v\n", store, n, err)
-			}
-
-			// Descriptions store.
-			if !descExisting[n] {
-				added, err := indexDescriptions(ctx, db, photo)
+				photo, err := library.LoadPhoto(db, name)
 				if err != nil {
-					handleStoreErr("descriptions", err)
-					descFail.Add(1)
-				} else {
-					descRows.Add(int64(added))
+					fmt.Fprintf(os.Stderr, "  [load-error] %s: %v\n", name, err)
+					loadFail.Add(1)
+					continue
 				}
-			} else {
-				descSkip.Add(1)
-			}
-			if ctx.Err() != nil {
-				return
+				photos = append(photos, photo)
 			}
 
-			// Metadata store.
-			if !metaExisting[n] {
-				added, err := indexMetadata(ctx, db, photo)
+			for _, s := range stores {
+				if ctx.Err() != nil {
+					return
+				}
+				var pending []*library.Photo
+				for _, photo := range photos {
+					if s.existing[photo.Name] {
+						s.skipped.Add(1)
+					} else {
+						pending = append(pending, photo)
+					}
+				}
+				results, err := indexStoreBatch(ctx, db, s.store, pending, batchSize)
 				if err != nil {
-					handleStoreErr("metadata", err)
-					metaFail.Add(1)
-				} else {
-					metaRows.Add(int64(added))
+					// Permanent endpoint failures stop other workers immediately.
+					if fatalEmbeddingError(err) {
+						fatalOnce.Do(func() {
+							fatalErr = fmt.Errorf("%s: %w (aborting — fix the embed endpoint and rerun)", s.store.name, err)
+							cancel()
+						})
+					}
+					return // otherwise another worker canceled this request
 				}
-			} else {
-				metaSkip.Add(1)
-			}
-			if ctx.Err() != nil {
-				return
+				for i, result := range results {
+					if result.err != nil {
+						fmt.Fprintf(os.Stderr, "  [%s-error] %s: %v\n", s.store.name, pending[i].Name, result.err)
+						s.failed.Add(1)
+					} else if result.added == 0 {
+						s.skipped.Add(1)
+					} else {
+						s.rows.Add(int64(result.added))
+					}
+				}
 			}
 
-			// Queries store. Photos without GeneratedQueries (no query_generations
-			// row, or parse failure on describe) emit zero rows — that's logged
-			// to skip rather than fail since it's expected for older photos
-			// that pre-date the v12 prompt change. Re-running cmd/describe
-			// will regenerate queries and the next index run will pick them up.
-			if !queriesExisting[n] {
-				added, err := indexQueries(ctx, db, photo)
-				if err != nil {
-					handleStoreErr("queries", err)
-					queriesFail.Add(1)
-				} else if added == 0 {
-					queriesSkip.Add(1)
-				} else {
-					queriesRows.Add(int64(added))
+			for _, photo := range photos {
+				ord := photosDone.Add(1)
+				if ord%10 == 0 || ord == int64(len(todo)) {
+					fmt.Printf("  [%d/%d] %s — rows added this run: desc=%d meta=%d q=%d\n",
+						ord, len(todo), photo.Name,
+						descRows.Load(), metaRows.Load(), queriesRows.Load(),
+					)
 				}
-			} else {
-				queriesSkip.Add(1)
 			}
-
-			ord := photosDone.Add(1)
-			if ord%10 == 0 || ord == int64(len(todo)) {
-				fmt.Printf("  [%d/%d] %s — desc=%d meta=%d q=%d (totals)\n",
-					ord, len(todo), n,
-					descRows.Load(), metaRows.Load(), queriesRows.Load(),
-				)
-			}
-		}(name)
+		}(todo[offset:min(offset+batchSize, len(todo))])
 	}
 	wg.Wait()
 
@@ -326,123 +346,4 @@ func loadExistingV2(db *sql.DB, table string, reindex bool) (map[string]bool, er
 		out[id] = true
 	}
 	return out, rows.Err()
-}
-
-// indexDescriptions chunks the description text and writes one row per
-// chunk into photo_descriptions. Returns the number of rows inserted.
-// Empty text (photo lacks all scene fields) returns 0 with no error.
-func indexDescriptions(ctx context.Context, db *sql.DB, photo *library.Photo) (int, error) {
-	doc := library.BuildDescriptionDocument(photo)
-	chunks := library.Chunk(doc)
-	if len(chunks) == 0 {
-		return 0, nil
-	}
-	embeddings, err := library.EmbedTexts(ctx, chunks)
-	if err != nil {
-		return 0, err
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM photo_descriptions WHERE photo_id = $1 AND schema_version = $2",
-		photo.Name, library.V2SchemaVersion,
-	); err != nil {
-		return 0, fmt.Errorf("delete existing description rows: %w", err)
-	}
-	for i, text := range chunks {
-		vec := pgvector.NewHalfVector(embeddings[i])
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO photo_descriptions
-			    (photo_id, schema_version, chunk_index, chunk_text, embedding)
-			 VALUES ($1, $2, $3, $4, $5)`,
-			photo.Name, library.V2SchemaVersion, i, text, vec,
-		); err != nil {
-			return 0, fmt.Errorf("insert description chunk %d: %w", i, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return len(chunks), nil
-}
-
-// indexMetadata embeds the EXIF-token text into a single photo_metadata row.
-// Empty token text (photo with no EXIF columns populated) returns 0.
-func indexMetadata(ctx context.Context, db *sql.DB, photo *library.Photo) (int, error) {
-	text := library.BuildMetadataDocument(photo)
-	if strings.TrimSpace(text) == "" {
-		return 0, nil
-	}
-	embeddings, err := library.EmbedTexts(ctx, []string{text})
-	if err != nil {
-		return 0, err
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM photo_metadata WHERE photo_id = $1 AND schema_version = $2",
-		photo.Name, library.V2SchemaVersion,
-	); err != nil {
-		return 0, fmt.Errorf("delete existing metadata row: %w", err)
-	}
-	vec := pgvector.NewHalfVector(embeddings[0])
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO photo_metadata
-		    (photo_id, schema_version, metadata_text, embedding)
-		 VALUES ($1, $2, $3, $4)`,
-		photo.Name, library.V2SchemaVersion, text, vec,
-	); err != nil {
-		return 0, fmt.Errorf("insert metadata row: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return 1, nil
-}
-
-// indexQueries writes one photo_queries row per generated phrasing. Photos
-// without GeneratedQueries (parse failure, or pre-v12 describe) return 0
-// without error — the caller treats this as a benign skip rather than a
-// failure since a future cmd/describe -force will regenerate.
-func indexQueries(ctx context.Context, db *sql.DB, photo *library.Photo) (int, error) {
-	queries := library.BuildQueryDocuments(photo)
-	if len(queries) == 0 {
-		return 0, nil
-	}
-	embeddings, err := library.EmbedTexts(ctx, queries)
-	if err != nil {
-		return 0, err
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM photo_queries WHERE photo_id = $1 AND schema_version = $2",
-		photo.Name, library.V2SchemaVersion,
-	); err != nil {
-		return 0, fmt.Errorf("delete existing query rows: %w", err)
-	}
-	for i, text := range queries {
-		vec := pgvector.NewHalfVector(embeddings[i])
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO photo_queries
-			    (photo_id, schema_version, query_index, query_text, embedding)
-			 VALUES ($1, $2, $3, $4, $5)`,
-			photo.Name, library.V2SchemaVersion, i, text, vec,
-		); err != nil {
-			return 0, fmt.Errorf("insert query row %d: %w", i, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return len(queries), nil
 }

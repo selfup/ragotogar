@@ -47,7 +47,7 @@ type Classification struct {
 	POVAngle           *string  `json:"pov_angle"`
 	SubjectAltitude    *string  `json:"subject_altitude"`
 	SubjectCategory    []string `json:"subject_category"`
-	SubjectDistance   *string   `json:"subject_distance"`
+	SubjectDistance    *string  `json:"subject_distance"`
 	SubjectCount       *string  `json:"subject_count"`
 	AnimalCount        *string  `json:"animal_count"`
 	SceneTimeOfDay     *string  `json:"scene_time_of_day"`
@@ -392,7 +392,7 @@ func LoadClassifyInput(db *sql.DB, name string) (string, error) {
 	if len(lines) > 0 {
 		return strings.Join(lines, "\n"), nil
 	}
-	return full.String, nil
+	return StripGeneratedQueries(full.String), nil
 }
 
 // UpsertClassified writes one classification row. Arrays use pq.Array so

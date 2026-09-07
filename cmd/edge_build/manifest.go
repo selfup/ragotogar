@@ -55,7 +55,7 @@ func writeManifest(db *sql.DB, ids *idSpace, lanes laneCounts, embedModel, path 
 		SchemaVersion: manifestSchemaVersion,
 		CorpusHash:    hash,
 		BuiltAt:       time.Now().UTC().Format(time.RFC3339Nano),
-		Dim:           expectedDim,
+		Dim:           lanes.Dim,
 		Quantization:  "int8",
 		Lanes: map[string]laneEntry{
 			"descriptions": {EmbedderVersion: embedModel, Rows: lanes.Descriptions},

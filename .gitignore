@@ -24,3 +24,5 @@ mistralai
 full_run.log
 **.env
 test_images
+tmp.sh
+.tmp

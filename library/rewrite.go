@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"ragotogar/prompts"
 )
@@ -27,19 +29,16 @@ type RewriteResult struct {
 // websearch_to_tsquery boolean form via the text-endpoint LLM. Cache
 // behavior is controlled by useCache:
 //
-//   - useCache=true:  read query_rewrite_cache; on hit, return without
-//                     calling the LLM. On miss, call LLMComplete and
-//                     write the result. Use this when the caller wants
-//                     a previously-saved rewrite to stick.
+//   - useCache=true: read query_rewrite_cache; validate hits before reuse.
+//     On miss, call the LLM with a bounded output budget and cache valid
+//     results. Invalid cached entries are evicted and fall back to the input.
 //   - useCache=false: skip the DB entirely (no read, no write). Always
-//                     call the LLM. Use this for iterate-mode where the
-//                     user wants fresh output until they're satisfied.
+//     call the LLM. Use this for iterate-mode where the
+//     user wants fresh output until they're satisfied.
 //
-// The rewrite is advisory. On any failure — LLM error, empty/degenerate
-// response, cache I/O error — the function returns the raw query in the
-// Rewritten field so callers can fall back gracefully without branching.
-// Errors are still surfaced for logging; ignoring them yields the raw
-// query path automatically.
+// The rewrite is advisory. LLM errors, invalid output, and cache lookup errors
+// return the raw query in Rewritten, with an error for logging. Cache-write
+// errors retain the validated rewrite so retrieval can still use it.
 //
 // The function also short-circuits when the user has clearly already typed
 // a boolean query (contains a leading `-`, a quoted phrase, or uppercase
@@ -57,11 +56,20 @@ func RewriteQuery(ctx context.Context, db *sql.DB, nl, model string, useCache bo
 	canonical := CanonicalQuery(nl)
 	if useCache {
 		if cached, ok, err := lookupRewriteCache(ctx, db, canonical, model); err != nil {
-			// Cache lookup failure is non-fatal — fall through to LLM.
-			// Surfaced via the returned error for caller-side logging.
-			defer func() { res.Elapsed = time.Since(start) }()
+			// Fall back to the original query on cache I/O errors.
+			res.Elapsed = time.Since(start)
 			return res, fmt.Errorf("rewrite cache lookup: %w", err)
 		} else if ok {
+			if cached != nl {
+				if err := validateRewrite(nl, cached); err != nil {
+					// Do not reuse bad output saved by older versions. Match the
+					// value too, so a concurrent valid replacement survives.
+					_, _ = db.ExecContext(ctx, `DELETE FROM query_rewrite_cache
+						WHERE nl_query = $1 AND rewrite_model = $2 AND rewritten = $3`, canonical, model, cached)
+					res.Elapsed = time.Since(start)
+					return res, fmt.Errorf("invalid cached rewrite: %w", err)
+				}
+			}
 			res.Rewritten = cached
 			res.Cached = true
 			res.Elapsed = time.Since(start)
@@ -70,16 +78,24 @@ func RewriteQuery(ctx context.Context, db *sql.DB, nl, model string, useCache bo
 	}
 
 	prompt := strings.Replace(prompts.Query, "{{query}}", nl, 1)
-	rewritten, err := LLMComplete(ctx, model, prompt)
+	rewritten, err := llmCompleteWithLimit(ctx, model, prompt, nil, 256)
 	if err != nil {
 		res.Elapsed = time.Since(start)
 		return res, fmt.Errorf("rewrite llm: %w", err)
 	}
+	// Validate the complete response before sanitizing so taking its first
+	// line cannot disguise a runaway response from a noncompliant endpoint.
+	if err := validateRewrite(nl, rewritten); err != nil {
+		res.Elapsed = time.Since(start)
+		return res, fmt.Errorf("invalid rewrite: %w", err)
+	}
 	rewritten = sanitizeRewrite(rewritten)
-	if rewritten == "" || rewritten == nl {
-		// Degenerate rewrite — LLM returned commentary only, or echoed the
-		// input verbatim. Cache the no-op only if caching is on, so we
-		// don't re-call on the next save=1 submit.
+	if err := validateRewrite(nl, rewritten); err != nil {
+		res.Elapsed = time.Since(start)
+		return res, fmt.Errorf("invalid rewrite: %w", err)
+	}
+	if rewritten == nl {
+		// An unchanged valid query may be cached, but rejected output never is.
 		if useCache {
 			_ = storeRewriteCache(ctx, db, canonical, model, nl)
 		}
@@ -96,6 +112,47 @@ func RewriteQuery(ctx context.Context, db *sql.DB, nl, model string, useCache bo
 	}
 	res.Elapsed = time.Since(start)
 	return res, nil
+}
+
+// validateRewrite bounds generated output without assuming English. Detect
+// repetition both between words and inside unsegmented text (e.g. 飞机飞机…).
+func validateRewrite(original, rewritten string) error {
+	runes := []rune(rewritten)
+	limit := min(512, max(128, utf8.RuneCountInString(original)*8))
+	if len(runes) > limit {
+		return fmt.Errorf("output exceeds %d characters", limit)
+	}
+	words := strings.FieldsFunc(strings.ToLower(rewritten), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	if len(words) == 0 {
+		return errors.New("output contains no search terms")
+	}
+	counts := map[string]int{}
+	for _, word := range words {
+		counts[word]++
+		if word != "or" && counts[word] >= 4 && counts[word]*2 >= len(words) {
+			return errors.New("output repeats the same search term")
+		}
+	}
+	for width := 1; width <= 32; width++ {
+		for start := 0; start+width*6 <= len(runes); start++ {
+			repeated := true
+			for i := width; i < width*6; i++ {
+				if runes[start+i] != runes[start+i%width] {
+					repeated = false
+					break
+				}
+			}
+			if repeated && strings.TrimSpace(string(runes[start:start+width])) != "" {
+				return errors.New("output contains a repeated character sequence")
+			}
+		}
+	}
+	if strings.Count(rewritten, `"`)%2 != 0 {
+		return errors.New("output contains an unfinished quoted phrase")
+	}
+	return nil
 }
 
 // looksBoolean returns true when the query already contains websearch

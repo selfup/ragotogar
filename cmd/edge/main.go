@@ -129,10 +129,17 @@ func loadManifest(dir string) (*Manifest, error) {
 // only the env value rather than probing /v1/models is v1's pragmatic
 // posture: drift-detect at startup, not per-query.
 func checkEmbedderDrift(mf *Manifest) error {
+	dim, err := library.EmbeddingDimensions()
+	if err != nil {
+		return err
+	}
+	if mf.Dim != dim {
+		return fmt.Errorf("artifact dimension=%d, runtime embedding dimension=%d; use the model and EMBED_DIM matching these artifacts, or rebuild them", mf.Dim, dim)
+	}
 	want := library.EmbedModel()
 	for lane, entry := range mf.Lanes {
 		if entry.EmbedderVersion != want {
-			return fmt.Errorf("lane %q claims embedder_version=%q, runtime EMBED_MODEL=%q — re-run cmd/edge_build with the runtime model, or set EMBED_MODEL to match", lane, entry.EmbedderVersion, want)
+			return fmt.Errorf("lane %q claims embedder_version=%q, runtime EMBED_MODEL=%q — set EMBED_MODEL to match, or fully reindex the library with the new model and rebuild the artifacts", lane, entry.EmbedderVersion, want)
 		}
 	}
 	return nil

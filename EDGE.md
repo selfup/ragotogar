@@ -20,6 +20,12 @@ The result is a binary that can search a sealed corpus offline, with
 artifacts that travel as files. **No replacement of pg-runtime search.**
 The two paths coexist.
 
+After upgrading a library to v15 query isolation, rerun `cmd/edge_build` after
+the description embeddings have been reindexed, then restart `cmd/edge`.
+Existing sealed artifacts still contain the old description vectors and FTS
+postings, including generated-query text. See README's v15 upgrade commands;
+the database migration cannot repair artifacts already written to disk.
+
 ## Roles (kept separate)
 
 1. **System of record (pg, unchanged).** Ingestion, vision pipeline output,
@@ -52,7 +58,7 @@ query → server-side encode → vector
 | FST library | `github.com/blevesearch/vellum` | Pure Go, no cgo, mmap-friendly, immutable after `Close()`, `uint64` values fit "offset into postings.bin" |
 | ANN structure | Flat brute-force int8 cosine, per lane | 25,113 vectors × 2560-dim int8 = ~61 MB total. ~12-30 ms scan on M-series. No build complexity, deterministic recall. **Revisit at ~250K vectors.** |
 | Vector quantization | int8 (L2-normalized → scaled by 127 → rounded) | ~5× smaller than fp16, ~1-3% recall cost, fits `go:embed`, dot product approximates cosine after scaling |
-| Vector dimension | halfvec(2560) → int8(2560) | Native Qwen3-Embedding-4B output. No Matryoshka truncation. |
+| Vector dimension | halfvec(dim) → int8(dim) | Read from the three database column types, including empty stores; written into `manifest.dim`. Supports 1024-dimensional Qwen3-Embedding-0.6B and 2560-dimensional 4B. The runtime checks its configured embedding dimension against the manifest. |
 | Vector lanes | Three separate blobs (descriptions / metadata / queries) | Mirrors v12 toggle/merge semantics in `cmd/web`. Collapsing would be a search-surface redesign, out of brief scope. |
 | Term universe (FST) | `descriptions.fts ‖ exif.fts` only | Mirrors current `cmd/web` FTS surface exactly. Classifier enums and query phrasings are real new ground; deferred. |
 | Payload location | Separate `payload.bin` blob | Avoids polluting manifest startup parse with ~700 KB of base64; gives a versioning seam for payload schema. |
@@ -60,7 +66,7 @@ query → server-side encode → vector
 | Payload presence guarantee | One record per compact-id, always | LEFT JOIN against `descriptions` and `classified` so unclassified / undescribed photos still get a record. `caption` and individual `tags[i]` may be empty strings. **Edge runtime can rely on `payload[compact_id]` always being readable** — no gap between FST lookup (which returns compact ids regardless) and payload lookup. |
 | Query-side embedding | Server encodes; edge does ANN only | Edge stays small; server is responsible for embedder version. |
 | `embedder_version` | **Per lane**, in manifest | Each store could in principle use a different embedder; per-lane field surfaces silent drift on first query when server-encode reports a mismatch. |
-| `embedder_version` source at build time | `--embed-model` flag (operator-asserted) | Probing the live endpoint at build time would assert current state equals build-time state — exactly the silent-drift mode the field exists to catch. Operator trust is the right tool. |
+| `embedder_version` source at build time | `--embed-model` flag, checked against `embedding_config` | The database records the model used to index all three stores. Builds reject unknown identities and mismatched labels before writing artifacts, without probing the live endpoint. Changing models requires a full reindex before rebuilding. |
 | Toggle state location | Runtime API, not artifact | Artifact ships all three lanes; edge honors per-query toggles like `cmd/web`. |
 | Hydration | pg connection required at runtime; loud failure on unreachable | Brief: don't silently degrade to no-thumbnails. |
 
@@ -69,11 +75,11 @@ query → server-side encode → vector
 ```
 terms.fst                          vellum: lexeme → uint64 offset into postings.bin
 postings.bin                       per-term varint-packed compact-id deltas
-vectors.descriptions.bin           flat int8 [N_d × 2560]
+vectors.descriptions.bin           flat int8 [N_d × dim]
 vectors.descriptions.rowmap.bin    uint32 LE × N_d, row → compact-id
-vectors.metadata.bin               flat int8 [N_m × 2560]
+vectors.metadata.bin               flat int8 [N_m × dim]
 vectors.metadata.rowmap.bin        uint32 LE × N_m, row → compact-id
-vectors.queries.bin                flat int8 [N_q × 2560]
+vectors.queries.bin                flat int8 [N_q × dim]
 vectors.queries.rowmap.bin         uint32 LE × N_q, row → compact-id
 payload.bin                        fixed-offset records, one per compact-id
 manifest.json                      schema_version, corpus_hash, built_at, dim,
@@ -129,7 +135,7 @@ Outputs the seven artifacts to a directory.
 Flags (v1):
 - `-dsn` — pg DSN (overrides `LIBRARY_DSN`)
 - `-out` — output directory (created if missing)
-- `-embed-model` — operator-asserted embedder version recorded per lane
+- `-embed-model` — must match the model recorded in the database; recorded per lane
 
 Pipeline:
 1. **Read photos.** `SELECT name FROM photos ORDER BY name` —

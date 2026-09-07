@@ -13,8 +13,8 @@ package main
 // cutover landed those as no-ops). Requires the `vector` extension —
 // caller bootstraps the database via:
 //
-//   createdb ragotogar
-//   psql ragotogar -c 'CREATE EXTENSION vector'
+//	createdb ragotogar
+//	psql ragotogar -c 'CREATE EXTENSION vector'
 //
 // v4 adds descriptions.vantage and descriptions.ground_truth — prose fields
 // describing the camera POV and visible counts. Both feed the generated fts
@@ -39,6 +39,10 @@ package main
 // v14 drops the legacy chunks table; the three v12 stores are now the
 // only vector lane. See ARCHITECTURE.md "v12 design decisions" for the
 // locked-in choices behind these migrations.
+//
+// v15 cleans Queries sections out of full_description, preserving the combined
+// response in inference.raw_response. FTS recomputes from the cleaned prose;
+// affected description embeddings and verification verdicts are invalidated.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
@@ -119,7 +123,7 @@ CREATE TABLE IF NOT EXISTS descriptions (
     ground_truth      TEXT,
     condition         TEXT,
     mood              TEXT,
-    full_description  TEXT,
+    full_description  TEXT, -- scene prose only; generated Queries sections removed
     fts               tsvector GENERATED ALWAYS AS (
                         to_tsvector('english',
                           coalesce(subject,'')          || ' ' ||
@@ -145,7 +149,7 @@ CREATE TABLE IF NOT EXISTS thumbnails (
 
 CREATE TABLE IF NOT EXISTS inference (
     photo_id     TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
-    raw_response TEXT,
+    raw_response TEXT, -- complete vision output, including generated Queries
     model        TEXT,
     preview_ms   INTEGER,
     inference_ms INTEGER,

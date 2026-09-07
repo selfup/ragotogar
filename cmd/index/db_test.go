@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -8,15 +9,26 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"ragotogar/library"
 	"ragotogar/library/testdb"
 )
+
+// Exercise the production batch path for the single-photo transaction tests.
+func indexPhotoStore(ctx context.Context, db *sql.DB, photo *library.Photo, store documentStore) (int, error) {
+	results, err := indexStoreBatch(ctx, db, store, []*library.Photo{photo}, defaultBatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return results[0].added, results[0].err
+}
 
 // indexTestSchema is the minimum schema cmd/index's helpers touch:
 // photos / exif / descriptions / classified / query_generations (read by
 // LoadPhoto) + the three v12 vector stores (write target). FTS columns
 // are omitted from descriptions/exif here because cmd/index never reads
 // them — only cmd/web's FTS arm does.
-const indexTestSchema = `
+const indexTestSchema = library.EmbeddingConfigSchema + `
+INSERT INTO embedding_config (model, dimensions) VALUES ('text-embedding-qwen3-embedding-4b', 2560);
 CREATE TABLE photos (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL UNIQUE,

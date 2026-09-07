@@ -94,6 +94,18 @@ func (s *Searcher) SearchV2(ctx context.Context, query string, opts SearchOption
 	if !opts.UseDescriptions && !opts.UseMetadata && !opts.UseQueries {
 		return nil, nil
 	}
+	configLock, err := LockEmbeddingConfig(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	defer configLock.Rollback()
+	dim, err := EmbeddingDimensions()
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckEmbeddingConfig(ctx, s.db, EmbedModel(), dim); err != nil {
+		return nil, err
+	}
 
 	embedInput := opts.VectorQuery
 	if embedInput == "" {

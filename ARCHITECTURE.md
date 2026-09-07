@@ -15,7 +15,7 @@ This is a living document — update when a phase ships or a decision changes.
 
 ## Current state (snapshot)
 
-Four-stage Go pipeline against a single Postgres database with pgvector. The vector lane splits across three parallel halfvec(2560) stores; the search path adds three optional LLM steps:
+Four-stage Go pipeline against a single Postgres database with pgvector. The vector lane splits across three parallel halfvec(dim) stores; the search path adds three optional LLM steps:
 
 ```
 photos on disk
@@ -54,11 +54,13 @@ Six search modes: `vector`, `vector+verify`, `FTS+vector`, `FTS+vector+verify`, 
 
 All `cmd/*` binaries plus the `library/` package run against one DSN (`LIBRARY_DSN`, default `postgres:///ragotogar`). Per-stage HTTP endpoints (`VISION_ENDPOINT`, `TEXT_ENDPOINT`, `EMBED_ENDPOINT`) let each pillar hit a different LLM provider; `LM_STUDIO_BASE` is the legacy shared fallback. All LLM calls go through `library/http.go`'s retry+backoff layer (5 attempts, exponential jitter, honors `Retry-After`, ctx-cancel aware). Prompt templates live in `prompts/` and are embedded into binaries via `//go:embed` so there's a single source of truth.
 
-Schema is Go-const + idempotent migrations (`migrate()` / `migrateV4..V13()`) applied at process start by `cmd/describe` (the schema authority). Other binaries open the DB and assume tables exist. Three LLM-result caches all use the same shape (canonical query as PK component, model in PK, freshness via `*_at > source_at`):
+Schema is Go-const + idempotent migrations (`migrate()` through `migrateV15()`) applied at process start by `cmd/describe` (the schema authority). New stores take their dimension from `EMBED_MODEL` / `EMBED_DIM`. `cmd/index` may resize existing vector columns only on an explicit full reindex; all source-schema migrations remain in `cmd/describe`. Other readers assume the tables exist. Three LLM-result caches all use the same shape (canonical query as PK component, model in PK, freshness via `*_at > source_at`):
 
 - `verify_cache(query, photo_id, verify_model, …)` — prose verify verdicts, freshness vs `inference.described_at`. Always-on.
 - `query_rewrite_cache(nl_query, rewrite_model, …)` — auto-mode NL→boolean rewrites, no per-photo dependency. Opt-in via `?save=1` so iterating to a good rewrite isn't sticky.
 - `classify_filter_cache(nl_query, photo_id, classify_model, …)` — post-retrieval drop verdicts, freshness vs `classified.classified_at`. Opt-in via `?save_class=1`.
+
+Auto rewrites use a dedicated 256-token completion budget. Truncation and malformed output (oversized text, repeated words or character sequences, empty terms, unfinished quotes) return the original query with an error for logging. The same validation rejects and evicts old bad cache entries; invalid live output is never cached. Limits count Unicode characters, so valid multilingual rewrites remain supported. General chat completions retain their existing token settings.
 
 FTS uses `websearch_to_tsquery` so the search box accepts boolean operators (phrase binding, OR, leading-`-` negation). Negation reaches both arms: FTS natively, vector via `library.StripNegation` on the embed input plus a post-filter `library.ExtractNegation` against `descriptions.fts || exif.fts`.
 
@@ -97,9 +99,9 @@ The remaining phases address each.
               │  • descriptions (prose + mood + generated tsvector)
               │  • classified (typed enums from cmd/classify)
               │  • query_generations (LLM phrasings JSONB, source of truth)
-              │  • photo_descriptions  (halfvec(2560) HNSW — scene + classifier)
-              │  • photo_metadata      (halfvec(2560) HNSW — EXIF tokens, 1 row/photo)
-              │  • photo_queries       (halfvec(2560) HNSW — per phrasing)
+              │  • photo_descriptions  (halfvec(dim) HNSW — scene + classifier)
+              │  • photo_metadata      (halfvec(dim) HNSW — EXIF tokens, 1 row/photo)
+              │  • photo_queries       (halfvec(dim) HNSW — per phrasing)
               │  • verify_cache             ← Now (always-on)
               │  • query_rewrite_cache      ← Now (opt-in)
               │  • classify_filter_cache    ← Now (opt-in)
@@ -126,7 +128,7 @@ The remaining phases address each.
 
 | Pillar | What it solves | Implementation | When |
 |--------|----------------|----------------|------|
-| 0. Vector-lane signal separation | "Where did this match come from?" — v1's single concatenated `BuildDocument` blob mixed scene prose + EXIF + classifier verdicts into one embedding, so weird matches were unattributable. v12 splits the lane three ways so each signal type carries its own embedding and can be toggled independently | `photo_descriptions` / `photo_metadata` / `photo_queries` halfvec(2560) HNSW stores. `cmd/index` populates each independently with per-store skip-if-exists keyed `(photo_id, schema_version)`. `cmd/search` / `cmd/web` expose `-use-descriptions / -use-metadata / -use-queries` toggles + `-merge-strategy=union/intersect/weighted`. Verifier text composition mirrors the enable toggles (queries always excluded — verifier never sees its own training-target text). See "v12 design decisions" below for the locked-in choices behind this pillar | Now |
+| 0. Vector-lane signal separation | "Where did this match come from?" — v1's single concatenated `BuildDocument` blob mixed scene prose + EXIF + classifier verdicts into one embedding, so weird matches were unattributable. v12 splits the lane three ways so each signal type carries its own embedding and can be toggled independently | `photo_descriptions` / `photo_metadata` / `photo_queries` halfvec(dim) HNSW stores. `cmd/index` populates each independently with per-store skip-if-exists keyed `(photo_id, schema_version)`. `cmd/search` / `cmd/web` expose `-use-descriptions / -use-metadata / -use-queries` toggles + `-merge-strategy=union/intersect/weighted`. Verifier text composition mirrors the enable toggles (queries always excluded — verifier never sees its own training-target text). See "v12 design decisions" below for the locked-in choices behind this pillar | Now |
 | 1. Bounded-complexity vector indexes | Recall stability + per-shard re-index cost | Per-camera schemas keep each HNSW ~3-10K rows; cross-camera search via `UNION ALL` per store (compounds with Pillar 0) | Phase 5 |
 | 2. Incremental re-indexing | Wall-clock cost of adding photos | `cmd/index` skip-if-exists by default per store; `-reindex=descriptions,metadata,queries` accepts subset list (replaces v11's global `-reindex` bool) | Now (per-photo, per-store); Phase 5 (per-shard) |
 | 3. Forced parallel workloads | Throughput before LLM is involved | `library.VerifyConcurrency = 8`; `UNION ALL` across shards compounds the parallelism; `cmd/describe` skip-exists pass also fans out across `PREVIEW_WORKERS` so all-skip runs scale linearly with worker count instead of sequentially through `exiftool` | Now (verify, prep); Phase 5 (shards) |
@@ -145,17 +147,31 @@ These need to be pinned down before each relevant phase. Flagged with the phase 
 
 ### v12 design decisions (Pillar 0)
 
-The three-store split shipped in migrations v12 (tables) + v13 (`descriptions.mood` column). The locked choices that future store additions or prompt edits should respect:
+The three-store split shipped in migrations v12 (tables) + v13 (`descriptions.mood` column). v15 enforces query isolation: the complete combined vision response lives in `inference.raw_response`, while `descriptions.full_description` contains scene prose with `Queries` sections removed. Field parsing and query removal share a section-header parser. `BuildDescriptionDocument` also strips query sections from legacy inputs, protecting both embeddings and verifier text before migration.
+
+For existing libraries, v15 preserves the raw response and cleans affected descriptions in one transaction, which recomputes their generated FTS vectors. It invalidates those photos' description embeddings and verifier cache entries. Metadata/query embeddings and raw query-generation records remain intact during this migration. An incremental index run fills missing descriptions when model identity is already recorded; older libraries without recorded identity need one full reindex as described below. Stop pipeline processes for the migration/reindex and rebuild any sealed edge artifacts afterward. See README's upgrade commands. This is a repair of the three-store boundary, with no roadmap phase change.
+
+Incremental indexing queues missing query embeddings only when source phrasings exist in `query_generations`. Photos with no generated queries can finish their available stores without being revisited solely for the empty query store on every restart. Source availability is checked on each run, so newly generated phrasings are picked up automatically. Progress reports rows added during that invocation.
+
+The indexer batches embedding requests across photos with `-batch-size=10` by default. Each worker loads a bounded window of up to that many photos, gathers each store's inputs independently, and sends at most 10 separate texts per request (or the configured limit). Each description chunk, metadata document, and generated phrasing is one input; a photo's chunks can span requests. Partial requests flush at each store/window boundary. `-workers` (default 1) limits concurrent batch workers. Response indexes map vectors back to their original inputs even when a provider returns them out of order. Database replacements remain per-photo/per-store transactions, committed only after all that photo/store's embeddings succeed; a failed request leaves affected photo/store rows untouched.
+
+Embedding identity and dimensions are per-library configuration. `embedding_config` records the exact model ID and dimension shared by all three stores. Describe/index startup may create this derived-data table, but only the indexer writes its record; schema creation never guesses the model of existing vectors. `cmd/index` inspects this record and all three vector column types before scheduling work. A model change (including equal dimensions), dimension change, or populated stores without identity requires `-reindex=descriptions,metadata,queries`. After a successful embedding probe, one transaction clears the derived vectors and updates identity, resizing columns and HNSW indexes only if needed. Probe failures preserve the old index; transaction failures roll back vectors and identity together. Empty stores without identity can initialize incrementally. Subsequent runs resume with the recorded configuration.
+
+An advisory lock held until workers stop permits one index process per database, preventing concurrent indexers from mixing models; `-workers` controls internal batch concurrency. Search checks the stored model/dimension before embedding a query. Edge builds check their requested model against the same record before writing artifacts, and derive the manifest dimension from database columns. Server dimension mismatches abort batch workers immediately. Stop search/index processes for model changes and rebuild/restart existing edge artifacts afterward. Identity compares exact model IDs, so aliases must remain consistent; replacing weights behind an unchanged ID is not detectable and requires an explicit full rebuild.
+
+Searches and edge builds hold a shared configuration lock while reading vectors. A model-switch transaction takes the exclusive form of that lock, so it waits for existing readers and new readers see the committed identity. Matching incremental indexing does not need the exclusive configuration lock and can continue during reads.
+
+The locked choices that future store additions or prompt edits should respect:
 
 | Decision | Resolution | Why |
 |----------|------------|-----|
-| Embedding dimension | `halfvec(2560)` | Native Qwen3-Embedding-4B output. No Matryoshka truncation — full dimension space and HNSW-viable (`vector` type's HNSW caps at 2000 dims, `halfvec` at 4000). |
+| Embedding dimension | `halfvec(dim)`: 1024 for Qwen3-Embedding-0.6B IDs, otherwise 2560 by default; `EMBED_DIM` can override | Indexing and query embedding share dimension validation. The override specifies expected output, with no padding or truncation. An explicit full reindex can transactionally resize all three derived stores after a successful model probe; source data stays intact. HNSW remains viable up to 4000 halfvec dimensions. |
 | `photo_metadata` text format | Tokens, not natural-language sentence | Closest to the EXIF emit shape of v1's `BuildDocument`; preserves token-exact embedder signal for `X100VI`, `f/2.8`, etc. The FTS arm via `exif.fts` already catches literal-token queries; the metadata-store embedding is the dense-vector counterpart for prose-shaped queries (`"shot at fast shutter"`). |
 | Verifier input | Mirrors retrieval toggles | If `UseMetadata` is on at search time, the verifier sees `BuildDescriptionDocument + BuildMetadataDocument`; otherwise it sees descriptions only. Queries are *always* excluded — verifier must never see its own training-target text. One knob instead of two parallel ones. |
 | Query-gen pass timing | Combined single vision call | The describer's structured output emits `Subject` / `Setting` / `Light` / `Colors` / **`Mood`** / `Composition` / `Vantage` / `GroundTruth` / `Condition` / **`Queries[]`** in one request. No separate `cmd/queries` binary; backfill = `cmd/describe -force`. Risk to monitor: longer structured output amplifies truncation/malform under high-concurrency providers (OpenRouter); parser must log explicit malformed responses, never write empty/broken JSON silently. |
 | Query-gen output storage | `query_generations` DB table (JSONB) | No `photos/queries/*.json` sidecars — contradicts the existing single-DB-as-source-of-truth posture. The table holds raw phrasings + `prompt_hash` + `model`; `photo_queries` is the embedded form derived from it. |
-| Per-store `schema_version` semantics | Stamped per-row, starts at 2 | Lets a prompt change in one stage (e.g. re-running query gen against a new model) bump that store's version without forcing re-embed of the others. Global migration counter (`schema_version` table) is independent — runs v4..v14. |
-| FTS arm | Unchanged | `descriptions.fts ‖ exif.fts` stays where it is; only the *vector* lane splits. `descriptions.fts` includes `mood` per the v13 fts rebuild. |
+| Per-store `schema_version` semantics | Stamped per-row, starts at 2 | Lets a prompt change in one stage (e.g. re-running query gen against a new model) bump that store's version without forcing re-embed of the others. Global migration counter (`schema_version` table) is independent — runs v4..v15. v15 selectively deletes contaminated description rows so ordinary incremental indexing rebuilds them without invalidating the other stores. |
+| FTS arm | Scene prose + EXIF | `descriptions.fts ‖ exif.fts` retains its query and ranking semantics. `descriptions.fts` includes `mood` per v13; v15 removes generated-query text that had leaked through the combined raw response. |
 
 ### A. Stable photo identity (Phase 6)
 

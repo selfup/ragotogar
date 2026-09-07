@@ -12,6 +12,9 @@ import (
 
 	"github.com/blevesearch/vellum"
 	"github.com/pgvector/pgvector-go"
+
+	"ragotogar/library"
+	"ragotogar/library/testdb"
 )
 
 // TestRoundTrip_FullBuild exercises the entire cmd/edge_build pipeline
@@ -34,7 +37,22 @@ import (
 //   - cmd/edge's openArtifacts / mmap loader (cmd/edge tests cover that)
 //   - The HTTP search handler (no embed endpoint mocking here)
 func TestRoundTrip_FullBuild(t *testing.T) {
-	db := newTempDB(t)
+	for _, dim := range []int{1024, 2560} {
+		t.Run(fmt.Sprint(dim), func(t *testing.T) {
+			testRoundTripFullBuild(t, dim)
+		})
+	}
+}
+
+func testRoundTripFullBuild(t *testing.T, dim int) {
+	schema := strings.ReplaceAll(testSchemaSQL, "halfvec(2560)", fmt.Sprintf("halfvec(%d)", dim))
+	db := testdb.New(t, "edge_roundtrip", testdb.SchemaSQL(schema))
+	if _, err := db.Exec(library.EmbeddingConfigSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO embedding_config (model, dimensions) VALUES ('test-embed-model', $1)`, dim); err != nil {
+		t.Fatal(err)
+	}
 
 	// Seed three photos. Each gets a description + classifier row + one
 	// embedding row in each of the three vector lanes.
@@ -77,7 +95,7 @@ func TestRoundTrip_FullBuild(t *testing.T) {
 		// Distinct embedding per photo so the vector lanes have
 		// determinable byte content (different magnitudes encode to
 		// different int8 bytes after L2-normalization).
-		emb := make([]float32, 2560)
+		emb := make([]float32, dim)
 		for j := range emb {
 			emb[j] = float32(j+1+i) * 0.01
 		}
@@ -131,8 +149,8 @@ func TestRoundTrip_FullBuild(t *testing.T) {
 	if m.SchemaVersion != manifestSchemaVersion {
 		t.Errorf("manifest.SchemaVersion = %d, want %d", m.SchemaVersion, manifestSchemaVersion)
 	}
-	if m.Dim != expectedDim {
-		t.Errorf("manifest.Dim = %d, want %d", m.Dim, expectedDim)
+	if m.Dim != dim {
+		t.Errorf("manifest.Dim = %d, want %d", m.Dim, dim)
 	}
 	if m.Quantization != "int8" {
 		t.Errorf("manifest.Quantization = %q, want %q", m.Quantization, "int8")
@@ -194,7 +212,7 @@ func TestRoundTrip_FullBuild(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat %s: %v", mapPath, err)
 		}
-		expectedVec := int64(len(photos)) * int64(expectedDim)
+		expectedVec := int64(len(photos)) * int64(dim)
 		if vfi.Size() != expectedVec {
 			t.Errorf("%s size = %d, want %d (rows × dim)", vecPath, vfi.Size(), expectedVec)
 		}
@@ -262,6 +280,12 @@ func TestRoundTrip_FullBuild(t *testing.T) {
 // ordering bug or a wall-clock leak) sneaks into the hash input.
 func TestRoundTrip_ManifestCorpusHashIsDeterministic(t *testing.T) {
 	db := newTempDB(t)
+	if _, err := db.Exec(library.EmbeddingConfigSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO embedding_config (model, dimensions) VALUES ('test-embed-model', 2560)`); err != nil {
+		t.Fatal(err)
+	}
 
 	// Minimal seed — corpus_hash depends on names + max(described_at) +
 	// max(classified_at), and is sensitive to all three.

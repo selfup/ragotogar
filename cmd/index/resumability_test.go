@@ -3,10 +3,50 @@ package main
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"ragotogar/library"
 )
+
+func TestIndexIsolatesGeneratedQueriesFromDescriptionChunks(t *testing.T) {
+	db := newTempDB(t)
+	embedURL, _ := stubEmbedServer(t)
+	t.Setenv("EMBED_ENDPOINT", embedURL)
+	queries := []string{"zeppelins at sunset", "submarines at dawn"}
+	seedPhotoForIndex(t, db, "p1", queries)
+	// Load the legacy combined response so the indexer must enforce the
+	// boundary even when the database has not been migrated yet.
+	if _, err := db.Exec(`UPDATE descriptions SET full_description = $1 WHERE photo_id = 'p1'`,
+		"Subject: cedar trees\nQueries:\n"+strings.Join(queries, "\n")); err != nil {
+		t.Fatal(err)
+	}
+	photo, err := library.LoadPhoto(db, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := indexPhotoStore(context.Background(), db, photo, descriptionsStore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := indexPhotoStore(context.Background(), db, photo, queriesStore); err != nil {
+		t.Fatal(err)
+	}
+	var descriptionChunks, queryChunks string
+	if err := db.QueryRow(`SELECT string_agg(chunk_text, E'\n' ORDER BY chunk_index)
+		FROM photo_descriptions WHERE photo_id = 'p1'`).Scan(&descriptionChunks); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(descriptionChunks, "cedar trees") || strings.Contains(descriptionChunks, "zeppelins") || strings.Contains(descriptionChunks, "submarines") {
+		t.Errorf("description chunks contaminated: %q", descriptionChunks)
+	}
+	if err := db.QueryRow(`SELECT string_agg(query_text, E'\n' ORDER BY query_index)
+		FROM photo_queries WHERE photo_id = 'p1'`).Scan(&queryChunks); err != nil {
+		t.Fatal(err)
+	}
+	if queryChunks != strings.Join(queries, "\n") {
+		t.Errorf("generated-query chunks changed: %q", queryChunks)
+	}
+}
 
 // TestIndexDescriptions_HappyPath writes one chunk row per chunk produced
 // by library.Chunk for the seeded description. Counts the per-store row
@@ -23,7 +63,7 @@ func TestIndexDescriptions_HappyPath(t *testing.T) {
 		t.Fatalf("LoadPhoto: %v", err)
 	}
 
-	added, err := indexDescriptions(context.Background(), db, photo)
+	added, err := indexPhotoStore(context.Background(), db, photo, descriptionsStore)
 	if err != nil {
 		t.Fatalf("indexDescriptions: %v", err)
 	}
@@ -50,11 +90,11 @@ func TestIndexDescriptions_IdempotentReplaceOnRerun(t *testing.T) {
 	seedPhotoForIndex(t, db, "p1", nil)
 	photo, _ := library.LoadPhoto(db, "p1")
 
-	first, err := indexDescriptions(context.Background(), db, photo)
+	first, err := indexPhotoStore(context.Background(), db, photo, descriptionsStore)
 	if err != nil {
 		t.Fatalf("first indexDescriptions: %v", err)
 	}
-	second, err := indexDescriptions(context.Background(), db, photo)
+	second, err := indexPhotoStore(context.Background(), db, photo, descriptionsStore)
 	if err != nil {
 		t.Fatalf("second indexDescriptions: %v", err)
 	}
@@ -76,7 +116,7 @@ func TestIndexMetadata_WritesOneRow(t *testing.T) {
 	seedPhotoForIndex(t, db, "p1", nil)
 	photo, _ := library.LoadPhoto(db, "p1")
 
-	added, err := indexMetadata(context.Background(), db, photo)
+	added, err := indexPhotoStore(context.Background(), db, photo, metadataStore)
 	if err != nil {
 		t.Fatalf("indexMetadata: %v", err)
 	}
@@ -99,7 +139,7 @@ func TestIndexQueries_HappyPath(t *testing.T) {
 	seedPhotoForIndex(t, db, "p1", queries)
 	photo, _ := library.LoadPhoto(db, "p1")
 
-	added, err := indexQueries(context.Background(), db, photo)
+	added, err := indexPhotoStore(context.Background(), db, photo, queriesStore)
 	if err != nil {
 		t.Fatalf("indexQueries: %v", err)
 	}
@@ -122,7 +162,7 @@ func TestIndexQueries_NoQueriesReturnsZero(t *testing.T) {
 	seedPhotoForIndex(t, db, "p1", nil) // no queries seeded
 	photo, _ := library.LoadPhoto(db, "p1")
 
-	added, err := indexQueries(context.Background(), db, photo)
+	added, err := indexPhotoStore(context.Background(), db, photo, queriesStore)
 	if err != nil {
 		t.Fatalf("indexQueries: %v", err)
 	}
@@ -148,7 +188,7 @@ func TestPartialFailure_DescriptionsSurviveWhenMetadataFails(t *testing.T) {
 	photo, _ := library.LoadPhoto(db, "p1")
 
 	// Step 1: descriptions succeeds.
-	descAdded, err := indexDescriptions(context.Background(), db, photo)
+	descAdded, err := indexPhotoStore(context.Background(), db, photo, descriptionsStore)
 	if err != nil {
 		t.Fatalf("indexDescriptions: %v", err)
 	}
@@ -163,7 +203,7 @@ func TestPartialFailure_DescriptionsSurviveWhenMetadataFails(t *testing.T) {
 	badURL, _ := stubEmbedServerAlwaysFails(t)
 	t.Setenv("EMBED_ENDPOINT", badURL)
 
-	_, err = indexMetadata(context.Background(), db, photo)
+	_, err = indexPhotoStore(context.Background(), db, photo, metadataStore)
 	if err == nil {
 		t.Fatalf("indexMetadata should have failed under broken embed endpoint")
 	}
@@ -179,7 +219,7 @@ func TestPartialFailure_DescriptionsSurviveWhenMetadataFails(t *testing.T) {
 
 // TestPartialFailure_MetadataFailureRollsBackOwnTransaction: a failing
 // metadata insert (synthetic constraint violation) must NOT leave a
-// partial photo_metadata row. The defer tx.Rollback() in indexMetadata is
+// partial photo_metadata row. The defer tx.Rollback() in writeMetadata is
 // what enforces this. We can't reach a SQL-side failure without invasive
 // hooks, so this test uses the embed-fail proxy from above and confirms
 // no rows were written.
@@ -192,7 +232,7 @@ func TestPartialFailure_MetadataFailureLeavesNoRows(t *testing.T) {
 	seedPhotoForIndex(t, db, "p1", nil)
 	photo, _ := library.LoadPhoto(db, "p1")
 
-	_, err := indexMetadata(context.Background(), db, photo)
+	_, err := indexPhotoStore(context.Background(), db, photo, metadataStore)
 	if err == nil {
 		t.Fatal("indexMetadata should have failed under broken embed")
 	}
@@ -231,7 +271,7 @@ func TestLoadExistingV2_ReturnsExistingAtSchemaVersion(t *testing.T) {
 
 	seedPhotoForIndex(t, db, "indexed", nil)
 	photo, _ := library.LoadPhoto(db, "indexed")
-	if _, err := indexDescriptions(context.Background(), db, photo); err != nil {
+	if _, err := indexPhotoStore(context.Background(), db, photo, descriptionsStore); err != nil {
 		t.Fatalf("indexDescriptions: %v", err)
 	}
 
@@ -263,7 +303,7 @@ func TestLoadExistingV2_ReindexBypassesLookup(t *testing.T) {
 
 	seedPhotoForIndex(t, db, "p1", nil)
 	photo, _ := library.LoadPhoto(db, "p1")
-	if _, err := indexDescriptions(context.Background(), db, photo); err != nil {
+	if _, err := indexPhotoStore(context.Background(), db, photo, descriptionsStore); err != nil {
 		t.Fatalf("indexDescriptions: %v", err)
 	}
 
@@ -294,7 +334,7 @@ func TestIndexMetadata_EmptyTextSkips(t *testing.T) {
 		t.Fatalf("LoadPhoto: %v", err)
 	}
 
-	added, err := indexMetadata(context.Background(), db, photo)
+	added, err := indexPhotoStore(context.Background(), db, photo, metadataStore)
 	if err != nil {
 		t.Fatalf("indexMetadata: %v", err)
 	}

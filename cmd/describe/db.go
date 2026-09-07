@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -12,7 +13,7 @@ import (
 	"ragotogar/library"
 )
 
-const schemaVersion = 14 // v14: drops the legacy chunks table. v12 three-store split (photo_descriptions / photo_metadata / photo_queries) is the only vector lane after this migration.
+const schemaVersion = 15 // v15: isolates generated queries from scene prose and invalidates affected derived data.
 
 // openDB opens a connection to the library Postgres database, applies the
 // schema (CREATE TABLE IF NOT EXISTS — idempotent), and returns it.
@@ -36,6 +37,10 @@ func openDB(dsn string) (*sql.DB, error) {
 }
 
 func initSchema(db *sql.DB) error {
+	dim, err := library.EmbeddingDimensions()
+	if err != nil {
+		return err
+	}
 	// pgvector is required for the v12 vector stores (photo_descriptions /
 	// photo_metadata / photo_queries) — load it before any schema DDL so a
 	// fresh DB (e.g. test temp database) self-bootstraps. Trusted-extension
@@ -53,8 +58,14 @@ func initSchema(db *sql.DB) error {
 	if err := migrate(db); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
+	// New libraries use the configured model dimension. Existing vector
+	// stores are resized only by cmd/index with an explicit full -reindex.
+	configuredSchema := strings.ReplaceAll(schemaSQL, "halfvec(2560)", fmt.Sprintf("halfvec(%d)", dim))
+	if _, err := db.Exec(configuredSchema); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
+	}
+	if _, err := db.Exec(library.EmbeddingConfigSchema); err != nil {
+		return fmt.Errorf("apply embedding configuration schema: %w", err)
 	}
 	if _, err := db.Exec(
 		"INSERT INTO schema_version(version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
@@ -126,6 +137,11 @@ func migrate(db *sql.DB) error {
 	if maxVersion < 14 {
 		if err := migrateV14(db); err != nil {
 			return fmt.Errorf("v14: %w", err)
+		}
+	}
+	if maxVersion < 15 {
+		if err := migrateV15(db); err != nil {
+			return fmt.Errorf("v15: %w", err)
 		}
 	}
 	return nil
@@ -579,7 +595,7 @@ func insertPhoto(
 		nullIfEmpty(fields.GroundTruth),
 		nullIfEmpty(fields.Condition),
 		nullIfEmpty(fields.Mood),
-		nullIfEmpty(desc),
+		nullIfEmpty(library.StripGeneratedQueries(desc)),
 	); err != nil {
 		return fmt.Errorf("upsert descriptions: %w", err)
 	}
@@ -611,13 +627,14 @@ func insertPhoto(
 
 	if _, err := tx.Exec(`
 		INSERT INTO inference (photo_id, raw_response, model, preview_ms, inference_ms, described_at)
-		VALUES ($1, NULL, $2, $3, $4, now())
+		VALUES ($1, $2, $3, $4, $5, now())
 		ON CONFLICT(photo_id) DO UPDATE SET
+			raw_response = EXCLUDED.raw_response,
 			model        = EXCLUDED.model,
 			preview_ms   = EXCLUDED.preview_ms,
 			inference_ms = EXCLUDED.inference_ms,
 			described_at = now()
-	`, name, nullIfEmpty(model), previewMs, inferenceMs); err != nil {
+	`, name, nullIfEmpty(desc), nullIfEmpty(model), previewMs, inferenceMs); err != nil {
 		return fmt.Errorf("upsert inference: %w", err)
 	}
 

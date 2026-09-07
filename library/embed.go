@@ -3,19 +3,45 @@ package library
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 )
 
-// EmbedDim is the embedding dimension produced by text-embedding-qwen3-embedding-4b
-// (and what cmd/describe/schema.go declares for halfvec(N)). Changing the
-// embedding model requires re-indexing AND swapping this constant.
+// EmbedDim is the default dimension for the original Qwen3-Embedding-4B
+// schema. Runtime code uses EmbeddingDimensions to also support other models.
 const EmbedDim = 2560
 
+// ErrEmbeddingDimension is a permanent configuration mismatch. Index workers
+// must stop instead of repeating the same failed request for every photo.
+var ErrEmbeddingDimension = errors.New("embedding dimension mismatch")
+
+// EmbeddingDimensions reads EMBED_DIM when explicitly set. Qwen3-Embedding
+// 0.6B model IDs (including GGUF paths and MLX variants) default to 1024;
+// other model IDs retain the original 2560 default. Custom aliases/dimensions
+// can use EMBED_DIM. The upper bound matches pgvector's halfvec HNSW limit.
+func EmbeddingDimensions() (int, error) {
+	dim := EmbedDim
+	if strings.Contains(strings.ToLower(EmbedModel()), "qwen3-embedding-0.6b") {
+		dim = 1024
+	}
+	if raw := os.Getenv("EMBED_DIM"); raw != "" {
+		var err error
+		dim, err = strconv.Atoi(raw)
+		if err != nil {
+			return 0, fmt.Errorf("%w: EMBED_DIM must be an integer from 1 to 4000", ErrEmbeddingDimension)
+		}
+	}
+	if dim < 1 || dim > 4000 {
+		return 0, fmt.Errorf("%w: EMBED_DIM must be from 1 to 4000, got %d", ErrEmbeddingDimension, dim)
+	}
+	return dim, nil
+}
+
 // EmbedModel reads EMBED_MODEL with the text-embedding-qwen3-embedding-4b
-// default — the GGUF build of Qwen3-Embedding-4B as LM Studio exposes it.
-// LM Studio's MLX build of the same model is misclassified as an LLM and
-// won't route through /v1/embeddings, so the GGUF is required here.
+// default. The selected model must support the server's /v1/embeddings API.
 func EmbedModel() string {
 	if v := os.Getenv("EMBED_MODEL"); v != "" {
 		return v
@@ -52,6 +78,7 @@ type embedRequest struct {
 type embedResponse struct {
 	Data []struct {
 		Embedding []float32 `json:"embedding"`
+		Index     *int      `json:"index"`
 	} `json:"data"`
 	Error *struct {
 		Message string `json:"message"`
@@ -60,14 +87,18 @@ type embedResponse struct {
 
 // EmbedTexts batches an OpenAI-shaped embedding request to the configured
 // embed endpoint (EMBED_ENDPOINT → LM_STUDIO_BASE → localhost). Returns one
-// float32 slice per input, each of length EmbedDim. Empty input yields an
-// empty slice without hitting the network.
+// float32 slice per input in input order, each of the configured dimension.
+// Empty input yields an empty slice without hitting the network.
 //
 // Retries up to 5 times with exponential backoff on network errors, 429,
 // and 5xx — same policy as LLMComplete via the shared postJSONWithRetry.
 func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
+	}
+	dim, err := EmbeddingDimensions()
+	if err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(embedRequest{
 		Model:    EmbedModel(),
@@ -98,11 +129,27 @@ func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 		return nil, fmt.Errorf("embed returned %d vectors for %d inputs", len(out.Data), len(texts))
 	}
 	results := make([][]float32, len(out.Data))
+	indexed := out.Data[0].Index != nil
 	for i, d := range out.Data {
-		if len(d.Embedding) != EmbedDim {
-			return nil, fmt.Errorf("embedding %d has dim %d, want %d", i, len(d.Embedding), EmbedDim)
+		if len(d.Embedding) != dim {
+			return nil, fmt.Errorf("%w: embedding %d has dim %d, want %d for EMBED_MODEL=%q (check EMBED_MODEL and EMBED_DIM)", ErrEmbeddingDimension, i, len(d.Embedding), dim, EmbedModel())
 		}
-		results[i] = d.Embedding
+		// Providers may return batch results out of order. Honor their input
+		// indexes; retain response order for endpoints that omit every index.
+		if (d.Index != nil) != indexed {
+			return nil, fmt.Errorf("embed response mixes indexed and unindexed vectors")
+		}
+		position := i
+		if indexed {
+			position = *d.Index
+			if position < 0 || position >= len(results) {
+				return nil, fmt.Errorf("embedding %d has invalid index %d", i, position)
+			}
+		}
+		if results[position] != nil {
+			return nil, fmt.Errorf("embed response has duplicate index %d", position)
+		}
+		results[position] = d.Embedding
 	}
 	return results, nil
 }

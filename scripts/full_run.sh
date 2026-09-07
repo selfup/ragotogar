@@ -50,6 +50,7 @@ set -euo pipefail
 #   INFERENCE_WORKERS  cmd/describe vision LLM                          default 3
 #   CLASSIFY_WORKERS   cmd/classify catch-up text LLM                   default 8
 #   INDEX_WORKERS      cmd/index embed (1 for local; 8–16 for cloud)    default 1
+#   INDEX_BATCH_SIZE   cmd/index documents per embed request (max)    default 10
 #
 # Example — fan everything out for an OpenRouter run:
 #   (source openrouter.env && INFERENCE_WORKERS=16 INDEX_WORKERS=16 ./scripts/full_run.sh /path)
@@ -150,6 +151,6 @@ CLASSIFY_MODEL="${CLASSIFY_MODEL:-mistralai/ministral-3-3b}" \
 
 echo "=== index ==="
 # shellcheck disable=SC2086
-./scripts/index.sh $index_reindex -workers "${INDEX_WORKERS:-1}"
+./scripts/index.sh $index_reindex -workers "${INDEX_WORKERS:-1}" -batch-size "${INDEX_BATCH_SIZE:-10}"
 
 echo "==> all done!"

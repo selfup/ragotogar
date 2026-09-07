@@ -15,7 +15,7 @@
 #
 # Required flags:
 #   -out          output directory (created if missing)
-#   -embed-model  operator-asserted embedder version recorded per lane
+#   -embed-model  model recorded in the database; checked before building
 #                 in manifest.json. MUST match the EMBED_MODEL that
 #                 cmd/index used to populate photo_descriptions /
 #                 photo_metadata / photo_queries — cmd/edge runtime

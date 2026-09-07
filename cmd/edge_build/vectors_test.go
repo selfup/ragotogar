@@ -6,6 +6,9 @@ import (
 	"testing"
 )
 
+// Dimension of the original fixtures; production derives it from the DB.
+const expectedDim = 2560
+
 // L2-normalized cosine on raw fp32 — reference for the int8 fidelity
 // comparison.
 func cosineFloat32(a, b []float32) float64 {

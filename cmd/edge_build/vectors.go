@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
@@ -10,19 +11,17 @@ import (
 	"path/filepath"
 
 	"github.com/pgvector/pgvector-go"
+
+	"ragotogar/library"
 )
 
 // laneCounts records per-lane row counts for the manifest.
 type laneCounts struct {
+	Dim          int
 	Descriptions int
 	Metadata     int
 	Queries      int
 }
-
-// expectedDim is the locked vector dimension. halfvec(2560) → int8(2560).
-// Mismatched rows are an immediate hard error — manifest claims dim=2560
-// at runtime, drift here would surface as silent corruption.
-const expectedDim = 2560
 
 // buildVectorLanes writes three lanes of L2-normalized int8 vectors plus
 // per-lane row→compact-id sidecar files. Uniform sidecar handling across
@@ -32,14 +31,19 @@ const expectedDim = 2560
 //
 // Files written into outDir:
 //
-//	vectors.descriptions.bin      flat int8, [N_d × 2560]
+//	vectors.descriptions.bin      flat int8, [N_d × dim]
 //	vectors.descriptions.rowmap.bin   uint32 LE, length N_d
-//	vectors.metadata.bin          flat int8, [N_m × 2560]
+//	vectors.metadata.bin          flat int8, [N_m × dim]
 //	vectors.metadata.rowmap.bin   uint32 LE, length N_m
-//	vectors.queries.bin           flat int8, [N_q × 2560]
+//	vectors.queries.bin           flat int8, [N_q × dim]
 //	vectors.queries.rowmap.bin    uint32 LE, length N_q
 func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, error) {
 	var counts laneCounts
+	dim, err := library.StoredEmbeddingDimensions(context.Background(), db)
+	if err != nil {
+		return counts, err
+	}
+	counts.Dim = dim
 
 	// COLLATE "C" forces byte-wise lex on photo_id sorts so artifacts
 	// stay byte-identical across hosts with different lc_collate
@@ -48,7 +52,7 @@ func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, erro
 	// compact_id per row, but byte-stable artifacts are a contract.
 	d, err := writeLane(db, ids, outDir, "descriptions",
 		`SELECT photo_id, embedding FROM photo_descriptions
-		   ORDER BY photo_id COLLATE "C", chunk_index`)
+		   ORDER BY photo_id COLLATE "C", chunk_index`, dim)
 	if err != nil {
 		return counts, fmt.Errorf("descriptions lane: %w", err)
 	}
@@ -56,7 +60,7 @@ func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, erro
 
 	m, err := writeLane(db, ids, outDir, "metadata",
 		`SELECT photo_id, embedding FROM photo_metadata
-		   ORDER BY photo_id COLLATE "C"`)
+		   ORDER BY photo_id COLLATE "C"`, dim)
 	if err != nil {
 		return counts, fmt.Errorf("metadata lane: %w", err)
 	}
@@ -64,7 +68,7 @@ func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, erro
 
 	q, err := writeLane(db, ids, outDir, "queries",
 		`SELECT photo_id, embedding FROM photo_queries
-		   ORDER BY photo_id COLLATE "C", query_index`)
+		   ORDER BY photo_id COLLATE "C", query_index`, dim)
 	if err != nil {
 		return counts, fmt.Errorf("queries lane: %w", err)
 	}
@@ -73,7 +77,7 @@ func buildVectorLanes(db *sql.DB, ids *idSpace, outDir string) (laneCounts, erro
 	return counts, nil
 }
 
-func writeLane(db *sql.DB, ids *idSpace, outDir, lane, query string) (int, error) {
+func writeLane(db *sql.DB, ids *idSpace, outDir, lane, query string, dim int) (int, error) {
 	vecPath := filepath.Join(outDir, "vectors."+lane+".bin")
 	mapPath := filepath.Join(outDir, "vectors."+lane+".rowmap.bin")
 
@@ -97,7 +101,7 @@ func writeLane(db *sql.DB, ids *idSpace, outDir, lane, query string) (int, error
 	}
 	defer rows.Close()
 
-	rowBuf := make([]byte, expectedDim) // one int8 per dim
+	rowBuf := make([]byte, dim) // one int8 per dimension
 	idScratch := make([]byte, 4)
 	count := 0
 
@@ -115,8 +119,8 @@ func writeLane(db *sql.DB, ids *idSpace, outDir, lane, query string) (int, error
 			continue
 		}
 		fp32 := hv.Slice()
-		if len(fp32) != expectedDim {
-			return 0, fmt.Errorf("%s lane: photo %s has dim=%d, expected %d", lane, name, len(fp32), expectedDim)
+		if len(fp32) != dim {
+			return 0, fmt.Errorf("%s lane: photo %s has dim=%d, expected %d", lane, name, len(fp32), dim)
 		}
 		quantizeInt8(fp32, rowBuf)
 		if _, err := vecBW.Write(rowBuf); err != nil {

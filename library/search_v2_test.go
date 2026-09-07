@@ -160,7 +160,7 @@ func TestBuildVerifyTextV2(t *testing.T) {
 		Name:            "v",
 		FileBasename:    "v.JPG",
 		Vantage:         "low handheld",
-		FullDescription: "a photo of a kitten",
+		FullDescription: "Subject: a photo of a kitten\nQueries:\nthis should never appear\nin the verifier text",
 		CameraMake:      "FUJIFILM",
 		CameraModel:     "X100VI",
 		GeneratedQueries: []string{
@@ -169,9 +169,9 @@ func TestBuildVerifyTextV2(t *testing.T) {
 		},
 	}
 	cases := []struct {
-		name   string
-		opts   SearchOptionsV2
-		mustHave []string
+		name        string
+		opts        SearchOptionsV2
+		mustHave    []string
 		mustNotHave []string
 	}{
 		{
@@ -251,4 +251,3 @@ func approxEqual(a, b float64) bool {
 	d := a - b
 	return d < eps && d > -eps
 }
-

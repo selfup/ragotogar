@@ -44,8 +44,8 @@ func shutterFractionSeconds(seconds float64) string {
 // BuildDescriptionDocument returns the scene-side text for the
 // photo_descriptions vector store (v12). Includes the parsed prose-derived
 // fields (Vantage / GroundTruth / Condition / Mood), the classifier verdicts,
-// and the full LLM description. EXIF and capture-context tokens are NOT
-// included here — those live in BuildMetadataDocument so the embedding can
+// and the scene description with generated Queries sections removed. EXIF and
+// capture-context tokens live in BuildMetadataDocument so the embedding can
 // concentrate signal on scene content without prose-dilution from camera
 // settings.
 //
@@ -110,9 +110,11 @@ func BuildDescriptionDocument(p *Photo) string {
 		w("Framing: " + strings.Join(p.Framing, ", "))
 	}
 
-	if p.FullDescription != "" {
+	// Older libraries may still carry the combined model output here. Keep
+	// generated phrasings out even before the v15 data migration has run.
+	if prose := StripGeneratedQueries(p.FullDescription); prose != "" {
 		w("")
-		w(p.FullDescription)
+		w(prose)
 	}
 
 	return strings.TrimRight(b.String(), "\n")

@@ -154,25 +154,35 @@ The Subject field demands both nouns AND verbs ("single-engine propeller airplan
 
 **Library schema:**
 
-`cmd/describe` is the schema authority — it applies `CREATE TABLE IF NOT EXISTS` on every run, so the DB is created on first invocation and migrated forward on subsequent ones. Seven tables, all keyed on `photos.id` (currently equal to `name` until Phase 7 stable IDs):
+`cmd/describe` creates the source schema and applies forward migrations. New vector stores use the configured embedding dimension. Existing vector columns are resized only by `cmd/index` with an explicit full reindex, which replaces derived embeddings without changing source records. Per-photo records use `photos.id` (currently equal to `name` until Phase 7 stable IDs):
 
 | Table | Holds |
 |-------|-------|
 | `photos` | `id`, `name`, `file_path` (original on disk), `file_basename`, timestamps |
 | `exif` | Typed columns from EXIF: `camera_make`, `camera_model`, `lens_model`, `date_taken` (ISO 8601 + decomposed year/month), `focal_length_mm`, `f_number`, `exposure_time_seconds`, `iso`, `exposure_compensation`, `gps_latitude/longitude`, etc. Plus a generated `fts tsvector` column over camera/lens/year/software/artist so FTS+vector mode can match queries like `2024` or `X100VI` that live only in metadata (v8). |
-| `descriptions` | Parsed `subject / setting / light / colors / composition / vantage / ground_truth / condition / mood`, `full_description` (the raw LLM output), and a generated `fts tsvector` column (English stemmer) for keyword recall. `cmd/search`'s FTS arm concatenates this with `exif.fts` at query time so prose tokens and metadata tokens can co-match. The `condition` column captures wear/age/cleanliness/construction state so queries like "construction site" or "abandoned building" reach the right photos. The `mood` column (v13) captures aesthetic descriptors emitted alongside the existing prose fields and feeds into `photo_descriptions` embeddings. |
+| `descriptions` | Parsed `subject / setting / light / colors / composition / vantage / ground_truth / condition / mood`, `full_description` (scene prose with generated `Queries` sections removed), and a generated `fts tsvector` column (English stemmer) for keyword recall. `cmd/search`'s FTS arm concatenates this with `exif.fts` at query time so prose tokens and metadata tokens can co-match. The `condition` column captures wear/age/cleanliness/construction state so queries like "construction site" or "abandoned building" reach the right photos. The `mood` column (v13) captures aesthetic descriptors emitted alongside the existing prose fields and feeds into `photo_descriptions` embeddings. |
 | `thumbnails` | 1024px JPG bytes as a `BYTEA` BLOB. Generated from the same magick output sent to the vision model — no second resize. |
-| `inference` | `model`, `preview_ms`, `inference_ms`, `described_at` |
-| `photo_descriptions` | v12 — one row per chunk per photo. `chunk_text TEXT` + `embedding halfvec(2560)` (Qwen3-Embedding-4B GGUF). HNSW + `photo_id` indexes. Source text is `BuildDescriptionDocument` (scene fields + classifier verdicts + mood + full LLM description). UNIQUE `(photo_id, schema_version, chunk_index)`. |
-| `photo_metadata` | v12 — one row per photo. `metadata_text TEXT` (space-joined EXIF tokens, e.g. `NIKON Z 8 NIKKOR Z 24-120mm 90mm f/8 1/8000s ISO 720 Manual 2024`) + `embedding halfvec(2560)` + HNSW index. Source text is `BuildMetadataDocument`. UNIQUE `(photo_id, schema_version)`. |
-| `photo_queries` | v12 — N rows per photo (one per LLM-generated phrasing). `query_text TEXT` + `embedding halfvec(2560)` + HNSW index. Source list comes from `query_generations.queries` (the JSONB array). UNIQUE `(photo_id, schema_version, query_index)`. |
+| `inference` | `raw_response` (complete vision output, including generated queries, retained for inspection), `model`, `preview_ms`, `inference_ms`, `described_at`. Raw responses are excluded from search and verification. |
+| `photo_descriptions` | v12 — one row per chunk per photo. `chunk_text TEXT` + `embedding halfvec(dim)` (1024 for Qwen3-Embedding-0.6B; 2560 for 4B). HNSW + `photo_id` indexes. Source text is `BuildDescriptionDocument` (scene fields + classifier verdicts + mood + scene prose, excluding generated queries). UNIQUE `(photo_id, schema_version, chunk_index)`. |
+| `photo_metadata` | v12 — one row per photo. `metadata_text TEXT` (space-joined EXIF tokens, e.g. `NIKON Z 8 NIKKOR Z 24-120mm 90mm f/8 1/8000s ISO 720 Manual 2024`) + `embedding halfvec(dim)` + HNSW index. Source text is `BuildMetadataDocument`. UNIQUE `(photo_id, schema_version)`. |
+| `photo_queries` | v12 — N rows per photo (one per LLM-generated phrasing). `query_text TEXT` + `embedding halfvec(dim)` + HNSW index. Source list comes from `query_generations.queries` (the JSONB array). UNIQUE `(photo_id, schema_version, query_index)`. |
 | `query_generations` | v12 — source-of-truth for the LLM-generated search phrasings emitted by the describer's combined vision call. `model TEXT` + `prompt_hash TEXT` (16 hex chars; lets prompt drift be detected without diffing strings) + `queries JSONB`. One row per photo. Owned by `cmd/describe`; `cmd/index` reads it to populate `photo_queries`. |
+| `embedding_config` | One record containing the model ID and dimensions shared by all three vector stores. Written by `cmd/index`; checked by indexing, vector search, and edge builds. Existing vectors with no recorded identity require a full reindex. |
 | `verify_cache` | Persistent LLM yes/no cache for the verify pass. Keyed on `(query, photo_id, verify_model)`; `verified_at > inference.described_at` is the freshness check, so re-describing a photo silently invalidates older cached verdicts. Written by `library.VerifyFilterV2`; consulted by both `cmd/web` and `cmd/search`. **Always-on.** |
 | `query_rewrite_cache` | Persistent NL→boolean rewrite cache for `auto` mode. Keyed on `(nl_query, rewrite_model)` — no per-photo dependency. **Opt-in** via the `save rewrite` checkbox so iterating to a good rewrite doesn't memorialize bad output (v10). |
 | `classify_filter_cache` | Persistent drop-verdict cache for the post-retrieval classifier filter. Keyed on `(nl_query, photo_id, classify_model)`; `filtered_at > classified.classified_at` is the freshness check. **Opt-in** via the `save classifier filter` checkbox (v11). |
 | `schema_version` | Single-row marker for migrations |
 
-`cmd/describe` owns `photos / exif / descriptions / inference / thumbnails / query_generations`; the indexer (`cmd/index`) owns the three vector stores. Re-describing a photo overwrites the describer's tables but leaves the embedding stores alone; re-running `./scripts/index.sh` regenerates them per-store from the fresh description / metadata / queries.
+`cmd/describe` owns `photos / exif / descriptions / inference / thumbnails / query_generations`; the indexer (`cmd/index`) owns the three vector stores. Re-describing a photo overwrites the describer's tables but leaves existing embeddings alone; use `./scripts/index.sh -reindex=descriptions,metadata,queries` to refresh previously populated stores.
+
+**Upgrading an existing library to query isolation (v15):**
+
+```bash
+./scripts/photo_describe.sh -init-only  # apply migration; no vision calls
+./scripts/index.sh -reindex=descriptions,metadata,queries  # rebuild and record model identity
+```
+
+Use the same `-dsn` or `LIBRARY_DSN` for both commands and set `EMBED_MODEL` (and `EMBED_DIM`, if needed) to the intended embedding model. Stop search/index/describe processes during the upgrade, then restart them afterward. The v15 migration preserves combined responses in `inference.raw_response`, removes `Queries` sections from existing scene prose, and recomputes FTS automatically. It deletes description embeddings and cached verifier verdicts for affected photos, preserving metadata/query embeddings and query-generation sources. The full index run then replaces all three vector stores and records their model identity; this is required once for older libraries because their embedding model was not recorded. No re-description is needed. If model identity is already recorded and unchanged, an incremental index run suffices to restore v15-invalidated descriptions. Rebuild any edge artifacts from the migrated, reindexed database and restart `cmd/edge` afterward.
 
 **Key details:**
 
@@ -210,12 +220,12 @@ The photo `.jpg` sidecar `cmd/cashier` produces is no longer used by `cmd/web` �
 
 ## Photo Search — pgvector three-store (`cmd/index`, `cmd/search`)
 
-v12 split the vector lane into three parallel halfvec(2560) HNSW stores (`photo_descriptions`, `photo_metadata`, `photo_queries`) so each signal type carries its own embedding and can be queried / weighted / disabled independently. See `ARCHITECTURE.md` Pillar 0 for the design rationale.
+v12 split the vector lane into three parallel HNSW stores (originally halfvec(2560), now configurable) (`photo_descriptions`, `photo_metadata`, `photo_queries`) so each signal type carries its own embedding and can be queried / weighted / disabled independently. See `ARCHITECTURE.md` Pillar 0 for the design rationale.
 
 Two Go binaries plus a shared `library/` package:
 
 - **`library/`** — `Photo` struct + `LoadPhoto` (pgx), three doc builders (`BuildDescriptionDocument` / `BuildMetadataDocument` / `BuildQueryDocuments`), `Chunk` (character-window splitter), `EmbedTexts` and `LLMComplete` (LM Studio / OpenRouter HTTP).
-- **`cmd/index`** — populates the three v12 stores per photo. Per-store skip-if-exists keyed `(photo_id, schema_version)`; granular `-reindex=descriptions,metadata,queries` (subset list); partial-failure-aware (descriptions OK + metadata fail → logged + resumable, never half-indexed).
+- **`cmd/index`** — populates the three v12 stores per photo, batching up to 10 documents per embedding request by default (`-batch-size`). Per-store skip-if-exists keyed `(photo_id, schema_version)`; granular `-reindex=descriptions,metadata,queries` (subset list); partial-failure-aware (descriptions OK + metadata fail → logged + resumable, never half-indexed).
 - **`cmd/search`** — embeds the query once, fans out per-store ANN queries in parallel goroutines, merges per `-merge-strategy=union|intersect|weighted` (with `-weight-{descriptions,metadata,queries}` knobs under `weighted`), optionally runs verify (`VerifyFilterV2`, text composition mirrors the per-store toggles). Hybrid mode (`-hybrid`) RRF-fuses the merged vector lane with the existing FTS arm.
 
 **How it works:**
@@ -246,14 +256,26 @@ lms load mistralai/ministral-3-3b --context-length 32000 --parallel 8
 lms load mistralai/devstral-small-2-2512 --context-length 32000 --parallel 4
 ```
 
+For a standalone llama.cpp embedding server, run `./scripts/embedding_server.sh`. It loads the local Qwen3-Embedding-4B GGUF with 10 parallel slots and listens on `127.0.0.1:1234`.
+
 **Usage:**
 
 ```bash
 # Index every photo currently in the library
 ./scripts/index.sh
 
+# Explicit batch size (10 is the default; 1 sends single-input requests)
+./scripts/index.sh -batch-size 10
+
 # Re-index (per-store invalidation; subset list of descriptions, metadata, queries)
 ./scripts/index.sh -reindex=descriptions,metadata,queries
+
+# Switch the existing library to Qwen3-Embedding-0.6B (1024 dimensions)
+export EMBED_MODEL="text-embedding-qwen3-embedding-0.6b"
+./scripts/index.sh -reindex=descriptions,metadata,queries -batch-size=10 -workers=2
+
+# Resume after interruption; keep the same model in this shell
+./scripts/index.sh -batch-size=10 -workers=2
 
 # Override library DSN
 ./scripts/index.sh -dsn postgres:///other_db
@@ -300,16 +322,22 @@ See [Query syntax](#query-syntax) for the full operator set.
 | `LM_STUDIO_BASE` | `http://localhost:1234` | Legacy single-endpoint fallback when neither of the above is set |
 | `LLM_API_KEY` | `lm-studio` | Bearer token sent to verify and embed endpoints; default ignores LM Studio's auth, set when pointing at a cloud provider |
 | `SEARCH_MODEL` | `mistralai/ministral-3-3b` | LLM for the verify pass |
-| `EMBED_MODEL` | `text-embedding-qwen3-embedding-4b` | 2560-dim embedding model — changing it requires re-indexing |
+| `EMBED_MODEL` | `text-embedding-qwen3-embedding-4b` | Model ID for indexing and search; changing it requires a full reindex |
+| `EMBED_DIM` | 1024 for Qwen3-Embedding-0.6B model IDs; otherwise 2560 | Override the expected output dimension for custom aliases/models (1–4000). This validates output; it does not truncate vectors or ask the server to change their size. |
+
+Stop existing index/search processes when switching the library to a different embedding model or dimension. Start `scripts/web.sh` / `scripts/search.sh` with the same `EMBED_MODEL` (and `EMBED_DIM`, if overridden). Rebuild and restart any edge artifacts after reindexing.
 
 **Key details:**
 
-- Documents combine EXIF metadata, camera settings, and the full visual description into a single text for indexing — vector captures "X100VI", "f/2", "ISO 3200" alongside visual phrases like "bedroom" and "paisley duvet"
+- Scene prose, EXIF tokens, and generated search phrasings are embedded separately. Generated `Queries` sections are excluded from description chunks, FTS, and verifier input; the complete model response is retained only in `inference.raw_response` for inspection.
 - Chunking is a simple character-window splitter (~6KB per chunk with 400-byte overlap). Most photo descriptions fit in a single chunk; only long-form descriptions spill over.
-- HNSW index on `embedding halfvec_cosine_ops` — cosine is the metric, `<=>` is the distance operator. halfvec is required because the `vector` type's HNSW caps at 2000 dims; halfvec at 4000.
+- Indexing sends up to 10 separate texts in each embedding request. Each description chunk, metadata document, or query phrasing counts as one input. Workers load windows of up to `-batch-size` photos, batch each store independently, and flush partial requests at each window's end. Texts are never concatenated, and each photo/store is replaced atomically only after all its embeddings succeed. `-workers` limits concurrent batch workers (default 1); `scripts/full_run.sh` exposes these controls as `INDEX_BATCH_SIZE` (default 10) and `INDEX_WORKERS` (default 1).
+- HNSW index on `embedding halfvec_cosine_ops` — cosine is the metric, `<=>` is the distance operator. Both supported models use halfvec, whose HNSW limit is 4000 dimensions; the `vector` type's 2000-dimension HNSW limit would exclude the 2560-dimensional 4B model.
 - Re-indexing is incremental by default per store (skips photos that already have rows at the current `schema_version`). Use `-reindex=descriptions[,metadata,queries]` to invalidate a subset before re-populating.
+- On restart, description/metadata/query progress counters start at zero and count rows added in that invocation. Already-committed stores are skipped. An absent or empty generated-query source does not queue a photo solely for its empty query store; a later describe run that supplies phrasings makes it eligible. Restarting with `-reindex` forces the listed stores again; omit it when resuming an incremental run.
 - Per-photo similarity in `photo_descriptions` / `photo_queries` = `MAX(1 - (embedding <=> $1))` over the photo's rows (best chunk / best phrasing wins). `photo_metadata` is one row per photo so MAX collapses trivially. Merge step combines the per-store similarities per the chosen strategy (max for union, mean for intersect, weighted-sum for weighted).
-- Embedding model must be `text-embedding-qwen3-embedding-4b` (2560-dim); changing it requires re-indexing
+- Use the same `EMBED_MODEL` and dimension settings for indexing and search. Qwen3-Embedding-0.6B IDs automatically select 1024 dimensions, including MLX `qwen3-embedding-0.6b-dwq` and GGUF paths. A model change, dimension change, or existing vectors with no recorded model requires `-reindex=descriptions,metadata,queries`. The indexer probes one embedding, then clears all derived vectors and records the new identity in one transaction, resizing columns/HNSW indexes when needed. Failures roll back the vectors and identity together. Source records are preserved. A server returning the wrong dimension stops the run immediately. One index process per database is allowed; `-workers` supplies concurrency within that process.
+- Model identity uses the exact `EMBED_MODEL` string. Changing aliases requires a full reindex even if they refer to the same weights. Replacing weights behind an unchanged alias cannot be detected; use a new model ID or explicitly rebuild all stores in that case. Edge builds check `-embed-model` against the recorded identity before writing artifacts.
 - **Requirements:** Postgres + pgvector (`./scripts/bootstrap.sh`), LM Studio with an embedding model loaded, a populated library (run `cmd/describe` first)
 
 ## Web Server (`cmd/web`)
@@ -364,6 +392,8 @@ If `open` can't resolve the configured name, the error ("Unable to find applicat
 | `FTS+vector+verify` | `-retrieve -hybrid -verify` | RRF fusion + LLM yes/no per candidate. Tightest precision; slowest. |
 | `auto` | (web only) | LLM rewrites your natural-language query into the boolean form (phrase binding, negations, vocabulary expansion against the describer's vocabulary tail) using `prompts/query.md`, then runs FTS+vector. The rewritten query is shown above the result grid; tick `save rewrite` to cache it. Off-by-default save means you can iterate to a good rewrite without sticky bad output. |
 | `auto+verify` | (web only) | Auto-rewrite + FTS+vector + per-candidate prose verify. Tightest auto path. |
+
+Auto rewrites have a 256-token output budget. Truncated, oversized, repetitive, empty, or unfinished quoted output falls back to the original query and is not cached. Validation also runs on saved rewrites; invalid entries are discarded. Character limits are Unicode-aware and permit valid multilingual queries. These checks catch malformed output, but do not assess semantic accuracy. Point `TEXT_ENDPOINT` at a chat model and `EMBED_ENDPOINT` at an embedding model when using separate servers.
 
 **Per-store vector lane** (compose with any mode above; the FTS arm is unaffected):
 
