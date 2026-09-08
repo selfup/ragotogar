@@ -61,8 +61,8 @@ func TestResolveMerge(t *testing.T) {
 
 		// Defaults / unknowns
 		{"", string(library.MergeUnion)},
-		{"UNION", string(library.MergeUnion)},  // case-sensitive
-		{"naive", string(library.MergeUnion)},  // mode value, not merge
+		{"UNION", string(library.MergeUnion)}, // case-sensitive
+		{"naive", string(library.MergeUnion)}, // mode value, not merge
 		{"garbage", string(library.MergeUnion)},
 	}
 	for _, tt := range tests {

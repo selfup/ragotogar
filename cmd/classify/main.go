@@ -10,10 +10,11 @@
 // cmd/describe can call it inline (see -classify flag on cmd/describe).
 //
 // Usage:
-//   go run ./cmd/classify
-//   go run ./cmd/classify -reclassify
-//   go run ./cmd/classify -dsn postgres:///other_db
-//   CLASSIFY_MODEL=mistralai/devstral-small-2-2512 go run ./cmd/classify
+//
+//	go run ./cmd/classify
+//	go run ./cmd/classify -reclassify
+//	go run ./cmd/classify -dsn postgres:///other_db
+//	CLASSIFY_MODEL=mistralai/devstral-small-2-2512 go run ./cmd/classify
 package main
 
 import (

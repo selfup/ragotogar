@@ -9,12 +9,12 @@ import (
 
 func TestCanonicalQueryLowercasesAndTrims(t *testing.T) {
 	cases := map[string]string{
-		"  Indoor Scenes  ":     "indoor scenes",
-		"FROM A PLANE":          "from a plane",
-		"warm light bedroom":    "warm light bedroom",
-		"\tred truck\n":         "red truck",
-		"":                      "",
-		"   ":                   "",
+		"  Indoor Scenes  ":  "indoor scenes",
+		"FROM A PLANE":       "from a plane",
+		"warm light bedroom": "warm light bedroom",
+		"\tred truck\n":      "red truck",
+		"":                   "",
+		"   ":                "",
 	}
 	for in, want := range cases {
 		got := CanonicalQuery(in)
@@ -215,9 +215,9 @@ func TestVerifyCacheUpdatesVerifiedAt(t *testing.T) {
 // changed denominator doesn't silently produce NaN or division-by-zero output.
 func TestVerifyStatsHitRate(t *testing.T) {
 	cases := []struct {
-		name       string
-		stats      VerifyStats
-		wantRate   float64
+		name     string
+		stats    VerifyStats
+		wantRate float64
 	}{
 		{"empty", VerifyStats{Total: 0, Cached: 0, LLM: 0}, 0},
 		{"all cached", VerifyStats{Total: 10, Cached: 10, LLM: 0}, 1.0},

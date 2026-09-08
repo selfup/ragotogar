@@ -34,10 +34,10 @@ type ClassifyFilterStats struct {
 //
 // useCache controls the classify_filter_cache:
 //   - true:  consult the cache per-candidate; cache hits skip the LLM
-//            entirely. The LLM call covers only candidates with no
-//            cached verdict. Hits are filtered for freshness against
-//            classified.classified_at — if a photo was re-classified
-//            after its verdict was cached, the cache row is ignored.
+//     entirely. The LLM call covers only candidates with no
+//     cached verdict. Hits are filtered for freshness against
+//     classified.classified_at — if a photo was re-classified
+//     after its verdict was cached, the cache row is ignored.
 //   - false: skip the cache (no read, no write). Always call the LLM.
 //
 // On any error (LLM call, JSON parse, DB I/O) the function returns the
@@ -161,14 +161,14 @@ func loadClassifications(ctx context.Context, db *sql.DB, candidates []Result) (
 	out := make(map[string]string, len(candidates))
 	for rows.Next() {
 		var (
-			name                                                                                            string
-			povContainer, povAltitude, povAngle                                                             sql.NullString
-			subjectAltitude                                                                                 sql.NullString
-			subjectCategory                                                                                 []string
-			subjectDistance, subjectCount, animalCount                                                      sql.NullString
-			sceneTimeOfDay, sceneIndoorOutdoor, sceneWeather                                                sql.NullString
-			framing                                                                                         []string
-			motion, colorPalette                                                                            sql.NullString
+			name                                             string
+			povContainer, povAltitude, povAngle              sql.NullString
+			subjectAltitude                                  sql.NullString
+			subjectCategory                                  []string
+			subjectDistance, subjectCount, animalCount       sql.NullString
+			sceneTimeOfDay, sceneIndoorOutdoor, sceneWeather sql.NullString
+			framing                                          []string
+			motion, colorPalette                             sql.NullString
 		)
 		if err := rows.Scan(
 			&name,

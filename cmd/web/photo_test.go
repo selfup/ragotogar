@@ -129,9 +129,9 @@ func TestServePhotoHTMLRendersAllSections(t *testing.T) {
 		`Photograph Analysis`,
 		`href="/styles.css"`,
 		// content from direct SQL pulls
-		"test_photo", // name (in title, h1, photo-meta)
-		"FUJIFILM",   // camera make
-		"X100VI",     // camera model
+		"test_photo",             // name (in title, h1, photo-meta)
+		"FUJIFILM",               // camera make
+		"X100VI",                 // camera model
 		"21 April 2024",          // humanDate output
 		"23.0 mm",                // focal
 		"f/5.6",                  // aperture

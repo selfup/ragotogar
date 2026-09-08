@@ -80,10 +80,10 @@ func TestRun_AcceptsEachValidMergeStrategy(t *testing.T) {
 				weightQueries:   1.0,
 			}
 			// Deadline-bound the real call so a down embed endpoint fails fast
-				// instead of grinding through EmbedTexts' full retry/backoff.
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				err := run(ctx, cfg)
+			// instead of grinding through EmbedTexts' full retry/backoff.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			err := run(ctx, cfg)
 			// We don't require success — without populated vector stores
 			// and a reachable embed endpoint, SearchV2 will error
 			// downstream. We DO require the error isn't a validation

@@ -50,11 +50,11 @@ type searchParams struct {
 // path (per-store toggles + merge strategy); FTS+vector modes use
 // SearchHybridV2 (same FTS arm as v1; vector lane is the merged v12 stores).
 //
-//   naive             : SearchV2 (per-store toggles, merged per strategy)
-//   naive-verify      : SearchV2 + VerifyFilterV2 (verifier text mirrors toggles)
-//   fts-vector        : SearchHybridV2 (RRF over v2 vector lane + FTS)
-//   fts-vector-verify : SearchHybridV2 + VerifyFilterV2
-//   auto / auto-verify: rewrite + fts-vector / fts-vector-verify
+//	naive             : SearchV2 (per-store toggles, merged per strategy)
+//	naive-verify      : SearchV2 + VerifyFilterV2 (verifier text mirrors toggles)
+//	fts-vector        : SearchHybridV2 (RRF over v2 vector lane + FTS)
+//	fts-vector-verify : SearchHybridV2 + VerifyFilterV2
+//	auto / auto-verify: rewrite + fts-vector / fts-vector-verify
 //
 // cosine, ftsRel and per-store options are user-tunable via the UI form.
 // searchResult bundles everything cmd/web's HTTP handler renders for a single

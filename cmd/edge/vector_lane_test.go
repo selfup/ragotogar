@@ -63,7 +63,7 @@ func TestScanLane_ThresholdDropsBelow(t *testing.T) {
 	dim := 4
 	vectors := []byte{
 		b(127), b(0), b(0), b(0), // row 0 → cid 0, dot=16129, cosine=1.0
-		b(64), b(0), b(0), b(0),  // row 1 → cid 1, dot=8128, cosine ≈ 0.504
+		b(64), b(0), b(0), b(0), // row 1 → cid 1, dot=8128, cosine ≈ 0.504
 	}
 	rowmap := []uint32{0, 1}
 	a := buildSyntheticArtifacts("d", dim, 2, vectors, rowmap)

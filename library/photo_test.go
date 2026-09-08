@@ -217,7 +217,6 @@ func TestLoadPhoto_MalformedQueriesJSONReturnsError(t *testing.T) {
 	}
 }
 
-
 func TestDateTakenToExifString(t *testing.T) {
 	tests := []struct{ iso, want string }{
 		{"", ""},

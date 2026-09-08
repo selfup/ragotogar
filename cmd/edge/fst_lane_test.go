@@ -40,20 +40,20 @@ func TestTokenizeQuery(t *testing.T) {
 // breaks parity gets caught here.
 func TestTokenizeQuery_StemmingMatchesPgEnglish(t *testing.T) {
 	cases := map[string]string{
-		"airplane":      "airplan",
-		"airplanes":     "airplan",
-		"propeller":     "propel",
-		"propellers":    "propel",
-		"engine":        "engin",
-		"engines":       "engin",
-		"single":        "singl",
-		"trucks":        "truck",
-		"truck":         "truck",
-		"running":       "run",
-		"flying":        "fli", // Porter2 lowercases + applies suffix rules
-		"x100vi":        "x100vi",
-		"nikon":         "nikon",
-		"2024":          "2024",
+		"airplane":   "airplan",
+		"airplanes":  "airplan",
+		"propeller":  "propel",
+		"propellers": "propel",
+		"engine":     "engin",
+		"engines":    "engin",
+		"single":     "singl",
+		"trucks":     "truck",
+		"truck":      "truck",
+		"running":    "run",
+		"flying":     "fli", // Porter2 lowercases + applies suffix rules
+		"x100vi":     "x100vi",
+		"nikon":      "nikon",
+		"2024":       "2024",
 	}
 	for word, want := range cases {
 		got := tokenizeQuery(word)
