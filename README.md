@@ -154,7 +154,7 @@ The Subject field demands both nouns AND verbs ("single-engine propeller airplan
 
 **Library schema:**
 
-`cmd/describe` creates the source schema and applies forward migrations. New vector stores use the configured embedding dimension. Existing vector columns are resized only by `cmd/index` with an explicit full reindex, which replaces derived embeddings without changing source records. Per-photo records use `photos.id` (currently equal to `name` until Phase 7 stable IDs):
+`cmd/describe` creates the source schema and applies forward migrations. New vector stores use the configured embedding dimension. Existing vector columns are resized only by `cmd/index` with an explicit full reindex, which replaces derived embeddings without changing source records. Per-photo records use `photos.id` (currently equal to `name` until Phase 5 stable IDs):
 
 | Table | Holds |
 |-------|-------|
@@ -463,7 +463,7 @@ Other operators (`OR`, positive quoted phrases) pass through unchanged to the em
 **What's not yet reachable:**
 
 - **Classifier enums** (`scene_weather`, `pov_container`, `motion`, etc.) live in the `classified` table and in `photo_descriptions.chunk_text` (vector lane), but not in `descriptions.fts` or `exif.fts`. So `-overcast` only matches photos whose prose literally stem-matches `overcast`, not photos the classifier verdict labeled overcast. A `classified.fts` generated column would close this; see `library/classify.go:74` for the canonical enum vocabulary that would land in such an index. Deferred until needed.
-- **Numerical / range filters** (`f/2.8 or wider`, `April 2024 only`, `ISO ≥ 1600`) — pgvector + FTS can't express these. See `ARCHITECTURE.md` Phase 7 for the LLM-parse sketch.
+- **Numerical / range filters** (`f/2.8 or wider`, `April 2024 only`, `ISO ≥ 1600`) — pgvector + FTS can't express these. See `ARCHITECTURE.md` Phase 6 for the LLM-parse sketch.
 
 ### Tuning thresholds
 
@@ -474,6 +474,34 @@ Other operators (`OR`, positive quoted phrases) pass through unchanged to the em
 When pure `vector` mode returns 0 hits but `FTS+vector` returns many, that's almost always the cosine floor pruning the long tail (the FTS arm catches what was just below 0.50). Drop the slider to confirm before assuming a bug.
 
 **Requirements:** Populated v12 stores (`photo_descriptions` / `photo_metadata` / `photo_queries` — run `cmd/index` after `cmd/describe`).
+
+## Library analysis (`cmd/analyze`)
+
+Read-only reports from the Postgres library; no embedding server or LLM is required. Output is Markdown by default, or structured JSON with `-format=json`.
+
+```bash
+./scripts/analyze.sh lens-stats
+./scripts/analyze.sh aperture-distribution -camera 'NIKON Z 8' -year 2024
+./scripts/analyze.sh coverage-by-camera-month -format=json > coverage.json
+./scripts/analyze.sh pov-breakdown
+./scripts/analyze.sh vocabulary -limit 100
+./scripts/analyze.sh classifier-review -limit 100
+```
+
+| Report | Contents |
+|--------|----------|
+| `lens-stats` | Photo counts grouped by EXIF year, camera model, and lens model |
+| `aperture-distribution` | Counts for each exact recorded f-number per camera |
+| `coverage-by-camera-month` | Counts by camera, year, and month; suitable for plotting a heatmap. Months without photos have no row. |
+| `pov-breakdown` | Classifier viewpoint counts per camera, including unclassified photos |
+| `vocabulary` | Stemmed search lexemes from scene prose and EXIF, ranked by the number of distinct photos containing each term |
+| `classifier-review` | Photo IDs, names, cameras, and review reasons: missing classification, description newer than classification, or missing/unclear fields |
+
+Flags follow the report name. All reports accept `-dsn` (default `LIBRARY_DSN` or `postgres:///ragotogar`), `-camera` (exact EXIF model), `-year` (0 means all), `-limit` (0 means all rows), `-format=markdown|json`, and `-timeout` (default `1m`). Counts are computed before limiting output; truncation is explicitly reported. Results have deterministic ordering. Missing metadata remains visible as null groups (JSON `null`, Markdown `—`); explicit camera/year filters exclude records missing those values.
+
+JSON contains `report`, optional `camera`/`year` filters, `limit`, `truncated`, ordered `columns`, and `rows` objects. Empty results use `rows: []`. Counts and numeric fields remain JSON numbers.
+
+Classification review flags are audit signals, not proof that a classification is wrong. A photo can have multiple reasons. The report does not compare scene semantics, run inference, or modify records. All commands use a read-only transaction against an initialized library schema.
 
 ## Tests
 
