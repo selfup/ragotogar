@@ -8,8 +8,10 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,6 +36,30 @@ func endpointFor(specificVar string) string {
 		return v
 	}
 	return "http://localhost:1234"
+}
+
+// ModelForEndpoint applies OpenRouter throughput routing to the wire model
+// only. Stored model identities and cache keys keep the configured model ID.
+// Match the URL hostname, never a path, query parameter, or lookalike domain.
+func ModelForEndpoint(endpoint, model string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || model == "" {
+		return model
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host != "openrouter.ai" && !strings.HasSuffix(host, ".openrouter.ai") {
+		return model
+	}
+	// Preserve catalog variants such as :free. Put nitro last so it wins
+	// over other routing sorts, removing any existing nitro to avoid duplicates.
+	parts := strings.Split(model, ":")
+	out := parts[:1]
+	for _, part := range parts[1:] {
+		if part != "nitro" {
+			out = append(out, part)
+		}
+	}
+	return strings.Join(out, ":") + ":nitro"
 }
 
 // LLMAPIKey returns the bearer token used in the Authorization header for

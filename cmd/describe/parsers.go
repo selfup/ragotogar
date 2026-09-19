@@ -22,7 +22,7 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
-// parseFloatLoose parses '23.0', '5.6', 'f/2', '' → float64 or nil.
+// parseFloatLoose parses '23.0', '5.6', 'f/2', ” → float64 or nil.
 // Tolerates a leading 'f/' prefix (FNumber on some bodies).
 func parseFloatLoose(v string) any {
 	s := strings.TrimSpace(v)
@@ -38,7 +38,7 @@ func parseFloatLoose(v string) any {
 	return f
 }
 
-// parseIntLoose parses '500', '12800.0', '' → int64 or nil. Tolerates a
+// parseIntLoose parses '500', '12800.0', ” → int64 or nil. Tolerates a
 // fractional form because some EXIF fields come through as numeric strings.
 func parseIntLoose(v string) any {
 	s := strings.TrimSpace(v)
@@ -54,7 +54,7 @@ func parseIntLoose(v string) any {
 
 var trailingMM = regexp.MustCompile(`(?i)\s*mm\s*$`)
 
-// parseDimensionMM parses '23.0 mm', '23.0', '' → float64 or nil.
+// parseDimensionMM parses '23.0 mm', '23.0', ” → float64 or nil.
 func parseDimensionMM(v string) any {
 	s := strings.TrimSpace(v)
 	if s == "" {
@@ -68,16 +68,16 @@ func parseDimensionMM(v string) any {
 	return f
 }
 
-// parseExposureTime parses '1/250' → 0.004, '0.5' → 0.5, '' → nil.
+// parseExposureTime parses '1/250' → 0.004, '0.5' → 0.5, ” → nil.
 // Returns nil on divide-by-zero.
 func parseExposureTime(v string) any {
 	s := strings.TrimSpace(v)
 	if s == "" {
 		return nil
 	}
-	if i := strings.Index(s, "/"); i >= 0 {
-		num, err1 := strconv.ParseFloat(strings.TrimSpace(s[:i]), 64)
-		denom, err2 := strconv.ParseFloat(strings.TrimSpace(s[i+1:]), 64)
+	if before, after, ok := strings.Cut(s, "/"); ok {
+		num, err1 := strconv.ParseFloat(strings.TrimSpace(before), 64)
+		denom, err2 := strconv.ParseFloat(strings.TrimSpace(after), 64)
 		if err1 != nil || err2 != nil || denom == 0 {
 			return nil
 		}

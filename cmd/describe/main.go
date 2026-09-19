@@ -304,10 +304,7 @@ func run(cfg config) error {
 		previews[i] = make(chan previewResult, 1)
 	}
 
-	workers := cfg.previewWorkers
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(cfg.previewWorkers, 1)
 	jobCh := make(chan int, len(jobs))
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
@@ -337,10 +334,8 @@ func run(cfg config) error {
 	var processed, errors atomic.Int64
 	var done atomic.Int64
 	var inferWg sync.WaitGroup
-	for w := 0; w < inferWorkers; w++ {
-		inferWg.Add(1)
-		go func() {
-			defer inferWg.Done()
+	for range inferWorkers {
+		inferWg.Go(func() {
 			for idx := range inferCh {
 				j := jobs[idx]
 				res := <-previews[idx]
@@ -402,7 +397,7 @@ func run(cfg config) error {
 
 				processed.Add(1)
 			}
-		}()
+		})
 	}
 	for i := range jobs {
 		inferCh <- i
@@ -445,7 +440,7 @@ func describeImage(cfg config, b64, exif string) (string, error) {
 	sessionID := fmt.Sprintf("photo-describe-%d-%d", time.Now().UnixNano(), rand.Int64())
 
 	req := chatRequest{
-		Model: cfg.model,
+		Model: library.ModelForEndpoint(cfg.lmBase, cfg.model),
 		User:  sessionID,
 		Messages: []chatMessage{
 			{
@@ -903,7 +898,7 @@ func extractQueriesList(raw string) []string {
 		return nil
 	}
 	var out []string
-	for _, line := range strings.Split(raw, "\n") {
+	for line := range strings.SplitSeq(raw, "\n") {
 		s := strings.TrimSpace(line)
 		if s == "" {
 			continue

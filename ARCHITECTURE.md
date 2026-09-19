@@ -65,6 +65,15 @@ fallback. `cmd/search` continues to use Postgres only.
 
 All `cmd/*` binaries plus the `library/` package run against one DSN (`LIBRARY_DSN`, default `postgres:///ragotogar`). Per-stage HTTP endpoints (`VISION_ENDPOINT`, `TEXT_ENDPOINT`, `EMBED_ENDPOINT`) let each pillar hit a different LLM provider; `LM_STUDIO_BASE` is the legacy shared fallback. All LLM calls go through `library/http.go`'s retry+backoff layer (5 attempts, exponential jitter, honors `Retry-After`, ctx-cancel aware). Prompt templates live in `prompts/` and are embedded into binaries via `//go:embed` so there's a single source of truth.
 
+`library.ModelForEndpoint` adds OpenRouter `:nitro` throughput routing at
+the outbound request boundary for vision, text, and embeddings (including
+edge query embeddings). It matches the resolved URL hostname against
+`openrouter.ai` and its subdomains, deduplicates `:nitro`, and puts it last
+while preserving other model suffixes. Existing provider privacy settings
+remain in place. Stored model IDs, cache keys, and embedding/edge identity
+checks continue to use the configured model string; this routing policy
+adds no schema migration or pipeline phase.
+
 Schema is Go-const + idempotent migrations (`migrate()` through `migrateV15()`) applied at process start by `cmd/describe` (the schema authority). New stores take their dimension from `EMBED_MODEL` / `EMBED_DIM`. `cmd/index` may resize existing vector columns only on an explicit full reindex; all source-schema migrations remain in `cmd/describe`. Other readers assume the tables exist. Three LLM-result caches all use the same shape (canonical query as PK component, model in PK, freshness via `*_at > source_at`):
 
 - `verify_cache(query, photo_id, verify_model, …)` — prose verify verdicts, freshness vs `inference.described_at`. Always-on.

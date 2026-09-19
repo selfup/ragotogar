@@ -100,8 +100,9 @@ func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	if err != nil {
 		return nil, err
 	}
+	endpoint := EmbedEndpoint()
 	body, err := json.Marshal(embedRequest{
-		Model:    EmbedModel(),
+		Model:    ModelForEndpoint(endpoint, EmbedModel()),
 		Input:    texts,
 		Provider: DefaultProvider,
 	})
@@ -110,7 +111,7 @@ func EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	}
 
 	raw, err := postJSONWithRetry(ctx,
-		EmbedEndpoint()+"/v1/embeddings",
+		endpoint+"/v1/embeddings",
 		body,
 		map[string]string{"Authorization": "Bearer " + LLMAPIKey()},
 	)

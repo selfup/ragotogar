@@ -57,6 +57,26 @@ Steps are independent — you can run search without ever organizing, or describ
 
 Plus shell scripts for directory flattening, EXIF date fixing, and a shared config (`.files.env`) as the single source of truth for extension mappings.
 
+### OpenRouter throughput routing
+
+When a stage's resolved endpoint targets `openrouter.ai` (or a subdomain),
+outgoing vision, text, and embedding requests automatically append `:nitro`
+to the model ID. For example, `qwen/qwen3-vl-8b` is sent as
+`qwen/qwen3-vl-8b:nitro`. Detection uses the URL hostname after resolving
+`VISION_ENDPOINT` / `TEXT_ENDPOINT` / `EMBED_ENDPOINT` and the
+`LM_STUDIO_BASE` fallback; a local stage override keeps its original model.
+Use `https://openrouter.ai/api` as the base endpoint; callers append `/v1/...`.
+
+Existing `:nitro` suffixes are deduplicated and placed last; other suffixes
+such as `:free` are preserved. The existing `data_collection=deny` and
+`zdr=true` provider settings still apply. Nitro sorts eligible providers by
+throughput, rather than guaranteeing minimum latency for each request.
+See [OpenRouter's Nitro documentation](https://openrouter.ai/docs/guides/routing/model-variants/nitro).
+
+This is a request-time routing choice. Configured model IDs in inference
+records, caches, `embedding_config`, and edge manifests remain unchanged;
+enabling automatic Nitro routing does not itself require a reindex.
+
 ## Go Media Organizer (`cmd/organize`)
 
 Parallel media organizer in Go. Uses a worker pool (`runtime.NumCPU()` goroutines) to move files concurrently across all 3 passes.

@@ -313,7 +313,7 @@ func TestInsertPhotoIdempotent(t *testing.T) {
 	exif := exifData{Make: "FUJIFILM", Model: "X100VI", DateTimeOriginal: "2024:04:21 16:27:54"}
 	fields := descriptionFields{Subject: "x"}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := insertPhoto(db, "test", "/p", exif, "desc", fields, []byte{0xff}, "m", 1, 2); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}

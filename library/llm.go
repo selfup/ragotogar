@@ -101,8 +101,9 @@ func llmComplete(ctx context.Context, model, prompt string, format *responseForm
 // Bounded callers require a complete answer; truncation must not become a
 // plausible-looking partial query. Other completion callers keep their limits.
 func llmCompleteWithLimit(ctx context.Context, model, prompt string, format *responseFormat, maxTokens int) (string, error) {
+	endpoint := TextEndpoint()
 	body, err := json.Marshal(chatRequest{
-		Model:       model,
+		Model:       ModelForEndpoint(endpoint, model),
 		MaxTokens:   maxTokens,
 		Temperature: 0.0,
 		Messages: []chatMessage{
@@ -116,7 +117,7 @@ func llmCompleteWithLimit(ctx context.Context, model, prompt string, format *res
 	}
 
 	raw, err := postJSONWithRetry(ctx,
-		TextEndpoint()+"/v1/chat/completions",
+		endpoint+"/v1/chat/completions",
 		body,
 		map[string]string{"Authorization": "Bearer " + LLMAPIKey()},
 	)
