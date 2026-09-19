@@ -4,12 +4,14 @@ The shape of the system today, plus what's still on the roadmap.
 
 This is a living document — update when a phase ships or a decision changes.
 
-> An experimental parallel pipeline — `cmd/edge_build` and the planned
-> `cmd/edge` runtime — lives in [EDGE.md](EDGE.md). It builds static
-> read-only artifacts (FST + int8 vector lanes + payload) so a Go
-> binary can serve search out of `mmap`-friendly files with pg as
-> system-of-record + hydration only. Doesn't replace anything in this
-> doc; runs alongside the pg-runtime search path.
+> The experimental parallel pipeline — `cmd/edge_build` and `cmd/edge` —
+> is implemented, including an optional backend selector in `cmd/web`.
+> It retrieves from static, memory-mapped artifacts (FST + int8 vector
+> lanes + payload). Postgres remains the system of record and supplies
+> web hydration, filters, and verification data. Edge startup requires
+> a Postgres ping; vector queries call an embedding endpoint. The default
+> retrieval backend remains Postgres. See [EDGE.md](EDGE.md) for usage,
+> artifact refreshes, and differences from Postgres search.
 
 ---
 
@@ -51,6 +53,15 @@ Search-time pipeline (cmd/web):
 ```
 
 Six search modes: `vector`, `vector+verify`, `FTS+vector`, `FTS+vector+verify`, `auto`, `auto+verify`. Three orthogonal toggles compose with any mode: classifier filter (`?class=1`), per-store enable (`descriptions=1` / `metadata=1` / `queries=1`, all default on), merge strategy (`merge=union|intersect|weighted` with optional per-store weights `wd` / `wm` / `wq` under `weighted`).
+
+With `cmd/web -edge-url http://127.0.0.1:8081`, `?backend=edge` replaces
+the retrieval step with an HTTP call to `cmd/edge`. Rewrite, classifier
+filter, verification, sorting, and photo rendering stay in `cmd/web`.
+The edge lexical arm ranks any matching stemmed token by coverage; it
+does not implement Postgres boolean/phrase semantics or the relative FTS
+threshold. Any double quote returns HTTP 400, including quotes introduced
+by auto rewrite. Retrieval errors surface in the UI without a Postgres
+fallback. `cmd/search` continues to use Postgres only.
 
 All `cmd/*` binaries plus the `library/` package run against one DSN (`LIBRARY_DSN`, default `postgres:///ragotogar`). Per-stage HTTP endpoints (`VISION_ENDPOINT`, `TEXT_ENDPOINT`, `EMBED_ENDPOINT`) let each pillar hit a different LLM provider; `LM_STUDIO_BASE` is the legacy shared fallback. All LLM calls go through `library/http.go`'s retry+backoff layer (5 attempts, exponential jitter, honors `Retry-After`, ctx-cancel aware). Prompt templates live in `prompts/` and are embedded into binaries via `//go:embed` so there's a single source of truth.
 

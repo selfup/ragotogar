@@ -50,6 +50,7 @@ Steps are independent — you can run search without ever organizing, or describ
 | Vector Indexer | `cmd/index` | Embeds each photo into the three v12 stores (`photo_descriptions`, `photo_metadata`, `photo_queries`); per-store skip-if-exists keyed `(photo_id, schema_version)`; granular `-reindex=descriptions,metadata,queries` |
 | Vector Search | `cmd/search` | pgvector cosine similarity across the three stores merged per `-merge-strategy=union/intersect/weighted`; optional LLM verify pass with text composition mirroring the per-store toggles |
 | Web Server | `cmd/web` | Search UI + per-photo HTML pages rendered on-demand from SQL; thumbnail BLOBs streamed from SQL |
+| Experimental edge search | `cmd/edge_build`, `cmd/edge` | Export static search artifacts from Postgres and serve retrieval from memory-mapped files; optional web backend. See [EDGE.md](EDGE.md) for setup and search limitations. |
 | Cashier (markdown) | `cmd/cashier` | General-purpose markdown → HTML renderer with the cashier design system. Not in the photo pipeline; kept for ad-hoc use. |
 | Prompt templates | `prompts/` | LLM prompt templates embedded into binaries via `//go:embed`. `query.md` (auto-mode NL→boolean rewrite, used by `library.RewriteQuery`); `classify_filter.md` (post-retrieval drop oracle, used by `library.FilterByClassification`). Edit these files; the next build picks up changes. |
 | Search playbook | `skills/search_skill.md` | Human-facing guide for writing effective queries — operators, patterns (phrase binding, vocabulary stacking), tuning thresholds, anti-patterns. Pair to the README's Query syntax reference. |
@@ -361,6 +362,18 @@ Then open `http://localhost:8080`.
 | `-addr` | `127.0.0.1:8080` | Listen address (loopback by default; set an explicit `host:port` to expose on other interfaces) |
 | `-dsn` | `postgres:///ragotogar` | Postgres library DSN (overrides `LIBRARY_DSN` env) |
 | `-repo` | `.` | Repo root (where `styles.css` lives) |
+| `-edge-url` | empty | Edge server base URL (e.g. `http://127.0.0.1:8081`); enables the backend checkbox. Postgres remains the default. |
+
+**Experimental edge backend:** Start the artifact builder and edge server
+as described in [EDGE.md](EDGE.md#running-the-edge-path), then launch
+`./scripts/web.sh -edge-url http://127.0.0.1:8081` and select the edge
+backend (`?backend=edge`). Retrieval uses sealed artifacts; photo pages,
+thumbnails, optional rewrite/filter/verify steps, and sorting still use
+the existing web pipeline and database. Vector queries require the matching
+embedding endpoint. The edge lexical arm uses token coverage rather than
+Postgres boolean matching, ignores the `fts ≥` slider, and rejects any
+double-quoted query (including auto rewrites) with an error in the UI.
+Rebuild artifacts and restart the edge server to incorporate library changes.
 
 **Environment variables (cmd/web specific):**
 
