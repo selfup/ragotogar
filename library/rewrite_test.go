@@ -19,7 +19,11 @@ func TestLooksBoolean(t *testing.T) {
 		{"OR at end", "trucks OR", true},
 		{"or lowercase ignored", "trucks or cars", false},
 		{"compound dashed word doesn't trigger", "truck-driver on road", false},
-		{"bare dash doesn't trigger", "red - truck", false},
+		{"spaced negation", "red - truck", true},
+		{"leading spaced negation", "- truck", true},
+		{"whitespace after dash", "highway -\t\n truck", true},
+		{"trailing dash doesn't trigger", "red truck -", false},
+		{"bare dash doesn't trigger", "-", false},
 		{"empty", "", false},
 	}
 	for _, tt := range tests {

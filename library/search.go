@@ -50,7 +50,7 @@ type Result struct {
 }
 
 // StripNegation removes websearch_to_tsquery NOT operators (`-term` and
-// `-"foo bar"`) from a query string and returns the positive residual
+// `-"foo bar"`, also with whitespace after `-`) and returns the positive residual
 // suitable for the vector embedder. Other websearch operators (OR,
 // quoted phrases) are left in place — the embedder reads them as plain
 // text without harm; only negation produces opposite-of-intended bias
@@ -80,40 +80,39 @@ func ExtractNegation(q string) string {
 }
 
 // splitNegation walks the query once and returns (positive, negative)
-// halves so the two public helpers don't duplicate the parser. Quoted
-// negations like -"foo bar" can span multiple whitespace-split tokens;
-// the inner loop consumes them until the closing quote (or end-of-input
-// on an unmatched quote — degenerate input, but bounded).
+// halves. A standalone dash binds to the next term or quoted phrase;
+// a trailing dash stays positive. Preserve positive phrases as a unit so
+// literal dashes inside quotes never become exclusions. Whitespace is
+// collapsed, but the spacing between a dash and its operand is preserved.
 func splitNegation(q string) (positive, negative string) {
 	fields := strings.Fields(q)
 	pos := make([]string, 0, len(fields))
 	neg := make([]string, 0, len(fields))
 	for i := 0; i < len(fields); i++ {
+		start := i
 		f := fields[i]
-		switch {
-		case strings.HasPrefix(f, `-"`):
-			// Single-token form -"foo" (closing quote on the same token).
-			if strings.HasSuffix(f, `"`) && len(f) > 2 {
-				neg = append(neg, f)
-				continue
-			}
-			// Multi-token form -"foo bar baz" — consume until the
-			// closing quote, or to the end on an unmatched quote.
-			var b strings.Builder
-			b.WriteString(f)
+		isNegation := strings.HasPrefix(f, "-") && len(f) > 1
+		if f == "-" && i+1 < len(fields) {
+			i++
+			f = fields[i]
+			isNegation = true
+		} else if isNegation {
+			f = f[1:]
+		}
+		if strings.HasPrefix(f, `"`) && !(strings.HasSuffix(f, `"`) && len(f) > 1) {
+			// Consume the whole phrase, including an unmatched opening
+			// quote's remaining text, before looking for more operators.
 			for j := i + 1; j < len(fields); j++ {
-				b.WriteByte(' ')
-				b.WriteString(fields[j])
 				i = j
 				if strings.HasSuffix(fields[j], `"`) {
 					break
 				}
 			}
-			neg = append(neg, b.String())
-		case strings.HasPrefix(f, "-") && len(f) > 1:
-			neg = append(neg, f)
-		default:
-			pos = append(pos, f)
+		}
+		if isNegation {
+			neg = append(neg, fields[start:i+1]...)
+		} else {
+			pos = append(pos, fields[start:i+1]...)
 		}
 	}
 	return strings.Join(pos, " "), strings.Join(neg, " ")
@@ -198,6 +197,13 @@ func (s *Searcher) filterByNegation(ctx context.Context, results []Result, negat
 // every lexeme, which was responsible for B&W highway shots ranking high
 // for "red truck on road" (red brake lights + truck + road all matched).
 //
+// Explicit exclusions also apply as a separate AND predicate across the
+// entire result set, matching the vector and edge paths. websearch ignores
+// parentheses, so `(car OR sedan) -truck` alone means `car OR (sedan AND
+// NOT truck)` and would let car descriptions mentioning trucks through.
+// Apply this guard in SQL before LIMIT and adaptive rank filtering so
+// excluded matches cannot displace eligible results or set their cutoff.
+//
 // Why concat instead of `WHERE d.fts @@ q OR e.fts @@ q`: the OR form only
 // matches when a single column carries all query tokens. websearch_to_tsquery
 // AND's bare terms, so a cross-column query collapses to zero hits under OR.
@@ -225,15 +231,19 @@ func (s *Searcher) searchFTS(ctx context.Context, query string, topK int, relThr
 		LEFT JOIN exif e         ON p.id = e.photo_id
 		WHERE (COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector))
 		      @@ websearch_to_tsquery('english', $1)
+		  AND ($2 = '' OR
+		       (COALESCE(d.fts, ''::tsvector) || COALESCE(e.fts, ''::tsvector))
+		       @@ websearch_to_tsquery('english', $2))
 		ORDER BY rank DESC`
+	negation := ExtractNegation(query)
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if topK > 0 {
-		rows, err = s.db.QueryContext(ctx, baseSQL+" LIMIT $2", query, topK)
+		rows, err = s.db.QueryContext(ctx, baseSQL+" LIMIT $3", query, negation, topK)
 	} else {
-		rows, err = s.db.QueryContext(ctx, baseSQL, query)
+		rows, err = s.db.QueryContext(ctx, baseSQL, query, negation)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("fts query: %w", err)

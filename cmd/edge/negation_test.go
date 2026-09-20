@@ -3,6 +3,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"ragotogar/library"
 )
 
 func TestContainsPhrase(t *testing.T) {
@@ -56,6 +58,24 @@ func TestFSTNegationDrop_MultipleTokensUnion(t *testing.T) {
 	want := map[uint32]bool{1: true, 3: true, 5: true, 10: true, 12: true}
 	if !reflect.DeepEqual(drop, want) {
 		t.Errorf("got %v, want %v", drop, want)
+	}
+}
+
+func TestFSTNegationDrop_SpacedQuery(t *testing.T) {
+	a := buildSyntheticFSTArtifacts(t, map[string][]uint32{
+		"truck":   {1},
+		"highway": {1, 2},
+	})
+	query := "highway - truck"
+	if got := library.StripNegation(query); got != "highway" {
+		t.Fatalf("embedding input = %q, want highway", got)
+	}
+	drop, err := a.FSTNegationDrop(library.ExtractNegation(query))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(drop, map[uint32]bool{1: true}) {
+		t.Fatalf("drop = %v, want only truck photo", drop)
 	}
 }
 

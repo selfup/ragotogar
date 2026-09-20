@@ -22,6 +22,11 @@ func FuzzStripExtractNegationPartition(f *testing.F) {
 		"-red",
 		`-"red truck"`,
 		"red -monochrome",
+		"highway - truck",
+		"highway -\t\n truck",
+		`highway - "red truck"`,
+		`"road - truck" -car`,
+		`"road -truck" -car`,
 		`red -monochrome -"black and white" -grayscale`,
 		`"phrase only"`,
 		"truck-driver", // compound — must NOT be split
@@ -56,16 +61,10 @@ func FuzzStripExtractNegationPartition(f *testing.F) {
 				len(posFields), len(negFields), got, want, q)
 		}
 
-		// Positive output contains no token that the parser would have
-		// classified as negation: leading-dash with len>1 (covers `-foo`
-		// and `-"foo`-prefix tokens both).
-		for _, tok := range posFields {
-			if strings.HasPrefix(tok, "-") && len(tok) > 1 && tok[1] != '-' {
-				// Allow `--foo` style — the parser sends it to negative
-				// but a future change might land it in positive; assert
-				// only the `-foo` shape that we know goes negative.
-				t.Errorf("positive contains negation-shaped token %q (q=%q, pos=%q)", tok, q, pos)
-			}
+		// Positive phrases can contain literal dashes, but no exclusions
+		// should remain outside those phrases.
+		if got := ExtractNegation(pos); got != "" {
+			t.Errorf("positive contains exclusions %q (q=%q, pos=%q)", got, q, pos)
 		}
 
 		// Idempotence: applying StripNegation twice equals applying it
@@ -89,28 +88,23 @@ func FuzzStripNegationDoesNotMangleCompounds(f *testing.F) {
 		"truck-driver",
 		"X100VI-2",
 		"black-and-white",
-		"long-exposure portrait",
-		"truck-driver -monochrome",
-		"red-shift truck-driver",
-		`"truck-driver" red`,
+		"long-exposure",
+		"red-shift",
 	}
 	for _, s := range seeds {
 		f.Add(s)
 	}
 
-	f.Fuzz(func(t *testing.T, q string) {
-		pos := StripNegation(q)
-		// Every input token without a LEADING dash must still appear in
-		// the positive output. This catches a regression where the parser
-		// might over-aggressively split internal dashes.
-		for tok := range strings.FieldsSeq(q) {
-			if strings.HasPrefix(tok, "-") {
-				continue // negation token; legitimately stripped
-			}
-			// Token has no leading dash → must survive in positive.
-			if !strings.Contains(pos, tok) {
-				t.Errorf("non-negation token %q dropped from positive (q=%q pos=%q)", tok, q, pos)
-			}
+	f.Fuzz(func(t *testing.T, word string) {
+		// Build a single positive compound followed by a spaced exclusion.
+		// Arbitrary queries cannot promise that every non-dash token survives:
+		// a term following a standalone dash now belongs to the exclusion.
+		compound := "photo-" + word
+		if strings.Contains(compound, `"`) || len(strings.Fields(compound)) != 1 || strings.TrimSpace(compound) != compound {
+			t.Skip()
+		}
+		if got := StripNegation(compound + " - truck"); got != compound {
+			t.Errorf("compound changed: got %q, want %q", got, compound)
 		}
 	})
 }

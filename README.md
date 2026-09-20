@@ -470,15 +470,21 @@ The search box parses queries as Postgres `websearch_to_tsquery` — the FTS arm
 | `red truck` | bare AND — both lexemes required, anywhere in the indexed text |
 | `"red truck"` | phrase — adjacent, in order. Use for attribute binding (`"red truck"` only matches photos whose prose has those two words next to each other; sloppy `red truck` also catches "red brake lights … truck on road"). |
 | `red OR maroon` | disjunction (uppercase `OR`; lowercase `or` is a stopword and ignored) |
-| `-truck` | exclude. Drops photos whose prose contains `truck`. |
-| `-"black and white"` | exclude phrase. Drops photos whose prose contains the adjacent phrase. |
+| `-truck` or `- truck` | exclude from every result, including all `OR` alternatives. Drops photos whose prose contains `truck`. Whitespace after the dash is optional. |
+| `-"black and white"` or `- "black and white"` | exclude phrase. Drops photos whose prose contains the adjacent phrase. |
 
 Common English stopwords (`and`, `the`, `on`, `is`, `a`, …) are dropped during parsing. So `planes AND aircraft` parses identically to `planes aircraft` — bare terms already AND by default; the literal word `AND` adds nothing.
+
+Parentheses do not group terms in `websearch_to_tsquery`. For positive constraints shared by alternatives, repeat them on each branch: `red truck OR red car`. Ragotogar applies explicit exclusions globally, so `car OR sedan -truck -suv` excludes trucks and SUVs from both branches and from vector matches.
 
 **How negation reaches the vector arm.** The embedder treats `-` as a regular token, not as Boolean NOT. Two-step fix in `library/search.go`:
 
 1. **Embed input is the positive residual.** `library.StripNegation(query)` removes `-foo` and `-"foo bar"` tokens before embedding so a query like `red truck -monochrome` doesn't bias the embedding *toward* monochrome (the original problem — `red brake lights + truck + road` B&W shots were ranking high in vector).
 2. **Post-filter on retrieval.** `library.ExtractNegation(query)` extracts the negation portion (`-monochrome -"black and white"` etc.). After cosine retrieval, vector candidates are filtered by one batched query against `descriptions.fts || exif.fts` — anything matching the negated terms is dropped before RRF fusion.
+
+Both attached and spaced exclusions are removed from embedding input and enforced by the filter. Auto mode recognizes either spelling as explicit boolean syntax and skips LLM rewriting. Dashes inside positive quoted phrases remain literal; a trailing dash without a term is not an exclusion.
+
+The FTS arm also applies the extracted exclusions as a separate SQL condition before result limits and adaptive rank filtering. This prevents an `OR` branch from reintroducing excluded photos during fusion, including when an existing auto rewrite contains ignored parentheses such as `(car OR sedan) -truck -suv`.
 
 Other operators (`OR`, positive quoted phrases) pass through unchanged to the embedder; they read as plain text and don't damage the embedding. The FTS arm sees the original query verbatim — phrase binding, OR, negation all parsed natively.
 
@@ -490,7 +496,7 @@ Other operators (`OR`, positive quoted phrases) pass through unchanged to the em
 | `"red truck" -monochrome -"black and white" -grayscale -desaturated` | Phrase binding + negation against describer vocabulary for B&W. The vector lane drops candidates whose prose contains any of those tokens. |
 | `planes "aircraft on taxiways" "aircraft on the ground" -car -vehicle -flying -"in the air"` | Two phrase bindings AND'd with bare `planes`. Excludes ground-vehicle collisions and airborne shots. |
 | `X100VI 2024 "indoor scene" -night` | Mixes `exif.fts` metadata (`X100VI`, `2024`), prose phrase, and a prose negation. |
-| `red OR maroon truck "on road"` | Either color, plus `truck`, plus the adjacent phrase `on road`. |
+| `red truck "on road" OR maroon truck "on road"` | Either color, with `truck` and the adjacent phrase `on road` required on both alternatives. |
 | `truck-driver -truck` | Compound dashed words survive — only standalone `-truck` is stripped. The embedder still sees `truck-driver`. |
 
 **What's not yet reachable:**

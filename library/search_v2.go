@@ -178,9 +178,9 @@ func (s *Searcher) SearchV2(ctx context.Context, query string, opts SearchOption
 }
 
 // SearchHybridV2 combines SearchV2's three-store vector lane with the
-// existing FTS arm via Reciprocal Rank Fusion. FTS is unchanged from v1
-// (descriptions.fts ‖ exif.fts), since Steps 1–4 left the FTS surface
-// alone per locked decision #9.
+// FTS arm via Reciprocal Rank Fusion. Both arms enforce the query's
+// explicit exclusions against descriptions.fts ‖ exif.fts before fusion,
+// including exclusions following an OR expression.
 func (s *Searcher) SearchHybridV2(ctx context.Context, query string, opts SearchOptionsV2) ([]Result, error) {
 	type lane struct {
 		results []Result

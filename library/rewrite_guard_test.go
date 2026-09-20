@@ -30,6 +30,19 @@ func rewriteServer(t *testing.T, content, finish string) *atomic.Int64 {
 	return calls
 }
 
+func TestRewritePreservesSpacedNegationWithoutLLM(t *testing.T) {
+	calls := rewriteServer(t, "highway truck", "stop")
+	for _, query := range []string{"highway - truck", "highway -\ttruck", `highway - "red truck"`} {
+		got, err := RewriteQuery(t.Context(), nil, query, "chat-model", false)
+		if err != nil || got.Rewritten != query || got.Cached {
+			t.Fatalf("boolean query changed: result=%+v err=%v", got, err)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("explicit exclusions triggered %d rewrite calls", calls.Load())
+	}
+}
+
 func TestRewriteRejectsUnsafeOutputWithoutCaching(t *testing.T) {
 	db := newTempDB(t)
 	if _, err := db.Exec(`CREATE TABLE query_rewrite_cache (

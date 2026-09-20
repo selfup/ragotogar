@@ -3,6 +3,8 @@ package library
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +27,59 @@ func seedDescription(t *testing.T, db *sql.DB, photoID, subject, fullDesc string
 		VALUES ($1, $2, $3)
 	`, photoID, subject, fullDesc); err != nil {
 		t.Fatalf("seed description %s: %v", photoID, err)
+	}
+}
+
+func TestSearchFTSExclusionsApplyAcrossOR(t *testing.T) {
+	db := newTempDB(t)
+	for _, photo := range []struct{ name, description string }{
+		{"truck", strings.Repeat("car ", 64) + "beside a pickup truck"},
+		{"suv", "A car beside an SUV."},
+		{"metadata-truck", "A car."},
+		{"car", "A car."},
+		{"sedan", "A sedan."},
+	} {
+		id := seedPhoto(t, db, photo.name)
+		seedDescription(t, db, id, photo.description, photo.description)
+	}
+	seedExif(t, db, "metadata-truck", "camera", "lens", 2024, "pickup truck")
+	var parsed string
+	if err := db.QueryRow(`SELECT websearch_to_tsquery('english', '(car OR sedan) -truck -suv')::text`).Scan(&parsed); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Postgres parses screenshot rewrite as: %s", parsed)
+	s := NewSearcher(db)
+	for _, query := range []string{
+		"(car OR sedan) -truck -suv",
+		"car OR sedan -truck -suv",
+		"car -truck OR sedan -suv",
+		`car OR sedan - "pickup truck" -suv`,
+	} {
+		for _, limits := range []struct {
+			topK int
+			rel  float64
+		}{{0, 0}, {1, 0}, {0, 1}} {
+			t.Run(fmt.Sprintf("%s/topK=%d/rel=%g", query, limits.topK, limits.rel), func(t *testing.T) {
+				got, err := s.searchFTS(t.Context(), query, limits.topK, limits.rel)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(got) == 0 {
+					t.Fatal("excluded matches displaced all eligible results")
+				}
+				for _, hit := range got {
+					if hit.Name != "car" && hit.Name != "sedan" {
+						t.Errorf("excluded photo returned: %s", hit.Name)
+					}
+				}
+				if limits.topK == 0 && limits.rel == 0 && len(got) != 2 {
+					t.Errorf("got %d results, want car and sedan", len(got))
+				}
+				if limits.topK == 1 && len(got) != 1 {
+					t.Errorf("topK=1 returned %d results", len(got))
+				}
+			})
+		}
 	}
 }
 

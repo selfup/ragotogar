@@ -166,12 +166,7 @@ func looksBoolean(q string) bool {
 	if strings.Contains(q, " OR ") || strings.HasPrefix(q, "OR ") || strings.HasSuffix(q, " OR") {
 		return true
 	}
-	for f := range strings.FieldsSeq(q) {
-		if strings.HasPrefix(f, "-") && len(f) > 1 {
-			return true
-		}
-	}
-	return false
+	return ExtractNegation(q) != ""
 }
 
 // sanitizeRewrite cleans the LLM output. The prompt asks for one-line raw
