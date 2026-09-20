@@ -61,6 +61,7 @@ var thinkBlockRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
 type config struct {
 	inputDir         string
 	inputFile        string // set when a single file is passed instead of a directory
+	resultsJSONL     string // optional saved-photo snapshots for the web controller
 	dsn              string
 	force            bool
 	dryRun           bool
@@ -136,6 +137,7 @@ func main() {
 	flag.IntVar(&cfg.previewWorkers, "preview-workers", cfg.previewWorkers, "Parallel preview (resize/extract) workers")
 	flag.IntVar(&cfg.inferenceWorkers, "inference-workers", cfg.inferenceWorkers, "Parallel LLM inference workers (default 1; bump to N to use LM Studio's --parallel N batching)")
 	flag.BoolVar(&cfg.classify, "classify", false, "Pipeline mode: classify each photo right after describing it. Failures are logged, not fatal — re-run cmd/classify to retry.")
+	flag.StringVar(&cfg.resultsJSONL, "results-jsonl", "", "Write saved description/classification snapshots as JSON Lines (optional)")
 	flag.StringVar(&cfg.classifyModel, "classify-model", library.ClassifyModel(), "LM Studio model for the inline classifier (only used with -classify)")
 	flag.Parse()
 
@@ -189,7 +191,7 @@ func initOnly(cfg config) error {
 	return nil
 }
 
-func run(cfg config) error {
+func run(cfg config) (runErr error) {
 	var files []string
 	if cfg.inputFile != "" {
 		files = []string{cfg.inputFile}
@@ -225,6 +227,15 @@ func run(cfg config) error {
 		return fmt.Errorf("open library: %w", err)
 	}
 	defer db.Close()
+	report, err := openDescribeReport(cfg.resultsJSONL)
+	if err != nil {
+		return fmt.Errorf("open results report: %w", err)
+	}
+	defer func() {
+		if err := report.close(); err != nil && runErr == nil {
+			runErr = fmt.Errorf("write results report: %w", err)
+		}
+	}()
 
 	existing, err := listExistingNames(db)
 	if err != nil {
@@ -285,6 +296,7 @@ func run(cfg config) error {
 		p := preps[i]
 		if !cfg.force && existing[p.safeName] {
 			fmt.Printf("  [skip] %s (already in DB)\n", p.safeName)
+			report.save(db, p.safeName, "skipped", nil)
 			skipped++
 			continue
 		}
@@ -379,6 +391,8 @@ func run(cfg config) error {
 					continue
 				}
 
+				report.save(db, j.safeName, "described", nil)
+
 				// Pipeline-mode classification: run the small text classifier
 				// against the prose we just wrote, in this same worker. This
 				// fills the describer's tail-end idle window with classify
@@ -390,8 +404,10 @@ func run(cfg config) error {
 					classifyStart := time.Now()
 					if err := library.ClassifyOne(context.Background(), db, j.safeName, cfg.classifyModel); err != nil {
 						fmt.Fprintf(os.Stderr, "    !! classify failed for %s: %v\n", j.safeName, err)
+						report.save(db, j.safeName, "classification failed", err)
 					} else {
 						fmt.Printf("    classify %s\n", time.Since(classifyStart).Round(time.Millisecond))
+						report.save(db, j.safeName, "classified", nil)
 					}
 				}
 
@@ -408,6 +424,9 @@ func run(cfg config) error {
 
 	fmt.Printf("\nDone. Processed: %d, Errors: %d, Skipped: %d\n", processed.Load(), errors.Load(), skipped)
 	fmt.Printf("Library: %s\n", library.MaskDSN(cfg.dsn))
+	if n := errors.Load(); n > 0 {
+		return fmt.Errorf("failed to describe %d image(s); see per-photo errors above", n)
+	}
 	return nil
 }
 

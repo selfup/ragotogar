@@ -329,12 +329,7 @@ const indexHTML = `<!doctype html>
 </html>
 `
 
-// describeHTML is the scaffold for the describe section — pick a
-// directory, models, and worker counts; submit composes the exact
-// scripts/photo_describe.sh invocation. Execution is not wired yet:
-// the page previews the command so the form plumbing (params,
-// defaults, clamping) can be validated independently of run-control
-// concerns (process lifecycle, log streaming, cancellation).
+// describeHTML launches the existing CLI and polls its latest run.
 const describeHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -364,7 +359,23 @@ const describeHTML = `<!doctype html>
     .field-row { display: flex; gap: 1.25rem; flex-wrap: wrap; }
     .toggles { display: flex; gap: 1.25rem; flex-wrap: wrap; }
     .cmd-note { color: var(--mute); font-size: 0.8rem; margin: 1.5rem 0 0.5rem; }
-    .cmd-note .scaffold { color: #c90; }
+    .error { color: #e9a18d; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .run { max-width: 72rem; margin-top: 1.5rem; }
+    .run details, .run pre.cmd { max-width: none; }
+    .run-header { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    .run-header h2 { font-size: 1rem; margin: 0; }
+    .run-header form { margin-left: auto; }
+    .run-meta { color: var(--mute); font-size: 0.8rem; }
+    .run-output { max-height: 26rem; overflow-y: auto; margin-top: 0.75rem !important; }
+    .json-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 23rem), 1fr)); gap: 1rem; }
+    .json-grid h3 { font-size: 0.85rem; font-weight: 400; color: var(--mute); }
+    .json-grid pre { max-height: 24rem; overflow: auto; }
+    .photo-result { padding-top: 0.75rem; border-top: 1px solid var(--line); }
+    .run a { color: var(--fg); }
+    details { max-width: 56rem; margin-top: 1.5rem; }
+    summary { cursor: pointer; color: var(--mute); font-size: 0.8rem; margin-bottom: 0.5rem; }
+    [hidden] { display: none !important; }
     pre.cmd {
       max-width: 56rem; margin: 0; padding: 0.85rem 1rem;
       background: #141414; border: 1px solid var(--line); border-radius: 6px;
@@ -384,13 +395,13 @@ const describeHTML = `<!doctype html>
   <main class="main">
     <h1>describe</h1>
     <p class="hint">
-      Run the vision-LLM describer over a directory of photos — EXIF, parsed
+      Describe a directory of photos or a single image — EXIF, parsed
       description fields, and a 1024px thumbnail land in the Postgres library.
-      Pick the directory, models, and worker counts; submit to preview the run.
+      Choose your models and workers, then start the run. Use dry run to list files first.
     </p>
-    <form method="GET" action="/describe">
-      <label class="field" title="Directory of photos to describe. Passed as the positional argument to cmd/describe.">
-        <span>photo directory</span>
+    <form method="POST" action="/describe">
+      <label class="field" title="A path on the machine running this server. Relative paths start at the repository root; ~/ expands to your home directory.">
+        <span>photo directory or image file</span>
         <input type="text" name="dir" value="{{.Dir}}" spellcheck="false" autofocus required
           placeholder="e.g. /Volumes/T9/X100VI/JPEG/April2026">
       </label>
@@ -422,8 +433,8 @@ const describeHTML = `<!doctype html>
           <input type="number" name="iw" min="1" max="32" value="{{.InferenceWorkers}}">
         </label>
         <label class="field" title="Max retry attempts per image on API failure. Default 3.">
-          <span>retries</span>
-          <input type="number" name="retries" min="0" max="10" value="{{.Retries}}">
+          <span>attempts per photo</span>
+          <input type="number" name="retries" min="1" max="10" value="{{.Retries}}">
         </label>
       </div>
       <div class="toggles">
@@ -436,24 +447,156 @@ const describeHTML = `<!doctype html>
           <span>dry run</span>
         </label>
         <label class="save-toggle" title="Pipeline mode: classify each photo right after describing it (uses the classifier model). Failures are logged, not fatal — re-run cmd/classify to retry.">
-          <input type="checkbox" name="class" value="1" {{if .Classify}}checked{{end}}>
+          <input id="classify-after" type="checkbox" name="class" value="1" {{if .Classify}}checked{{end}}>
           <span>classify after describe</span>
         </label>
+        <label class="save-toggle" title="Also enables classification. After describing, refresh embeddings for photos successfully classified in this run. Uses the server's embedding model and endpoint.">
+          <input id="index-after" type="checkbox" name="index" value="1" {{if .Index}}checked{{end}}>
+          <span>index after classify</span>
+        </label>
       </div>
-      <div><button type="submit">preview run</button></div>
+      <div><button id="start-run" type="submit" {{if .Busy}}disabled{{end}}>start run</button></div>
     </form>
-    {{if .DirMissing}}
-    <div class="cmd-note"><span class="scaffold">no directory</span> — enter a photo directory above to preview the run.</div>
+    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    {{with .Job}}
+    <section class="run" id="describe-run" data-run-id="{{.ID}}" data-active="{{.Active}}">
+      <div class="run-header">
+        <h2><span id="run-phase">{{.Phase}}</span>: <span id="run-status" role="status">{{.Status}}</span></h2>
+        <form method="POST" action="/describe/cancel" id="cancel-run" {{if not .Active}}hidden{{end}}>
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button type="submit" {{if eq .Status "canceling"}}disabled{{end}}>cancel run</button>
+        </form>
+      </div>
+      <p class="run-meta" id="run-time">started {{.StartedAt}}{{if .FinishedAt}} · ended {{.FinishedAt}}{{end}}</p>
+      <p class="run-meta">You can leave this page and return while the server stays running. Canceling keeps photos already saved.</p>
+      <p class="error" id="run-error" role="alert" {{if not .Error}}hidden{{end}}>{{.Error}}</p>
+      <p class="run-meta" id="log-truncated" {{if not .Truncated}}hidden{{end}}>Showing the most recent 256 KiB of output.</p>
+      <pre class="cmd run-output" id="run-output" tabindex="0" aria-label="Describe run output">{{.Output}}</pre>
+      <p class="run-meta" id="poll-error" role="status"></p>
+      <p class="error" id="results-error" {{if not .ResultsError}}hidden{{end}}>{{.ResultsError}}</p>
+      <p class="run-meta" id="results-count">{{.PhotoCount}} photo result(s); showing up to 20 most recent. Classification is null until a current result is saved.</p>
+      <p id="results-download" {{if not .PhotoCount}}hidden{{end}}><a href="/describe/results?id={{.ID}}">download all result snapshots (JSONL)</a></p>
+      <div id="photo-results">
+        {{range .Photos}}
+        <details class="photo-result" data-photo-name="{{.Name}}" open>
+          <summary>{{.Name}} · {{.Status}}</summary>
+          <p class="run-meta photo-path">{{.Path}}</p>
+          <p class="error photo-error" {{if not .Error}}hidden{{end}}>{{.Error}}</p>
+          <div class="json-grid">
+            <div><h3>description JSON</h3><pre class="cmd description-json">{{.Description}}</pre></div>
+            <div><h3>classification JSON</h3><pre class="cmd classification-json">{{.Classification}}</pre></div>
+          </div>
+        </details>
+        {{end}}
+      </div>
+      <details><summary>describe command</summary><pre class="cmd">{{.Command}}</pre></details>
+      <noscript><p class="run-meta">Reload this page to update the run status and output.</p></noscript>
+    </section>
     {{end}}
-    {{if .Command}}
-    <div class="cmd-note">
-      <span class="scaffold">scaffold</span> — execution isn't wired up yet. Run this in a terminal:
-    </div>
-    <pre class="cmd">{{.Command}}</pre>
+    {{if and .Command (not .Job)}}
+    <details><summary>command preview</summary><pre class="cmd">{{.Command}}</pre></details>
     {{end}}
+    <p class="cmd-note">Index after classify makes this run's successfully classified photos available to vector search.
+      Existing photos are skipped unless force re-describe is checked. Dry run skips classification and indexing.
+      With indexing unchecked, you can index later using <code>./scripts/index.sh</code>.</p>
     <div class="dsn-line">library: {{.DSN}}</div>
   </main>
 </div>
+<script>
+(() => {
+  const classify = document.getElementById('classify-after');
+  const index = document.getElementById('index-after');
+  index.addEventListener('change', () => { if (index.checked) classify.checked = true; });
+  classify.addEventListener('change', () => { if (!classify.checked) index.checked = false; });
+  const run = document.getElementById('describe-run');
+  if (!run || run.dataset.active !== 'true') return;
+  const output = document.getElementById('run-output');
+  const pollError = document.getElementById('poll-error');
+  const photos = document.getElementById('photo-results');
+  const cards = new Map(Array.from(photos.children, card => [card.dataset.photoName, card]));
+  function showPhotos(data) {
+    const current = new Set();
+    for (const photo of data.photos || []) {
+      current.add(photo.name);
+      let card = cards.get(photo.name);
+      if (!card) {
+        card = document.createElement('details');
+        card.className = 'photo-result';
+        card.dataset.photoName = photo.name;
+        card.open = true;
+        card.appendChild(document.createElement('summary'));
+        for (const cls of ['run-meta photo-path', 'error photo-error']) {
+          const p = document.createElement('p'); p.className = cls; card.appendChild(p);
+        }
+        const grid = document.createElement('div'); grid.className = 'json-grid';
+        for (const kind of ['description', 'classification']) {
+          const column = document.createElement('div');
+          const heading = document.createElement('h3'); heading.textContent = kind + ' JSON';
+          const pre = document.createElement('pre'); pre.className = 'cmd ' + kind + '-json';
+          column.append(heading, pre); grid.appendChild(column);
+        }
+        card.appendChild(grid); cards.set(photo.name, card);
+      }
+      card.querySelector('summary').textContent = photo.name + ' · ' + photo.status;
+      card.querySelector('.photo-path').textContent = photo.path;
+      card.querySelector('.photo-error').textContent = photo.error || '';
+      card.querySelector('.photo-error').hidden = !photo.error;
+      for (const kind of ['description', 'classification']) {
+        const pre = card.querySelector('.' + kind + '-json');
+        if (pre.textContent !== photo[kind]) pre.textContent = photo[kind];
+      }
+      photos.appendChild(card);
+    }
+    for (const [name, card] of cards) {
+      if (!current.has(name)) { card.remove(); cards.delete(name); }
+    }
+    document.getElementById('results-count').textContent = data.photo_count +
+      ' photo result(s); showing up to 20 most recent. Classification is null until a current result is saved.';
+    document.getElementById('results-download').hidden = !data.photo_count;
+    document.getElementById('results-error').textContent = data.results_error || '';
+    document.getElementById('results-error').hidden = !data.results_error;
+  }
+  async function poll() {
+    let again = true;
+    try {
+      const response = await fetch('/describe/status?id=' + encodeURIComponent(run.dataset.runId), {cache: 'no-store'});
+      if (!response.ok) {
+        if (response.status === 404) {
+          again = false;
+          document.getElementById('cancel-run').hidden = true;
+          pollError.textContent = 'This run is no longer available. Reload the page to see the latest run.';
+          return;
+        }
+        throw new Error('Status request failed (' + response.status + ')');
+      }
+      const data = await response.json();
+      const atBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 40;
+      output.textContent = data.output;
+      if (atBottom) output.scrollTop = output.scrollHeight;
+      document.getElementById('run-status').textContent = data.status;
+      document.getElementById('run-phase').textContent = data.phase;
+      showPhotos(data);
+      const started = new Date(data.started_at);
+      const end = data.finished_at ? new Date(data.finished_at) : new Date();
+      document.getElementById('run-time').textContent = 'started ' + started.toLocaleString() +
+        ' · ' + Math.max(0, Math.floor((end - started) / 1000)) + ' s elapsed';
+      document.getElementById('start-run').disabled = data.active;
+      document.getElementById('cancel-run').hidden = !data.active;
+      document.querySelector('#cancel-run button').disabled = data.status === 'canceling';
+      document.getElementById('run-error').textContent = data.error || '';
+      document.getElementById('run-error').hidden = !data.error;
+      document.getElementById('log-truncated').hidden = !data.truncated;
+      pollError.textContent = '';
+      again = data.active;
+    } catch (error) {
+      pollError.textContent = error.message + '. Retrying…';
+    } finally {
+      if (again) setTimeout(poll, 1000);
+    }
+  }
+  poll();
+})();
+</script>
 </body>
 </html>
 `

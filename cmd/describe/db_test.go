@@ -305,6 +305,19 @@ func TestInsertPhotoEmptyQueriesSkipsRow(t *testing.T) {
 	if found != 0 {
 		t.Errorf("expected 0 query_generations rows for photo with empty Queries, got %d", found)
 	}
+	// Re-describing must also remove a previous source so the indexer cannot
+	// republish queries that no longer belong to the current description.
+	if err := insertPhoto(db, "no_queries", "/p/x.JPG", exifData{}, "old desc",
+		descriptionFields{Subject: "old", Queries: []string{"old query"}}, []byte{0xff}, "m", 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertPhoto(db, "no_queries", "/p/x.JPG", exifData{}, "new desc",
+		descriptionFields{Subject: "new"}, []byte{0xff}, "m", 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM query_generations WHERE photo_id = 'no_queries'").Scan(&found); err != nil || found != 0 {
+		t.Fatalf("obsolete queries retained: count=%d err=%v", found, err)
+	}
 }
 
 func TestInsertPhotoIdempotent(t *testing.T) {

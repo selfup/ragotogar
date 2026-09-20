@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -72,11 +73,24 @@ func parseReindex(raw string) (reindexSet, error) {
 func main() {
 	var (
 		dsn         = flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
+		photosFile  = flag.String("photos-file", "", "JSON array of photo names to index; limits reindexing to these photos and disallows embedding model changes")
 		reindexFlag = flag.String("reindex", "", "comma-separated stores to re-populate: descriptions, metadata, queries. Listing all three also authorizes clearing/resizing vector stores when model identity or dimensions change (including unrecorded legacy models). Default empty (incremental skip-if-exists).")
 		workers     = flag.Int("workers", 1, "parallel batch workers. Default 1 for local LM Studio; bump to 8–16 against cloud embed endpoints.")
 		batchSize   = flag.Int("batch-size", defaultBatchSize, "maximum documents per embedding request; each chunk or query phrasing is a separate input")
 	)
 	flag.Parse()
+	var selected []string
+	if *photosFile != "" {
+		data, err := os.ReadFile(*photosFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: read photos-file: %v\n", err)
+			os.Exit(2)
+		}
+		if err := json.Unmarshal(data, &selected); err != nil || selected == nil {
+			fmt.Fprintln(os.Stderr, "Error: photos-file must be a JSON array of photo names (not null)")
+			os.Exit(2)
+		}
+	}
 
 	rs, err := parseReindex(*reindexFlag)
 	if err != nil {
@@ -84,18 +98,28 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(*dsn, rs, *workers, *batchSize); err != nil {
+	if err := runSelected(*dsn, rs, *workers, *batchSize, selected); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run(dsn string, reindex reindexSet, workers, batchSize int) error {
+	return runSelected(dsn, reindex, workers, batchSize, nil)
+}
+
+// A non-nil selection limits both reads and replacements to these photos.
+// Scoped reindexing never authorizes a library-wide embedding model switch.
+func runSelected(dsn string, reindex reindexSet, workers, batchSize int, selected []string) error {
 	if batchSize < 1 {
 		return fmt.Errorf("-batch-size must be at least 1")
 	}
 	if workers < 1 {
 		workers = 1
+	}
+	if selected != nil && len(selected) == 0 {
+		fmt.Println("No photos selected for indexing.")
+		return nil
 	}
 	dim, err := library.EmbeddingDimensions()
 	if err != nil {
@@ -121,7 +145,11 @@ func run(dsn string, reindex reindexSet, workers, batchSize int) error {
 		return err
 	}
 	defer indexLock.Rollback()
-	if err := prepareVectorStores(ctx, db, dim, reindex); err != nil {
+	schemaReindex := reindex
+	if selected != nil {
+		schemaReindex = reindexSet{}
+	}
+	if err := prepareVectorStores(ctx, db, dim, schemaReindex); err != nil {
 		return err
 	}
 
@@ -133,7 +161,8 @@ func run(dsn string, reindex reindexSet, workers, batchSize int) error {
 		SELECT p.name, COALESCE(qg.queries NOT IN ('[]'::jsonb, 'null'::jsonb), false)
 		FROM photos p
 		LEFT JOIN query_generations qg ON qg.photo_id = p.id
-		ORDER BY p.name`)
+		WHERE ($1::text[] IS NULL OR p.name = ANY($1::text[]))
+		ORDER BY p.name`, selected)
 	if err != nil {
 		return fmt.Errorf("list photos: %w", err)
 	}
@@ -154,6 +183,13 @@ func run(dsn string, reindex reindexSet, workers, batchSize int) error {
 		return fmt.Errorf("list photos: %w", err)
 	}
 	rows.Close()
+	if selected != nil {
+		for _, name := range selected {
+			if _, ok := querySources[name]; !ok {
+				return fmt.Errorf("selected photo %q is not in the library", name)
+			}
+		}
+	}
 	if len(allNames) == 0 {
 		fmt.Printf("No photos in %s. Run cmd/describe first.\n", library.MaskDSN(dsn))
 		return nil
@@ -183,7 +219,7 @@ func run(dsn string, reindex reindexSet, workers, batchSize int) error {
 	for _, n := range allNames {
 		needDesc := !descExisting[n]
 		needMeta := !metaExisting[n]
-		needQ := querySources[n] && !queriesExisting[n]
+		needQ := reindex.queries || (querySources[n] && !queriesExisting[n])
 		if needDesc || needMeta || needQ {
 			todo = append(todo, n)
 		}
@@ -317,6 +353,9 @@ queue:
 	fmt.Printf("  queries:      %d rows added, %d skipped (incl. zero-query photos), %d failed\n", queriesRows.Load(), queriesSkip.Load(), queriesFail.Load())
 	if loadFail.Load() > 0 {
 		fmt.Printf("  load errors:  %d (photo skipped entirely)\n", loadFail.Load())
+	}
+	if n := loadFail.Load() + descFail.Load() + metaFail.Load() + queriesFail.Load(); n > 0 {
+		return fmt.Errorf("indexing finished with %d failure(s); see errors above", n)
 	}
 	return nil
 }

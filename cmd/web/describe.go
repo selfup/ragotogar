@@ -4,6 +4,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -33,19 +34,16 @@ type describePageData struct {
 	Force            bool
 	DryRun           bool
 	Classify         bool
+	Index            bool
 
 	// DSN is the masked library DSN, display-only — the describer
 	// inherits the same library cmd/web is serving.
 	DSN string
-	// Command is the composed scripts/photo_describe.sh invocation.
-	// Empty until a directory is submitted. While the section is a
-	// scaffold, this preview IS the output — execution isn't wired.
+	// Command is a display-only CLI equivalent, never passed to a shell.
 	Command string
-	// DirMissing is true when the form was submitted without a
-	// directory (the `required` attribute blocks that in the browser,
-	// but URL fiddling / old bookmarks can still arrive with dir=).
-	// Renders an explicit note instead of silently doing nothing.
-	DirMissing bool
+	Error   string
+	Job     *describeRunView
+	Busy    bool
 }
 
 // describeParams is the resolved form state buildDescribeCommand
@@ -60,6 +58,8 @@ type describeParams struct {
 	force            bool
 	dryRun           bool
 	classify         bool
+	index            bool
+	resultsJSONL     string // internal report path, not supplied by the form
 }
 
 // defaultVisionModel mirrors cmd/describe's -model default.
@@ -100,7 +100,7 @@ func shellQuote(s string) string {
 	if rest, ok := strings.CutPrefix(s, "~/"); ok && rest != "" {
 		return "~/" + shellQuote(rest)
 	}
-	if !strings.ContainsAny(s, " \t'\"\\$`!*?[](){}<>;&|~#") {
+	if !strings.ContainsAny(s, " \t\r\n'\"\\$`!*?[](){}<>;&|~#") {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -110,7 +110,16 @@ func shellQuote(s string) string {
 // the form state describes. Flags are always explicit (even at their
 // defaults) so the preview is unambiguous about what would run.
 func buildDescribeCommand(p describeParams) string {
+	p.resultsJSONL = "" // internal report paths are not useful in the command preview
 	parts := []string{"./scripts/photo_describe.sh"}
+	for _, arg := range describeArgs(p) {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func describeArgs(p describeParams) []string {
+	var parts []string
 	if p.force {
 		parts = append(parts, "-force")
 	}
@@ -118,22 +127,21 @@ func buildDescribeCommand(p describeParams) string {
 		parts = append(parts, "-dry-run")
 	}
 	parts = append(parts,
-		"-model", shellQuote(p.model),
+		"-model", p.model,
 		"-preview-workers", strconv.Itoa(p.previewWorkers),
 		"-inference-workers", strconv.Itoa(p.inferenceWorkers),
 		"-retries", strconv.Itoa(p.retries),
 	)
 	if p.classify {
-		parts = append(parts, "-classify", "-classify-model", shellQuote(p.classifyModel))
+		parts = append(parts, "-classify", "-classify-model", p.classifyModel)
 	}
-	parts = append(parts, shellQuote(p.dir))
-	return strings.Join(parts, " ")
+	if p.resultsJSONL != "" {
+		parts = append(parts, "-results-jsonl", p.resultsJSONL)
+	}
+	return append(parts, "--", p.dir)
 }
 
-// serveDescribe renders the describe section. GET-only state in URL
-// params (like the search page) so a tuned form is shareable/bookmarkable.
-func serveDescribe(w http.ResponseWriter, r *http.Request, tmpl *template.Template, dsn string) {
-	q := r.URL.Query()
+func parseDescribeParams(q url.Values) describeParams {
 	dir := strings.TrimSpace(q.Get("dir"))
 	model := strings.TrimSpace(q.Get("model"))
 	if model == "" {
@@ -143,41 +151,45 @@ func serveDescribe(w http.ResponseWriter, r *http.Request, tmpl *template.Templa
 	if classifyModel == "" {
 		classifyModel = library.ClassifyModel()
 	}
-	p := describeParams{
+	return describeParams{
 		dir:              dir,
 		model:            model,
 		classifyModel:    classifyModel,
 		previewWorkers:   parseCount(q.Get("pw"), defaultPreviewWorkers, 1, 64),
 		inferenceWorkers: parseCount(q.Get("iw"), defaultInferenceWorkers, 1, 32),
-		retries:          parseCount(q.Get("retries"), defaultRetries, 0, 10),
+		retries:          parseCount(q.Get("retries"), defaultRetries, 1, 10),
 		force:            q.Get("force") == "1",
 		dryRun:           q.Get("dry") == "1",
-		classify:         q.Get("class") == "1",
+		classify:         q.Get("class") == "1" || q.Get("index") == "1",
+		index:            q.Get("index") == "1",
 	}
+}
 
+func renderDescribe(w http.ResponseWriter, tmpl *template.Template, dsn string, p describeParams, job *describeRunView, errMsg string, status int) {
 	var command string
-	if dir != "" {
+	if p.dir != "" {
 		command = buildDescribeCommand(p)
 	}
-	// First page load has no query params at all; a submit always
-	// carries them. Submitted-but-empty gets called out explicitly.
-	dirMissing := dir == "" && len(q) > 0
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	if err := tmpl.Execute(w, describePageData{
 		Active:           "describe",
-		Dir:              dir,
-		Model:            model,
-		ClassifyModel:    classifyModel,
+		Dir:              p.dir,
+		Model:            p.model,
+		ClassifyModel:    p.classifyModel,
 		PreviewWorkers:   strconv.Itoa(p.previewWorkers),
 		InferenceWorkers: strconv.Itoa(p.inferenceWorkers),
 		Retries:          strconv.Itoa(p.retries),
 		Force:            p.force,
 		DryRun:           p.dryRun,
 		Classify:         p.classify,
+		Index:            p.index,
 		DSN:              library.MaskDSN(dsn),
 		Command:          command,
-		DirMissing:       dirMissing,
+		Error:            errMsg,
+		Job:              job,
+		Busy:             job != nil && job.Active,
 	}); err != nil {
 		log.Printf("template: %v", err)
 	}

@@ -9,6 +9,8 @@ cmd/search/search
 .env
 describe_test*
 describe_*
+# The describe web controller and its tests are source, not generated output.
+!cmd/web/describe_*.go
 # Legacy local-only state from the SQLite + LightRAG era. Postgres replaces
 # both; these dirs aren't read by anything anymore but may still exist on
 # machines that ran the old pipeline. Safe to `rm -rf` whenever.

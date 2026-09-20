@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -239,7 +243,7 @@ func main() {
 	var (
 		addr     = flag.String("addr", "127.0.0.1:8080", "listen address (loopback by default; set an explicit host:port to expose on other interfaces)")
 		dsn      = flag.String("dsn", library.DefaultDSN(), "Postgres library DSN (overrides LIBRARY_DSN env var)")
-		repoRoot = flag.String("repo", ".", "repo root (where styles.css lives)")
+		repoRoot = flag.String("repo", ".", "repo root (styles.css and cmd/describe sources)")
 		edgeURL  = flag.String("edge-url", "", "cmd/edge base URL (e.g. http://localhost:8081). When non-empty, the UI shows a backend checkbox that swaps retrieval to cmd/edge. Empty = backend toggle hidden.")
 	)
 	flag.Parse()
@@ -388,9 +392,11 @@ func main() {
 			log.Printf("template: %v", err)
 		}
 	})
-	mux.HandleFunc("/describe", func(w http.ResponseWriter, r *http.Request) {
-		serveDescribe(w, r, describeTmpl, *dsn)
-	})
+	describer := newDescribeServer(absRepo, *dsn, describeTmpl)
+	defer describer.Close()
+	describeHandler := describer.handler()
+	mux.Handle("/describe", describeHandler)
+	mux.Handle("/describe/", describeHandler)
 	mux.HandleFunc("/photos/", func(w http.ResponseWriter, r *http.Request) {
 		// /photos/<name>          → HTML page
 		// /photos/<name>.jpg      → thumbnail BLOB
@@ -420,5 +426,24 @@ func main() {
 		log.Printf("edge:    not configured (backend toggle hidden); pass -edge-url to enable")
 	}
 	log.Printf("listening on http://%s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	server := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		<-ctx.Done()
+		describer.Close()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+	}()
+	err = server.ListenAndServe()
+	stop()
+	<-stopped
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("web server: %v", err)
+	}
 }

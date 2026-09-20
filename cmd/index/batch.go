@@ -70,9 +70,10 @@ func indexStoreBatch(ctx context.Context, db *sql.DB, store documentStore, photo
 			return nil, err
 		}
 		start, end := offsets[i], offsets[i+1]
-		if results[i].err != nil || start == end {
+		if results[i].err != nil {
 			continue
 		}
+		// A forced refresh with no source documents removes obsolete rows too.
 		results[i].added, results[i].err = store.write(ctx, db, photo.Name, texts[start:end], vectors[start:end])
 	}
 	return results, nil

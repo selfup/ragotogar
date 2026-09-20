@@ -86,6 +86,9 @@ func writeMetadata(ctx context.Context, db *sql.DB, photoID string, texts []stri
 	); err != nil {
 		return 0, fmt.Errorf("delete existing metadata row: %w", err)
 	}
+	if len(texts) == 0 {
+		return 0, tx.Commit()
+	}
 	vec := pgvector.NewHalfVector(embeddings[0])
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO photo_metadata

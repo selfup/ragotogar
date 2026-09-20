@@ -155,6 +155,7 @@ The Subject field demands both nouns AND verbs ("single-engine propeller airplan
 | `-init-only` | Open the DB, apply the schema, and exit (used by `scripts/bootstrap.sh`) |
 | `-model NAME` | LM Studio model name (default: `qwen/qwen3-vl-8b` or `LM_MODEL` env) |
 | `-dry-run` | List files without calling the LLM or touching the DB |
+| `-results-jsonl FILE` | Optional JSON Lines report of saved description/classification snapshots. Used by the web UI for live results and selecting successfully classified photos for indexing. |
 | `-retries N` | Max retry attempts per image on API failure (default: 3) |
 | `-preview-workers N` | Parallel ImageMagick/exiftool workers for preview generation (default: 4) |
 | `-inference-workers N` | Parallel LLM inference workers (default: 1). Bump to N to use LM Studio's `--parallel N` continuous batching. Vision inference is more memory-intensive than text — start at 2–4 and watch VRAM/error rate before going higher. |
@@ -194,7 +195,7 @@ The Subject field demands both nouns AND verbs ("single-engine propeller airplan
 | `classify_filter_cache` | Persistent drop-verdict cache for the post-retrieval classifier filter. Keyed on `(nl_query, photo_id, classify_model)`; `filtered_at > classified.classified_at` is the freshness check. **Opt-in** via the `save classifier filter` checkbox (v11). |
 | `schema_version` | Single-row marker for migrations |
 
-`cmd/describe` owns `photos / exif / descriptions / inference / thumbnails / query_generations`; the indexer (`cmd/index`) owns the three vector stores. Re-describing a photo overwrites the describer's tables but leaves existing embeddings alone; use `./scripts/index.sh -reindex=descriptions,metadata,queries` to refresh previously populated stores.
+`cmd/describe` owns `photos / exif / descriptions / inference / thumbnails / query_generations`; the indexer (`cmd/index`) owns the three vector stores. Re-describing a photo overwrites the describer's tables but leaves existing embeddings alone; use `./scripts/index.sh -reindex=descriptions,metadata,queries` to refresh previously populated stores. If the new description omits generated queries, its old query source is removed and the subsequent query-store reindex clears the obsolete vectors.
 
 **Upgrading an existing library to query isolation (v15):**
 
@@ -355,6 +356,7 @@ Stop existing index/search processes when switching the library to a different e
 - Indexing sends up to 10 separate texts in each embedding request. Each description chunk, metadata document, or query phrasing counts as one input. Workers load windows of up to `-batch-size` photos, batch each store independently, and flush partial requests at each window's end. Texts are never concatenated, and each photo/store is replaced atomically only after all its embeddings succeed. `-workers` limits concurrent batch workers (default 1); `scripts/full_run.sh` exposes these controls as `INDEX_BATCH_SIZE` (default 10) and `INDEX_WORKERS` (default 1).
 - HNSW index on `embedding halfvec_cosine_ops` — cosine is the metric, `<=>` is the distance operator. Both supported models use halfvec, whose HNSW limit is 4000 dimensions; the `vector` type's 2000-dimension HNSW limit would exclude the 2560-dimensional 4B model.
 - Re-indexing is incremental by default per store (skips photos that already have rows at the current `schema_version`). Use `-reindex=descriptions[,metadata,queries]` to invalidate a subset before re-populating.
+- `-photos-file FILE` limits indexing to a JSON array of photo names. An empty array does no work; null is rejected. Combine with `-reindex=descriptions,metadata,queries` to refresh only those photos, including removal of obsolete vectors when source text is now empty. A scoped run cannot change the library's embedding model/dimensions or clear other photos' vectors. Per-photo failures produce a nonzero exit after the remaining work finishes.
 - On restart, description/metadata/query progress counters start at zero and count rows added in that invocation. Already-committed stores are skipped. An absent or empty generated-query source does not queue a photo solely for its empty query store; a later describe run that supplies phrasings makes it eligible. Restarting with `-reindex` forces the listed stores again; omit it when resuming an incremental run.
 - Per-photo similarity in `photo_descriptions` / `photo_queries` = `MAX(1 - (embedding <=> $1))` over the photo's rows (best chunk / best phrasing wins). `photo_metadata` is one row per photo so MAX collapses trivially. Merge step combines the per-store similarities per the chosen strategy (max for union, mean for intersect, weighted-sum for weighted).
 - Use the same `EMBED_MODEL` and dimension settings for indexing and search. Qwen3-Embedding-0.6B IDs automatically select 1024 dimensions, including MLX `qwen3-embedding-0.6b-dwq` and GGUF paths. A model change, dimension change, or existing vectors with no recorded model requires `-reindex=descriptions,metadata,queries`. The indexer probes one embedding, then clears all derived vectors and records the new identity in one transaction, resizing columns/HNSW indexes when needed. Failures roll back the vectors and identity together. Source records are preserved. A server returning the wrong dimension stops the run immediately. One index process per database is allowed; `-workers` supplies concurrency within that process.
@@ -375,13 +377,23 @@ Browser UI sitting on top of the Postgres library. Type a query, get a grid of m
 
 Then open `http://localhost:8080`.
 
+The **describe** section runs the existing describer from the browser. Enter a directory or a single image path on the server's machine, choose models and workers, and click **start run**. `~/` expands to the server user's home directory; relative paths resolve from `-repo`. **Dry run** lists selected files without model calls or database writes and skips classification/indexing. Force re-describe and inline classification use the same CLI behavior.
+
+Output updates live. One run can be active per web server; leaving the page does not interrupt it, and returning restores its settings and output. **Cancel run** stops the process and image tools, preserving photos already committed. Normal server shutdown also cancels it. Only the latest run and its most recent 256 KiB of output are retained in memory; restarting the web server clears this history. Start/cancel are POST-only with cross-origin request protection. Execution requires macOS or Linux, Go, exiftool, curl, and ImageMagick on the server's PATH. The describer inherits the web server's selected DSN and model endpoint environment.
+
+**Index after classify** also enables classification. After the describe/classify stage, it refreshes all three vector stores only for photos successfully classified in that run, using the server's `EMBED_MODEL`, `EMBED_DIM`, and `EMBED_ENDPOINT`. Unrelated photos are untouched; a model mismatch fails without authorizing a library-wide rebuild. Existing photos skipped by the describer are not reclassified or indexed; use **force re-describe** to process them again. The phase indicator switches to **index**, and cancellation works during either stage.
+
+Each saved photo shows formatted **description JSON** and **classification JSON**, updated live. These are snapshots of the stored fields, not raw model responses. Classification is null until its saved result is at least as recent as the description; a failed reclassification cannot display an older classification as current. The page keeps the latest 20 photo snapshots; **download all result snapshots (JSONL)** includes every described/classified/skipped record for the latest run. Temporary reports are removed when replaced by a new run or during normal server shutdown.
+
+Describe and index failures show **failed** with details in the output. Inline classifier failures remain nonfatal, appear beside that photo's JSON, and exclude the photo from automatic indexing. Successfully classified photos can still be indexed if another photo fails. With automatic indexing unchecked, run `./scripts/index.sh` for new photos or `./scripts/index.sh -reindex=descriptions,metadata,queries` to refresh existing embeddings. Use the same library DSN and embedding settings as search; rebuild edge artifacts if used.
+
 **Options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-addr` | `127.0.0.1:8080` | Listen address (loopback by default; set an explicit `host:port` to expose on other interfaces) |
 | `-dsn` | `postgres:///ragotogar` | Postgres library DSN (overrides `LIBRARY_DSN` env) |
-| `-repo` | `.` | Repo root (where `styles.css` lives) |
+| `-repo` | `.` | Repo root (`styles.css`, describer sources, and base for relative photo paths) |
 | `-edge-url` | empty | Edge server base URL (e.g. `http://127.0.0.1:8081`); enables the backend checkbox. Postgres remains the default. |
 
 **Experimental edge backend:** Start the artifact builder and edge server
@@ -410,6 +422,11 @@ If `open` can't resolve the configured name, the error ("Unable to find applicat
 |-------|----------|
 | `GET /` | Search box + a four-pill mode toggle + result grid |
 | `GET /?q=<query>&mode=<mode>` | Calls `library.Searcher` in-process — `SearchV2` for vector modes (per-store toggles + merge strategy), `SearchHybridV2` for FTS+vector modes, `VerifyFilterV2` when the mode includes verify. Returns the matching photo names, validated against `photos.name`, then rendered as a thumbnail grid. |
+| `GET /describe` | Describe form and latest run's settings, state, and output. GET query parameters can prefill the form without starting work. |
+| `POST /describe` | Validate the form and launch `go run .` in `cmd/describe` with literal arguments, then redirect to the run page. Returns 409 if another run is active. |
+| `GET /describe/status?id=<run-id>` | JSON snapshot for live polling; 404 when that run is no longer retained. |
+| `GET /describe/results?id=<run-id>` | Download the latest run's complete JSONL result report. |
+| `POST /describe/cancel` | Cancel the matching run (`id` form field), including child processes, then redirect to the run page. |
 | `GET /photos/<name>` | HTML page rendered from a Go template against the photos / exif / descriptions / inference tables. Uses the cashier design system (hero / dual-pillars / built photo-meta sections). Three buttons under the hero figure (DxO PhotoLab / Capture One / Reveal in Finder) `fetch()` the open route below. |
 | `GET /photos/<name>.jpg` | Streams the thumbnail BLOB from `thumbnails.bytes` with `Content-Type: image/jpeg` and `Cache-Control: max-age=86400` |
 | `POST /photos/<name>/open?app=<dxo\|c1\|finder>` | Looks up `photos.file_path`, verifies the file is still on disk, then shells out to `/usr/bin/open -a "<AppName>" <path>` (or `open -R <path>` for `finder`). App names resolve via `DXO_APP_NAME` / `CAPTUREONE_APP_NAME` env vars; `open`'s error (e.g. "Unable to find application named 'DxO PhotoLab 9'") surfaces back to the UI as plain-text 500 so a stale env var is obvious. POST-only so a stray `<a href>` or link prefetch can't trigger a launch. macOS only — `cmd/web` must be running on the same Mac as the original files. |

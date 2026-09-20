@@ -602,10 +602,10 @@ func insertPhoto(
 
 	// query_generations is the source-of-truth for the LLM-generated search
 	// phrasings emitted by the v12 combined-call describer. Empty queries
-	// (parse failed, or model omitted the section) skip the write — Step 4's
-	// indexer treats absence as "no photo_queries rows for this photo,"
-	// resumable on next describe. Per spec: never store empty/broken JSON
-	// silently; the caller logs a warning when fields.Queries is empty.
+	// (parse failed, or model omitted the section) leave no source row, including
+	// on re-describe, so a subsequent reindex cannot reuse obsolete queries.
+	// Never store empty/broken JSON silently; the caller logs a warning when
+	// fields.Queries is empty.
 	if len(fields.Queries) > 0 {
 		queriesJSON, err := json.Marshal(fields.Queries)
 		if err != nil {
@@ -623,6 +623,8 @@ func insertPhoto(
 		`, name, queryGenerationsSchemaVersion, model, describePromptHash, queriesJSON); err != nil {
 			return fmt.Errorf("upsert query_generations: %w", err)
 		}
+	} else if _, err := tx.Exec("DELETE FROM query_generations WHERE photo_id = $1", name); err != nil {
+		return fmt.Errorf("clear obsolete query_generations: %w", err)
 	}
 
 	if _, err := tx.Exec(`
