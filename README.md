@@ -51,6 +51,7 @@ Steps are independent — you can run search without ever organizing, or describ
 | Vector Search | `cmd/search` | pgvector cosine similarity across the three stores merged per `-merge-strategy=union/intersect/weighted`; optional LLM verify pass with text composition mirroring the per-store toggles |
 | Web Server | `cmd/web` | Search UI + per-photo HTML pages rendered on-demand from SQL; thumbnail BLOBs streamed from SQL |
 | Experimental edge search | `cmd/edge_build`, `cmd/edge` | Export static search artifacts from Postgres and serve retrieval from memory-mapped files; optional web backend. See [EDGE.md](EDGE.md) for setup and search limitations. |
+| Replica proxy | `cmd/replica` | Round-robin llama.cpp proxy with optional local process supervision; launch with `scripts/replica.sh`. |
 | Cashier (markdown) | `cmd/cashier` | General-purpose markdown → HTML renderer with the cashier design system. Not in the photo pipeline; kept for ad-hoc use. |
 | Prompt templates | `prompts/` | LLM prompt templates embedded into binaries via `//go:embed`. `query.md` (auto-mode NL→boolean rewrite, used by `library.RewriteQuery`); `classify_filter.md` (post-retrieval drop oracle, used by `library.FilterByClassification`). Edit these files; the next build picks up changes. |
 | Search playbook | `skills/search_skill.md` | Human-facing guide for writing effective queries — operators, patterns (phrase binding, vocabulary stacking), tuning thresholds, anti-patterns. Pair to the README's Query syntax reference. |
@@ -362,6 +363,72 @@ Stop existing index/search processes when switching the library to a different e
 - Use the same `EMBED_MODEL` and dimension settings for indexing and search. Qwen3-Embedding-0.6B IDs automatically select 1024 dimensions, including MLX `qwen3-embedding-0.6b-dwq` and GGUF paths. A model change, dimension change, or existing vectors with no recorded model requires `-reindex=descriptions,metadata,queries`. The indexer probes one embedding, then clears all derived vectors and records the new identity in one transaction, resizing columns/HNSW indexes when needed. Failures roll back the vectors and identity together. Source records are preserved. A server returning the wrong dimension stops the run immediately. One index process per database is allowed; `-workers` supplies concurrency within that process.
 - Model identity uses the exact `EMBED_MODEL` string. Changing aliases requires a full reindex even if they refer to the same weights. Replacing weights behind an unchanged alias cannot be detected; use a new model ID or explicitly rebuild all stores in that case. Edge builds check `-embed-model` against the recorded identity before writing artifacts.
 - **Requirements:** Postgres + pgvector (`./scripts/bootstrap.sh`), LM Studio with an embedding model loaded, a populated library (run `cmd/describe` first)
+
+## Replica proxy (`cmd/replica`)
+
+One endpoint in front of two (or more) llama.cpp instances. By default it forwards
+requests to existing servers without owning their processes:
+
+```bash
+./scripts/replica.sh \
+  -listen 127.0.0.1:1234 \
+  -backends http://127.0.0.1:1235,http://127.0.0.1:1236
+```
+
+To start both servers with the proxy, use `-spawn` and a GGUF path. Arguments
+after `--` are passed literally to every llama-server; the supervisor supplies
+`--model`, `--host`, and `--port`. For example, using the existing embedding
+launcher's settings:
+
+```bash
+./scripts/replica.sh -spawn \
+  -model "$HOME/.lmstudio/models/Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q4_K_M.gguf" \
+  -- --embedding --parallel 10 --ctx-size 10240 \
+     --batch-size 16384 --ubatch-size 16384 -ngl 99
+```
+
+The default managed ports are 1235 and 1236, with the proxy on 1234. Use
+`-llama-server /path/to/llama-server` to select the executable. Managed backends
+must use HTTP, literal loopback IP addresses, explicit ports, and no base path.
+Every replica receives the same model and arguments; separate GPU placement or
+different per-replica settings can be configured with externally launched servers.
+Embedding replicas must serve the same model and dimensions as the library.
+Each process allocates its own inference resources; additional replicas do not
+guarantee higher throughput on a shared GPU.
+
+The supervisor logs its PID and each child PID, reserves all configured ports
+before launching, and waits for every child's `/health` to return 200 before
+serving requests (see the [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)). `-startup-timeout` defaults to `5m`. Startup failure or an
+unexpected child exit stops the managed group and exits nonzero; there is no
+automatic restart. Port reservations are released at launch, leaving a small
+window where another process could bind the same port.
+
+Press Ctrl-C in the launch terminal, or send SIGTERM to the logged **supervisor
+PID**. With `go run`, that is the running program's PID, not the Go tool or shell
+wrapper PID. Shutdown drains active requests for `-shutdown-timeout` (default
+`30s`), then cancels any remainder. It sends SIGTERM to owned process groups,
+allows a second grace period of the same duration, then SIGKILLs remaining group
+members and reaps direct children. Proxy-only mode leaves external servers
+running. SIGKILL or a host crash cannot run this cleanup.
+
+Requests use atomic round-robin selection and pooled connections. Paths, query
+parameters, bodies, authorization headers, and streamed responses pass through.
+There is no request-body, response-header, or response-write timeout, so large
+embedding batches can complete; incoming headers have a 30-second timeout.
+Backend connection errors return 502 without replaying the request. Backend HTTP
+errors pass through. There is no ongoing health-based routing or session affinity.
+
+Point the pipeline at the proxy with `EMBED_ENDPOINT=http://127.0.0.1:1234` and
+the existing `EMBED_MODEL`/`EMBED_DIM`. For a remote host, forward this loopback
+port over SSH; replica ports can stay local. The proxy adds no authentication.
+This command belongs to the root Go module and runs with `go run ./cmd/replica`;
+managed process groups require macOS or Linux. Tests use mock HTTP servers and
+child processes, with no model downloads or GPU inference:
+
+```bash
+go test -race ./cmd/replica
+go vet ./cmd/replica
+```
 
 ## Web Server (`cmd/web`)
 

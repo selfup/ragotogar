@@ -92,6 +92,35 @@ The shared negation parser accepts optional whitespace after the dash (`-truck` 
 
 ---
 
+## Replica endpoint (implemented)
+
+`cmd/replica` is an optional HTTP round-robin proxy between the pipeline's
+configured model endpoint and multiple llama.cpp instances. It belongs to the
+root Go module and introduces no database schema or ingestion phase. For
+embeddings, point `EMBED_ENDPOINT` at the proxy and retain the library's recorded
+model and dimension settings. All replicas must serve compatible embeddings.
+
+Proxy-only mode forwards to externally managed HTTP(S) backends. `-spawn`
+starts one local llama-server per configured loopback URL, using a shared GGUF
+model and literal CLI arguments. It reserves ports before launch, records child
+PIDs, isolates Unix process groups, and waits for all `/health` endpoints to
+return 200 before serving. Startup has a bounded timeout; a failed launch or
+unexpected child exit terminates the managed group rather than continuing with
+a broken round-robin slot. No automatic restart or ongoing health routing is
+implemented. Reservations must be released for each child to bind, so they do
+not eliminate concurrent external port-binding races.
+
+SIGINT/SIGTERM drains HTTP requests for a bounded grace period, cancels remaining
+requests, then sends SIGTERM to owned groups followed by SIGKILL after the child
+grace period. Direct children are reaped. External servers are never signaled.
+The supervisor PID is logged because `go run` also has a separate tool process.
+
+Pooled backend connections and immediate streaming support long embedding or
+generation requests without response timeouts. Routing is per request, without
+session affinity or inference retries; transport failures return 502. This is
+deployment plumbing, not a guarantee of throughput improvement on a shared GPU.
+See README for launch commands and operational limits.
+
 ## Remaining limitations
 
 The three vector stores remain shared across the library in `public`. The roadmap focuses on photo identity and search filters. Library analysis reports are available through `cmd/analyze`.
