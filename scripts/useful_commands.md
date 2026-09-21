@@ -6,6 +6,18 @@ EMBED_MODEL="text-embedding-qwen3-embedding-0.6b" EMBED_DIM=1024 ./scripts/web.s
 
 EMBED_MODEL="text-embedding-qwen3-embedding-0.6b" EMBED_DIM=1024 ./scripts/web.sh
 
+### When hitting replicas
+
+```bash
+EMBED_ENDPOINT=http://127.0.0.1:1234 \
+EMBED_MODEL=qwen3-embedding-0.6b \
+EMBED_DIM=1024 \
+  ./scripts/index.sh \
+  -workers 8
+  -batch-size 50 \
+  -reindex=descriptions,metadata,queries
+```
+
 ### Replica on host
 
 ```bash
