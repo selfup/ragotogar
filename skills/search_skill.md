@@ -2,7 +2,7 @@
 
 How to write effective queries against the ragotogar photo library.
 
-Companion reference to the [Query syntax](../README.md#query-syntax) section in the README — that's the operator manual; this is the playbook.
+Companion to the [query syntax reference](../docs/REFERENCE.md#query-syntax) — that's the operator manual; this is the playbook.
 
 ## Pick the right mode
 
@@ -30,8 +30,8 @@ Companion reference to the [Query syntax](../README.md#query-syntax) section in 
 | `red truck` | bare AND — both lexemes required, anywhere in indexed text |
 | `"red truck"` | phrase — adjacent in order. **Use for attribute binding.** |
 | `red OR maroon` | disjunction (uppercase `OR`; lowercase `or` is a stopword) |
-| `-truck` | exclude photos whose prose stem-matches `truck` |
-| `-"black and white"` | exclude phrase |
+| `-truck` or `- truck` | exclude photos whose prose or EXIF stem-matches `truck` |
+| `-"black and white"` or `- "black and white"` | exclude phrase |
 
 Stopwords (`AND`, `the`, `on`, `is`, `a`, …) are silently dropped during parsing. `planes AND aircraft` is identical to `planes aircraft` — bare terms already AND.
 
@@ -111,7 +111,7 @@ For the typical "photos of X doing Y, not Z":
 
 ## Anti-patterns
 
-- **Don't rely on `-` alone as a token.** `red truck -` won't parse as a negation — the dash with no following term is left untouched. Negation needs `-term` or `-"phrase"`, no space after the dash.
+- **Don't rely on `-` alone as a token.** `red truck -` won't parse as a negation — the dash with no following term is left untouched. Negation needs a following term or phrase; whitespace after the dash is allowed.
 - **Don't quote single words.** `-"flying"` is identical to `-flying` — phrase semantics need 2+ tokens.
 - **Don't expect `vector` mode to honor quotes.** Pure vector embedding doesn't parse phrase syntax. Use `FTS+vector` modes for boolean.
 - **Don't conflate `cosine ≥` with `fts ≥`.** Same control type, different semantics — flat vs. adaptive. Doubling one doesn't double the other's effect.

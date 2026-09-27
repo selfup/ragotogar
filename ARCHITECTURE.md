@@ -119,7 +119,7 @@ Pooled backend connections and immediate streaming support long embedding or
 generation requests without response timeouts. Routing is per request, without
 session affinity or inference retries; transport failures return 502. This is
 deployment plumbing, not a guarantee of throughput improvement on a shared GPU.
-See README for launch commands and operational limits.
+See the [replica reference](docs/REFERENCE.md#replica-proxy) for launch commands and operational limits.
 
 ## Remaining limitations
 
@@ -197,7 +197,7 @@ These need to be pinned down before each relevant phase. Flagged with the phase 
 
 The three-store split shipped in migrations v12 (tables) + v13 (`descriptions.mood` column). v15 enforces query isolation: the complete combined vision response lives in `inference.raw_response`, while `descriptions.full_description` contains scene prose with `Queries` sections removed. Field parsing and query removal share a section-header parser. `BuildDescriptionDocument` also strips query sections from legacy inputs, protecting both embeddings and verifier text before migration.
 
-For existing libraries, v15 preserves the raw response and cleans affected descriptions in one transaction, which recomputes their generated FTS vectors. It invalidates those photos' description embeddings and verifier cache entries. Metadata/query embeddings and raw query-generation records remain intact during this migration. An incremental index run fills missing descriptions when model identity is already recorded; older libraries without recorded identity need one full reindex as described below. Stop pipeline processes for the migration/reindex and rebuild any sealed edge artifacts afterward. See README's upgrade commands. This is a repair of the three-store boundary, with no roadmap phase change.
+For existing libraries, v15 preserves the raw response and cleans affected descriptions in one transaction, which recomputes their generated FTS vectors. It invalidates those photos' description embeddings and verifier cache entries. Metadata/query embeddings and raw query-generation records remain intact during this migration. An incremental index run fills missing descriptions when model identity is already recorded; older libraries without recorded identity need one full reindex as described below. Stop pipeline processes for the migration/reindex and rebuild any sealed edge artifacts afterward. See the [v15 upgrade commands](docs/REFERENCE.md#upgrading-to-v15). This is a repair of the three-store boundary, with no roadmap phase change.
 
 Incremental indexing queues missing query embeddings only when source phrasings exist in `query_generations`. Photos with no generated queries can finish their available stores without being revisited solely for the empty query store on every restart. Source availability is checked on each run, so newly generated phrasings are picked up automatically. Progress reports rows added during that invocation.
 
@@ -300,6 +300,6 @@ The rewrite cache table (already in v10) has the right shape — extension is in
 - `vocabulary`: scene-prose and EXIF FTS lexemes ranked by distinct photo count.
 - `classifier-review`: photos with missing, stale, or uncertain classifications, with explicit reasons. These are review signals; semantic disagreement detection remains unimplemented.
 
-All reports support exact camera and year filters, optional row limits with explicit truncation, query timeouts, and Markdown or JSON output. Missing metadata remains visible as null groups. Queries run in read-only transactions without LLM calls or vector access. No schema changes or ingestion steps are needed. See README for command examples and output semantics.
+All reports support exact camera and year filters, optional row limits with explicit truncation, query timeouts, and Markdown or JSON output. Missing metadata remains visible as null groups. Queries run in read-only transactions without LLM calls or vector access. No schema changes or ingestion steps are needed. See the [analysis reference](docs/REFERENCE.md#library-analysis) for command examples and output semantics.
 
 A web dashboard consuming these reports is a possible future UI; the current implementation is CLI-only.

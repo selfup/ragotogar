@@ -25,7 +25,7 @@ coexist; Postgres remains the default in `cmd/web` and the only backend in
 After upgrading a library to v15 query isolation, rerun `cmd/edge_build` after
 the description embeddings have been reindexed, then restart `cmd/edge`.
 Existing sealed artifacts still contain the old description vectors and FTS
-postings, including generated-query text. See README's v15 upgrade commands;
+postings, including generated-query text. See the [v15 upgrade commands](docs/REFERENCE.md#upgrading-to-v15);
 the database migration cannot repair artifacts already written to disk.
 
 ## Roles (kept separate)
